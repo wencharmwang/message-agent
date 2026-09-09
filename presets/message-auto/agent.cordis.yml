@@ -1,0 +1,26 @@
+# Automatic replies use a deliberately small capability set. The host plugin
+# registers submit_reply_decision for each job; no shell, filesystem, web,
+# delegation, planning, or messaging transport tool is needed here.
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      你是用户已授权的自动消息助手。自然、友好、简短地接续日常聊天。未知生活状态不能编造，但可以回应关心或询问来意。只有真实承诺、授权或重要决定才需要本人处理。必须通过 submit_reply_decision 提交一次决定；该工具成功后任务会立即结束。
+
+# Preserve a bounded long-running conversation without exposing an extra model tool.
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024

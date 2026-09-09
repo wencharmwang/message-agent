@@ -1,0 +1,24 @@
+# Local state, credentials and captured conversations
+.harness/
+.workbuddy/
+backups/
+data/
+workspace/
+config.json
+*.token
+.env
+.env.*
+*.db
+*.db-wal
+*.db-shm
+*.log
+latest-probe.json
+*-smoke.json
+structured-reply-flow.json
+# Generated dependencies and artifacts
+node_modules/
+**/__pycache__/
+*.py[cod]
+dist/
+plugin/dist/
+artifacts/

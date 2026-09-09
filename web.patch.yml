@@ -1,0 +1,18 @@
+- id: agent-presets
+  config:
+    default: message-agent
+    roots:
+      - path: !!js process.env.MESSAGE_AGENT_ROOT + '/presets'
+        trust: system
+    includeShippedRoot: true
+    includeUserRoot: true
+- id: permission
+  config:
+    presets:
+      read-only: {sandbox: read-only, approval: ask}
+      workspace-write: {sandbox: workspace-write, approval: ask}
+      danger-full-access: {sandbox: danger-full-access, approval: never}
+      message-auto: {sandbox: read-only, approval: never, name: '自动消息任务'}
+- insert:
+    - id: messaging-agent-ui
+      name: './plugin/index.mjs'

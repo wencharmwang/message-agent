@@ -1,0 +1,66 @@
+"""Generate deployment composition from the installed Harness preset."""
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+TARGET = Path(r'C:\Users\Wencharm\Documents\projects\message-agent')
+RUNTIME = Path(r'C:\Users\Wencharm\Documents\projects\messaging-runtime')
+
+AUTO_PRESET = """# Automatic replies use only the decision tool registered by plugin/index.mjs.
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      你是用户已授权的自动消息助手。自然、友好、简短地接续日常聊天。未知生活状态不能编造，但可以回应关心或询问来意。只有真实承诺、授权或重要决定才需要本人处理。必须通过 submit_reply_decision 提交一次决定；该工具成功后任务会立即结束。
+
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+"""
+
+config = json.loads((RUNTIME/'.runtime-data/auto-reply/config.json').read_text(encoding='utf-8-sig'))
+config.update(harness_port=3080, agent_workspace=str(TARGET/'workspace'), response_timeout_seconds=180,
+              database=str(TARGET/'data/reply.db'), worker_token_file=str(TARGET/'data/worker.token'),
+              control_token_file=str(TARGET/'data/control.token'), harness_home=str(TARGET/'.harness'),
+              max_tokens=4096, auto_reasoning_effort='low')
+(ROOT/'config.json').write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding='utf-8')
+
+# Preserve the reviewed lightweight preset instead of copying the coding preset.
+interactive = (ROOT/'presets/message-agent/agent.cordis.yml').read_text(encoding='utf-8')
+
+for name, text in [('message-agent', interactive), ('message-auto', AUTO_PRESET)]:
+    directory = ROOT/'presets'/name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory/'agent.cordis.yml').write_text(text, encoding='utf-8')
+
+(ROOT/'web.patch.yml').write_text('''- id: agent-presets
+  config:
+    default: message-agent
+    roots:
+      - path: !!js process.env.MESSAGE_AGENT_ROOT + '/presets'
+        trust: system
+    includeShippedRoot: true
+    includeUserRoot: true
+- id: permission
+  config:
+    presets:
+      read-only: {sandbox: read-only, approval: ask}
+      workspace-write: {sandbox: workspace-write, approval: ask}
+      danger-full-access: {sandbox: danger-full-access, approval: never}
+      message-auto: {sandbox: read-only, approval: never, name: '自动消息任务'}
+- insert:
+    - id: messaging-agent-ui
+      name: './plugin/index.mjs'
+''', encoding='utf-8')
