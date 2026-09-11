@@ -9,6 +9,12 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
     if(!response.ok){const error=Error(result.error||'操作没有完成，请稍后再试');error.code=result.code;throw error;}
     return result;
   }
+  async function mutate(path,method,data){
+    const response=await fetch('/message-agent/api/'+path,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(data||{})});
+    const result=await response.json().catch(()=>({}));
+    if(!response.ok){const error=Error(result.error||'操作没有完成，请稍后再试');error.code=result.code;throw error;}
+    return result;
+  }
   async function loadInbox(signal){
     const items=[];let cursor='';
     for(let page=0;page<20;page++){
@@ -71,7 +77,8 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
     today:'M4.2 4.5h11.6a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4.2a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Zm2.5 5.7 1.5 1.5 2.9-2.9',
     contacts:'M10 9.3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 6.2c0-2.2 2.7-3.7 6-3.7s6 1.5 6 3.7',
     automation:'M11.2 3 5.2 11h3.9l-1.1 6 6-8h-3.9l1.1-6Z',
-    settings:'M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm0-9.2v1.9m0 9.6v1.9M17.2 10h-1.9M4.7 10H2.8M15.1 4.9l-1.3 1.3M6.2 13.8l-1.3 1.3M15.1 15.1l-1.3-1.3M6.2 6.2 4.9 4.9'
+    settings:'M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm0-9.2v1.9m0 9.6v1.9M17.2 10h-1.9M4.7 10H2.8M15.1 4.9l-1.3 1.3M6.2 13.8l-1.3 1.3M15.1 15.1l-1.3-1.3M6.2 6.2 4.9 4.9',
+    context:'M4 3.5h5.5L11 5l1.5-1.5H16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-4.5L10 15.5 8.5 16.5H4a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1Z'
   };
   function Icon({name,size=18}){
     return h('svg',{width:size,height:size,viewBox:'0 0 20 20','aria-hidden':'true',focusable:'false',
@@ -613,6 +620,145 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
             h('span',{style:{color:C.text2}},' · '+firstLine(job.text||job.detail||'',70)))))));
   }
 
+  // ---- 回复配置：说话方式 + 产品与政策 ----------------------------------------
+  const PROFILE_STATUS={draft:'草稿',active:'使用中',retired:'已停用'};
+  const KNOWLEDGE_STATUS={draft:'草稿',published:'已发布',retired:'已停用'};
+  const KNOWLEDGE_KINDS=[['faq','常见问题'],['product_usage','产品说明'],['policy','政策规则'],['playbook','话术流程'],['other','其他']];
+  const KNOWLEDGE_RISK=[['low','低风险'],['medium','中风险'],['high','高风险']];
+  function toLines(text){return String(text||'').split('\n').map(part=>part.trim()).filter(Boolean);}
+
+  function ProfileForm({initial,onDone,onCancel}){
+    const [name,setName]=useState(initial?.name||''),[address,setAddress]=useState(initial?.rules?.addressRule||'');
+    const [hard,setHard]=useState((initial?.rules?.hard||[]).join('\n')),[pref,setPref]=useState((initial?.rules?.preference||[]).join('\n'));
+    const [banned,setBanned]=useState((initial?.rules?.bannedExpressions||[]).join('\n'));
+    const [busy,setBusy]=useState(false),[error,setError]=useState('');
+    async function save(){
+      if(!name.trim()){setError('先给这种说话方式起个名字');return;}
+      const rules={addressRule:address.trim(),hard:toLines(hard),preference:toLines(pref),bannedExpressions:toLines(banned)};
+      setBusy(true);setError('');
+      try{
+        if(initial)await mutate('context/profiles/'+initial.id,'PATCH',{name:name.trim(),rules,expectedRevision:initial.revision});
+        else await api('context/profiles',{name:name.trim(),rules});
+        onDone();
+      }catch(e){setError(e.message);}finally{setBusy(false);}
+    }
+    const label={display:'block',fontSize:13,color:C.text2,marginBottom:5};
+    return h('div',{style:{...card,padding:16}},
+      h('label',{style:label},'名称'),h('input',{value:name,onChange:event=>setName(event.target.value),placeholder:'例如：朋友、客户服务、销售',style:field}),
+      h('div',{style:{display:'grid',gap:12,marginTop:12}},
+        h('div',null,h('label',{style:label},'称呼规则（可选）'),h('input',{value:address,onChange:event=>setAddress(event.target.value),placeholder:'例如：叫对方名字，不叫「您」',style:field})),
+        h('div',null,h('label',{style:label},'硬性要求（每行一条，必须遵守）'),h('textarea',{value:hard,onChange:event=>setHard(event.target.value),rows:2,placeholder:'例如：\n不要用「亲」\n不承诺发货时间',style:{...field,resize:'vertical',lineHeight:1.7}})),
+        h('div',null,h('label',{style:label},'风格偏好（每行一条，尽量做到）'),h('textarea',{value:pref,onChange:event=>setPref(event.target.value),rows:2,placeholder:'例如：\n简短、口语化\n多用问句',style:{...field,resize:'vertical',lineHeight:1.7}})),
+        h('div',null,h('label',{style:label},'禁用表达（每行一条，命中了就交给你）'),h('textarea',{value:banned,onChange:event=>setBanned(event.target.value),rows:2,placeholder:'例如：\n保证到账\n肯定能退',style:{...field,resize:'vertical',lineHeight:1.7}})),
+      h(Notice,{error}),
+      h('div',{style:{display:'flex',gap:10,marginTop:12}},
+        h('button',{onClick:save,disabled:busy,style:button(true)},busy?'正在保存…':(initial?'保存修改':'创建')),
+        initial&&h('button',{onClick:onCancel,disabled:busy,style:button(false)},'取消'))));
+  }
+
+  function ProfileCard({p,onAct}){
+    const [editing,setEditing]=useState(false);
+    const hard=p.rules?.hard||[],pref=p.rules?.preference||[],banned=p.rules?.bannedExpressions||[];
+    if(editing)return h(ProfileForm,{initial:p,onDone:()=>{setEditing(false);onAct(()=>Promise.resolve());},onCancel:()=>setEditing(false)});
+    return h('article',{style:card},
+      h('div',{style:{display:'flex',justifyContent:'space-between',gap:12,alignItems:'center'}},
+        h('div',null,h('strong',{style:{fontSize:17,color:C.text}},p.name),h('span',{style:{fontSize:13,color:C.text3}},'第 '+p.revision+' 版')),
+        h('span',{style:pill(p.status==='active'?C.ok:p.status==='retired'?null:C.warn)},PROFILE_STATUS[p.status]||p.status)),
+      p.rules?.addressRule&&h('p',{style:{margin:'10px 0 0',color:C.text2,fontSize:14}},'称呼：'+p.rules.addressRule),
+      hard.length>0&&h('p',{style:{margin:'8px 0 0',color:C.text2,fontSize:14,lineHeight:1.7}},'硬性要求：'+hard.join('；')),
+      pref.length>0&&h('p',{style:{margin:'6px 0 0',color:C.text3,fontSize:13,lineHeight:1.6}},'风格：'+pref.join('；')),
+      banned.length>0&&h('p',{style:{margin:'6px 0 0',color:C.text3,fontSize:13,lineHeight:1.6}},'禁用：'+banned.join('；')),
+      h('div',{style:{display:'flex',gap:10,flexWrap:'wrap',marginTop:14}},
+        p.status!=='active'&&h('button',{onClick:()=>onAct(()=>api('context/profiles/'+p.id+'/activate',{})),style:small(true)},'启用'),
+        p.status==='active'&&h('button',{onClick:()=>onAct(()=>api('context/profiles/'+p.id+'/retire',{})),style:small(false)},'停用'),
+        h('button',{onClick:()=>onAct(()=>api('context/profile-bindings',{profileId:p.id,scopeType:'default',scopeKey:'default'})),style:small(false)},'设为默认'),
+        h('button',{onClick:()=>setEditing(true),style:small(false)},'编辑')));
+  }
+
+  function ProfilesSection({data,refresh}){
+    const [open,setOpen]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState('');
+    const items=data?.items||[];
+    const act=async fn=>{setBusy(true);setError('');try{await fn();refresh();}catch(e){setError(e.message);}finally{setBusy(false);}};
+    return h('section',{style:{marginBottom:34}},
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:10,marginBottom:12}},
+        h('div',null,h('h2',{style:{...h2,margin:0}},'说话方式'),h('span',{style:{fontSize:13,color:C.text3}},'控制助手怎么说话、禁用哪些词')),
+        h('button',{onClick:()=>setOpen(value=>!value),style:small(!open)},open?'收起':'＋ 新建')),
+      h(Notice,{error}),
+      open&&h(ProfileForm,{onDone:()=>{setOpen(false);refresh();}}),
+      !items.length&&!open&&h('p',{style:hint},'还没有说话方式。留空就用通用方式；建一个并「设为默认」，助手就会照它说话。'),
+      items.map(p=>h(ProfileCard,{key:p.id,p,onAct:act})));
+  }
+
+  function KnowledgeForm({initial,onDone,onCancel}){
+    const [kind,setKind]=useState(initial?.kind||'faq'),[title,setTitle]=useState(initial?.title||''),[content,setContent]=useState(initial?.content||''),[risk,setRisk]=useState(initial?.riskLevel||'low');
+    const [busy,setBusy]=useState(false),[error,setError]=useState('');
+    async function save(){
+      if(!title.trim()||!content.trim()){setError('标题和内容都要填');return;}
+      setBusy(true);setError('');
+      try{
+        if(initial)await mutate('context/knowledge/'+initial.id,'PATCH',{kind,title:title.trim(),content:content.trim(),riskLevel:risk,expectedRevision:initial.revision});
+        else await api('context/knowledge',{kind,title:title.trim(),content:content.trim(),riskLevel:risk});
+        onDone();
+      }catch(e){setError(e.message);}finally{setBusy(false);}
+    }
+    const label={display:'block',fontSize:13,color:C.text2,marginBottom:5};
+    return h('div',{style:{...card,padding:16}},
+      h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}},
+        h('div',null,h('label',{style:label},'分类'),h('select',{value:kind,onChange:event=>setKind(event.target.value),style:field},KNOWLEDGE_KINDS.map(([value,text])=>h('option',{key:value,value:value},text)))),
+        h('div',null,h('label',{style:label},'风险等级'),h('select',{value:risk,onChange:event=>setRisk(event.target.value),style:field},KNOWLEDGE_RISK.map(([value,text])=>h('option',{key:value,value:value},text))))),
+      h('div',{style:{marginTop:12}},h('label',{style:label},'标题'),h('input',{value:title,onChange:event=>setTitle(event.target.value),placeholder:'例如：营业时间、退货政策',style:field})),
+      h('div',{style:{marginTop:12}},h('label',{style:label},'内容'),h('textarea',{value:content,onChange:event=>setContent(event.target.value),rows:4,placeholder:'助手能引用的事实。写清楚、不含糊，避免金额/时间这类会变的信息（那些要人工确认）。',style:{...field,resize:'vertical',lineHeight:1.7}})),
+      h(Notice,{error}),
+      h('div',{style:{display:'flex',gap:10,marginTop:12}},
+        h('button',{onClick:save,disabled:busy,style:button(true)},busy?'正在保存…':(initial?'保存修改':'创建（存为草稿）')),
+        initial&&h('button',{onClick:onCancel,disabled:busy,style:button(false)},'取消')));
+  }
+
+  function KnowledgeCard({k,onAct}){
+    const [editing,setEditing]=useState(false);
+    if(editing)return h(KnowledgeForm,{initial:k,onDone:()=>{setEditing(false);onAct(()=>Promise.resolve());},onCancel:()=>setEditing(false)});
+    return h('article',{style:card},
+      h('div',{style:{display:'flex',justifyContent:'space-between',gap:12,alignItems:'center'}},
+        h('div',null,h('strong',{style:{fontSize:16,color:C.text}},k.title),h('span',{style:{fontSize:13,color:C.text3}},'第 '+k.revision+' 版 · '+(KNOWLEDGE_KINDS.find(item=>item[0]===k.kind)||[k.kind,k.kind])[1])),
+        h('div',{style:{display:'flex',gap:8,alignItems:'center'}},
+          k.riskLevel&&k.riskLevel!=='low'&&h('span',{style:pill(C.warn)},(KNOWLEDGE_RISK.find(item=>item[0]===k.riskLevel)||[k.riskLevel,k.riskLevel])[1]),
+          h('span',{style:pill(k.status==='published'?C.ok:k.status==='retired'?null:C.warn)},KNOWLEDGE_STATUS[k.status]||k.status))),
+      h(LongText,{text:k.content}),
+      h('div',{style:{display:'flex',gap:10,flexWrap:'wrap',marginTop:12}},
+        k.status!=='published'&&h('button',{onClick:()=>onAct(()=>api('context/knowledge/'+k.id+'/publish',{})),style:small(true)},'发布'),
+        k.status==='published'&&h('button',{onClick:()=>onAct(()=>api('context/knowledge/'+k.id+'/retire',{})),style:small(false)},'停用'),
+        h('button',{onClick:()=>setEditing(true),style:small(false)},'编辑')));
+  }
+
+  function KnowledgeSection({data,refresh,filter,setFilter}){
+    const [open,setOpen]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState('');
+    const items=data?.items||[],shown=filter==='all'?items:items.filter(k=>k.status===filter);
+    const act=async fn=>{setBusy(true);setError('');try{await fn();refresh();}catch(e){setError(e.message);}finally{setBusy(false);}};
+    return h('section',{style:{marginBottom:20}},
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:10,marginBottom:12}},
+        h('div',null,h('h2',{style:{...h2,margin:0}},'产品与政策'),h('span',{style:{fontSize:13,color:C.text3}},'助手能引用的事实，发布后才生效')),
+        h('button',{onClick:()=>setOpen(value=>!value),style:small(!open)},open?'收起':'＋ 新增')),
+      h(Notice,{error}),
+      open&&h(KnowledgeForm,{onDone:()=>{setOpen(false);refresh();}}),
+      h('div',{style:{display:'flex',gap:8,flexWrap:'wrap',margin:'4px 0 14px'}},[['published','已发布'],['draft','草稿'],['retired','已停用'],['all','全部']].map(([value,text])=>
+        h('button',{key:value,onClick:()=>setFilter(value),'aria-pressed':filter===value,style:{...pill(filter===value?C.brand:null),background:filter===value?C.hover:'transparent',cursor:'pointer',minHeight:36}},text))),
+      !shown.length&&h('p',{style:hint},'还没有这个状态下的知识。点「＋ 新增」写一条，发布后助手遇到相关问题就能引用。'),
+      shown.map(k=>h(KnowledgeCard,{key:k.id,k,onAct:act})));
+  }
+
+  function ContextPage(){
+    const profiles=usePoller(true,()=>api('context/profiles'),8000);
+    const knowledge=usePoller(true,()=>api('context/knowledge'),8000);
+    const [kFilter,setKFilter]=useState('published');
+    return h('div',{style:{width:'100%',overflowY:'auto'}},
+      h('div',{style:{padding:'24px clamp(18px,4vw,48px) 60px',maxWidth:900}},
+        h('h1',h1,'回复配置'),
+        h('p',{style:{margin:'0 0 4px',color:C.text2,fontSize:14,lineHeight:1.8,maxWidth:640}},'这里决定助手「像谁、知道什么」。说话方式控制语气和禁用词；产品与政策是它能引用的可靠事实。没配的时候，助手按通用方式自然回复，涉及退款、报价、时间承诺这些会主动交给你。'),
+        h(Notice,{error:profiles.error||knowledge.error}),
+        h(ProfilesSection,{data:profiles.data,refresh:profiles.refresh}),
+        h(KnowledgeSection,{data:knowledge.data,refresh:knowledge.refresh,filter:kFilter,setFilter:setKFilter})));
+  }
+
   function SettingsPage(){
     const status=usePoller(true,()=>api('status'),10000),data=status.data;
     const ok=data&&!data.error;
@@ -658,8 +804,8 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
       inspect&&h('button',{onClick:inspect,style:{marginTop:8,border:'none',padding:0,background:'transparent',color:C.text3,fontSize:13,cursor:'pointer'}},'查看详情'));
   }
 
-  const NAV=[['messages','消息'],['today','今天要做的'],['customers','联系人'],['automation','自动回复']];
-  const NAV_ICON={messages:'messages',today:'today',customers:'contacts',automation:'automation'};
+  const NAV=[['messages','消息'],['today','今天要做的'],['customers','联系人'],['automation','自动回复'],['context','回复配置']];
+  const NAV_ICON={messages:'messages',today:'today',customers:'contacts',automation:'automation',context:'context'};
   function NavEntry({store,wide}){
     const {open,pending}=useStore(store);
     return h('button',{onClick:()=>store.set({open:!open,cover:true}),title:'消息助手',
@@ -713,7 +859,9 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
         tab==='messages'?h(MessagesPage,{store,ctx,narrow})
           :tab==='today'?h(TodayPage,{store,ctx})
           :tab==='customers'?h(CustomersPage,{store,ctx,narrow})
-          :tab==='automation'?h(AutomationPage):h(SettingsPage)));
+          :tab==='automation'?h(AutomationPage)
+          :tab==='context'?h(ContextPage)
+          :h(SettingsPage)));
   }
   function LegacySettings(){return h('div',{style:{padding:24,maxWidth:760}},h('h2',null,'消息助手'),h('p',{style:{color:C.text2}},'日常使用请打开侧边栏里的「消息助手」。这里保留高级配置入口。'),h(SettingsPage));}
   const TOOL_NAMES=['mcp__messaging__list_conversations','mcp__messaging__read_messages','mcp__messaging__sync_conversation','mcp__messaging__search_messages','mcp__messaging__send_message','mcp__messaging__reply_message','mcp__messaging__get_send_status','submit_reply_decision'];

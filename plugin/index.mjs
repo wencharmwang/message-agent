@@ -246,7 +246,8 @@ export function apply(ctx) {
       return;
     }
     if (req.headers['sec-fetch-site'] && req.headers['sec-fetch-site'] !== 'same-origin') { respond(res,403,{error:'Same origin required'});return; }
-    if (req.method !== 'GET' && (req.method !== 'POST' || req.headers.origin !== `http://${authority}`)) {respond(res,403,{error:'Origin required'});return;}
+    if (!['GET','POST','PATCH'].includes(req.method)) { respond(res,405,{error:'Method not allowed'}); return; }
+    if (req.method !== 'GET' && req.headers.origin !== `http://${authority}`) {respond(res,403,{error:'Origin required'});return;}
     if (!['/message-agent/api/conversations','/message-agent/api/settings','/message-agent/api/rules','/message-agent/api/enable','/message-agent/api/pause','/message-agent/api/edit','/message-agent/api/delete'].includes(path)) {
       // Stage-1 product business API (inbox, conversation detail, interactive session, drafts).
       if (path.startsWith('/message-agent/api/') && await productApi(req, res, new URL(req.url, `http://${authority}`))) return;
