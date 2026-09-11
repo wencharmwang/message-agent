@@ -31,6 +31,20 @@ class NameMatchingTests(unittest.TestCase):
         self.assertTrue(names_match('Wencharm', 'wencharm'))     # case is not identity
 
 
+class NameMatchingToleranceTests(unittest.TestCase):
+    """One character of OCR noise must not detach a conversation from its rule."""
+
+    def test_a_misread_character_still_matches(self):
+        # Measured: the same row reads as 小璐璐 on one frame and 小璐路璐 on the next.
+        self.assertTrue(names_match('小璐璐', '小璐路璐'))
+        self.assertTrue(names_match('小璐路璐', '小璐璐'))
+
+    def test_other_differences_do_not_match(self):
+        self.assertFalse(names_match('小璐璐', '小璐路路'))     # two extra characters
+        self.assertFalse(names_match('新疆羊肉串', '新疆羊肉粉'))  # a substitution: a different name
+        self.assertFalse(names_match('张三', '李四'))
+
+
 class StubHarness:
     def close(self):
         pass
@@ -92,6 +106,13 @@ class IdentityRecoveryTests(unittest.TestCase):
         self.worker.tick()
         self.assertEqual(self.worker.store.rule(self.rule_id)['conversation'], 'wechat:stored-partial')
         self.assertEqual(self.worker.store.rule(self.rule_id)['status'], 'waiting_visible')
+
+    def test_a_rule_heals_across_a_misread_character(self):
+        self.mcp.conversation = 'wechat:misread'
+        self.mcp.name = '小璐路璐'
+        self.worker.store.rebind(self.worker.store.rule(self.rule_id), 'wechat:stored-partial', '小璐璐')
+        self.worker.tick()
+        self.assertEqual(self.worker.store.rule(self.rule_id)['conversation'], 'wechat:misread')
 
 
 if __name__ == '__main__':

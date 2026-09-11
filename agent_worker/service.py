@@ -69,6 +69,30 @@ def name_key(text):
     return ''.join(ch for ch in str(text or '') if ch.isalnum()).lower()
 
 
+def one_character_added(left, right):
+    """True when the longer key is the shorter plus exactly one extra character.
+
+    The OCR engine really does return both 小璐璐 and 小璐路璐 for one chat, and a conversation's
+    id is a hash of that name, so without this a rule detaches on every other read. Only an
+    inserted or dropped character counts — a substitution is deliberately NOT accepted: two
+    conversations whose names differ by one character would otherwise be silently conflated,
+    and reporting a name as missing is far cheaper than answering in the wrong chat.
+    """
+    if len(left) < 3 or len(right) < 3 or abs(len(left) - len(right)) != 1:
+        return False
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    i = j = 0
+    skipped = False
+    while i < len(shorter) and j < len(longer):
+        if shorter[i] == longer[j]:
+            i, j = i + 1, j + 1
+        elif skipped:
+            return False
+        else:
+            skipped, j = True, j + 1
+    return True
+
+
 def names_match(stored, current):
     """True when one name is the other, or the shorter is a whole piece of the longer."""
     left, right = name_key(stored), name_key(current)
@@ -79,7 +103,9 @@ def names_match(stored, current):
     shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
     # Three characters is the shortest fragment worth trusting ("小规模" is a real read,
     # "张" would match any 张姓 contact).
-    return len(shorter) >= 3 and shorter in longer
+    if len(shorter) >= 3 and shorter in longer:
+        return True
+    return one_character_added(left, right)
 
 
 def without_ui_noise(messages):
