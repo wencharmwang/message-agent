@@ -11,6 +11,14 @@ from .database import Store
 from .harness import Harness
 
 
+class RuntimeToolError(RuntimeError):
+    """A tool call the runtime refused, carrying the runtime's own failure code."""
+
+    def __init__(self, code, message=None):
+        super().__init__(message or ('Runtime: ' + code))
+        self.code = code
+
+
 class Mcp:
     def __init__(self, settings_file, token_file):
         settings = json.loads(Path(settings_file).read_text(encoding='utf-8-sig'))
@@ -30,7 +38,7 @@ class Mcp:
         result = envelope['result']
         data = json.loads(result['content'][0]['text'])
         if result.get('isError'):
-            raise RuntimeError('Runtime: ' + data.get('code', 'tool_failed'))
+            raise RuntimeToolError(data.get('code', 'tool_failed'), 'Runtime: ' + data.get('code', 'tool_failed'))
         return data
 
     def observe(self, rule):
@@ -41,11 +49,37 @@ class Mcp:
         page = self.call('list_conversations', {'provider': provider})
         # This is a single read of the visible conversation list. It must not
         # open any chat; observe_latest below is the only operation that does.
-        return {item['id']: (item.get('metadata') or {}).get('activity_fingerprint', '')
+        # The name travels with the fingerprint: a conversation id is a hash of that name,
+        # so keeping it is what lets a rule find itself again when OCR read the name in pieces.
+        return {item['id']: {'fingerprint': (item.get('metadata') or {}).get('activity_fingerprint', ''),
+                             'name': item.get('title') or ''}
                 for item in page['conversations']}
 
 
 TIMESTAMP_NOISE = re.compile(r'^(?:(?:星期[一二三四五六日天]|\d{1,2}月\d{1,2}日|\d{4}年\d{1,2}月\d{1,2}日|\d{4}[/\-.]\d{1,2}[/\-.]\d{1,2}|昨天|前天|今天)\s*(?:\d{1,2}:\d{2})?|\d{1,2}:\d{2})$')
+
+
+def name_key(text):
+    """Matching key for a display name: letters, digits and Han characters only.
+
+    Punctuation is exactly where a name gets split into pieces by OCR (新爱书（小规模）&…
+    reads as 新爱书 + (小规模), and the parenthesis may come back half- or full-width), so
+    identity recovery compares keys, never raw strings.
+    """
+    return ''.join(ch for ch in str(text or '') if ch.isalnum()).lower()
+
+
+def names_match(stored, current):
+    """True when one name is the other, or the shorter is a whole piece of the longer."""
+    left, right = name_key(stored), name_key(current)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+    # Three characters is the shortest fragment worth trusting ("小规模" is a real read,
+    # "张" would match any 张姓 contact).
+    return len(shorter) >= 3 and shorter in longer
 
 
 def without_ui_noise(messages):
@@ -162,11 +196,83 @@ class Worker:
         self.stop = threading.Event()
         self.last_error = ''
         self.started_at = time.time()
+        # Rate limit for the opt-in window restore, so a user who deliberately keeps
+        # WeChat in the tray is not fighting the assistant every polling cycle.
+        self._last_restore = 0.0
+        # When a read yields because the user is in WeChat, this records since when.
+        self._deferred_since = 0.0
+        # Jobs whose post-generation read was deferred; see process().
+        self._deferred_jobs = {}
         self.store.recover()
+
+    def defer_for_user(self, rule):
+        """The user is working in WeChat, and reading a chat means opening it.
+
+        Leave the visible-list change as a pending candidate so the next tick retries, and
+        say nothing for the first 45 seconds: a glance at WeChat should not produce status
+        noise. After that the delay is real, so it is stated plainly.
+        """
+        now = time.time()
+        if not self._deferred_since:
+            self._deferred_since = now
+        if now - self._deferred_since >= 45:
+            self.store.status(rule['id'], rule['revision'], 'listening',
+                              '你正在使用微信，助手等你停下来再读这条新消息')
+        else:
+            self.store.status(rule['id'], rule['revision'], 'listening', '')
+
+    def report_connection(self, rules, provider, error):
+        for rule in rules:
+            if rule['provider'] == provider:
+                self.store.status(rule['id'], rule['revision'], 'waiting_connection',
+                                  '暂时读不到微信消息，助手每 5 秒会自动重试。' + safe_error(error))
+
+    def recover_window(self, provider, error):
+        """Opt-in recovery for a client the user minimized or hid to the tray.
+
+        Only the explicit 'auto_restore_window' setting asks for it, at most once a minute,
+        and only after a provider_unavailable read. The restore itself is a runtime
+        operation (the message layer owns device access); returns the re-scanned list or
+        None so the caller can keep reporting the original failure.
+        """
+        if getattr(error, 'code', None) != 'provider_unavailable':
+            return None
+        if self.store.setting('auto_restore_window', '1') != '1':
+            return None
+        now = time.time()
+        if now - self._last_restore < 60:
+            return None
+        self._last_restore = now
+        try:
+            self.mcp.call('restore_window', {'provider': provider})
+            return self.mcp.scan(provider)
+        except Exception:
+            return None
+
+    def recover_identity(self, rule, table):
+        """Find the rule again when the stored conversation id no longer matches.
+
+        The id is a hash of the display name, and a name rendered with a gap inside it
+        (e.g. 新爱书（小规模）&灏天来财税) is sometimes read only in part — so a rule created
+        on the full name never matches a partial read, and vice versa. Matching on the
+        letters and characters instead of the exact string lets the rule heal itself: the
+        first read of a name that was stored wrong would otherwise be broken for good.
+
+        Only an unambiguous match counts. Two rules chasing one name would be worse than
+        the miss.
+        """
+        candidates = [(conversation, row) for conversation, row in table.items()
+                      if conversation != rule['conversation'] and names_match(rule['title'], row['name'])]
+        if len(candidates) != 1:
+            return None
+        conversation, row = candidates[0]
+        if not self.store.rebind(rule, conversation, row['name']):
+            return None
+        return row['fingerprint']
 
     def check_rule(self, rule):
         current = self.store.rule(rule['id'])
-        return current['enabled'] and current['revision'] == rule['revision'] and current['status'] not in ('blocked', 'needs_user')
+        return current['enabled'] and current['revision'] == rule['revision'] and current['status'] != 'blocked'
 
     def settle_delay(self, rule):
         """Inspect the first list change after our send immediately.
@@ -179,8 +285,9 @@ class Worker:
         fast_path_window = max(15, self.config['poll_interval_seconds'] * 3)
         return 0 if 0 <= age <= fast_path_window else self.config['settle_seconds']
 
-    def poll(self, rule):
+    def poll(self, rule, fingerprint=''):
         messages = self.mcp.observe(rule)
+        self._deferred_since = 0.0
         if not messages:
             self.store.status(rule['id'], rule['revision'], 'listening', '')
             return True
@@ -191,7 +298,7 @@ class Worker:
             self.store.replace_baseline(rule, messages)
             self.store.status(rule['id'], rule['revision'], 'listening', '')
             return True
-        self.store.enqueue(rule, messages, incoming, self.config['job_ttl_seconds'])
+        self.store.enqueue(rule, messages, incoming, self.config['job_ttl_seconds'], fingerprint)
         return True
 
     def process(self, job):
@@ -204,6 +311,23 @@ class Worker:
             return
         if time.time() - rule['last_sent'] < self.config['min_reply_interval_seconds']:
             return
+        # A job whose post-generation read was deferred is re-queued. Gate it before the
+        # model runs again: otherwise a user who stays in WeChat would be re-generating the
+        # same reply on every polling cycle.
+        deferred_at = self._deferred_jobs.get(job['id'])
+        if deferred_at is not None:
+            if time.time() - deferred_at > self.config['job_ttl_seconds']:
+                self._deferred_jobs.pop(job['id'], None)
+            else:
+                try:
+                    self.mcp.observe(rule)
+                except RuntimeToolError as error:
+                    if error.code != 'wechat_in_use':
+                        raise
+                    self._deferred_jobs[job['id']] = time.time()
+                    self.store.status(rule['id'], rule['revision'], 'listening', '等你用完微信就继续发送')
+                    return
+                self._deferred_jobs.pop(job['id'], None)
         if not self.store.transition(job['id'], 'queued', 'generating'):
             return
         self.store.status(rule['id'], rule['revision'], 'generating', 'DeepSeek Harness 正在处理新消息')
@@ -224,9 +348,35 @@ class Worker:
                 self.store.status(rule['id'], rule['revision'], 'listening',
                                   ('本条需人工处理：' + (reason or '请查看任务')) if decision['action'] == 'needs_user' else '')
                 return
-            # Reobserve before creating outbox: do not send a response to stale conversation state.
-            observed = self.mcp.observe(rule)
-            before = json.loads(job['context'])['messages']
+            # Do not answer a conversation that moved on while the model was thinking. The list
+            # row already says whether anything arrived: its preview and time text change with
+            # the last message. Comparing that fingerprint costs one list read, whereas opening
+            # the chat again moves whatever the user is doing — so only open it when the row
+            # actually changed, or when the fingerprint is unknown (older jobs).
+            stored = json.loads(job['context'])
+            before = stored['messages']
+            changed = True
+            if stored.get('fingerprint'):
+                try:
+                    row = self.mcp.scan(job['provider']).get(job['conversation'])
+                    changed = row is None or row['fingerprint'] != stored['fingerprint']
+                except Exception:
+                    changed = True          # cannot tell: fall back to the full read
+            if changed:
+                try:
+                    observed = self.mcp.observe(rule)
+                except RuntimeToolError as error:
+                    if error.code != 'wechat_in_use':
+                        raise
+                    # The user came back to WeChat between generation and sending. Losing the
+                    # reply would be wrong, and sending now would move their screen, so put the
+                    # job back for the next tick instead.
+                    self._deferred_jobs[job['id']] = time.time()
+                    self.store.transition(job['id'], 'generating', 'queued')
+                    self.store.status(rule['id'], rule['revision'], 'listening', '等你用完微信就继续发送')
+                    return
+            else:
+                observed = before
             if not observed or not before or observed[-1] != before[-1]:
                 self.store.finish(job, 'superseded', 'Conversation changed while Agent was responding')
                 self.store.status(rule['id'], rule['revision'], 'listening', '生成期间会话又有变化，等待聊天列表下一次扫描')
@@ -249,7 +399,13 @@ class Worker:
             state = outcome.get('status', 'uncertain')
             if state != 'sent':
                 self.store.finish(job, state, 'Sending stopped; inspect Runtime receipt before retrying')
-                self.store.status(rule['id'], rule['revision'], 'blocked', '发送未确认：' + state + '；不会自动重发')
+                # One unconfirmed reply is not a reason to stop working for this contact.
+                # Nothing can be sent twice either way: latest_incoming_text only fires when
+                # the last bubble is still received text, so a reply that did go out is
+                # visible and blocks the next trigger, while one that did not go out simply
+                # gets answered on the next message.
+                self.store.status(rule['id'], rule['revision'], 'listening',
+                                  '上一条回复没有确认发出；不会自动重发，已继续监听新消息')
                 return
             self.store.finish(job, 'sent', 'UI submission verified; recipient delivery not verified')
             # Exact expected append preserves any later incoming messages for the next observation.
@@ -268,29 +424,49 @@ class Worker:
                     self.store.status(rule['id'], rule['revision'], 'listening',
                                       '本条处理失败：' + detail + '；已继续监听新消息')
                 else:
-                    # Once ready/sending was reached, preserve the conservative
-                    # stop: external submission may be ambiguous.
-                    self.store.finish(job, 'needs_user', detail)
-                    self.store.status(rule['id'], rule['revision'], 'blocked', detail)
+                    # The submission boundary was reached, so the outcome is ambiguous. Record
+                    # it and keep listening: the unconfirmed reply is never retried, so the
+                    # next message still gets its own answer.
+                    self.store.finish(job, 'uncertain', detail)
+                    self.store.status(rule['id'], rule['revision'], 'listening',
+                                      '上一条回复的结果无法确认；不会自动重发，已继续监听新消息')
 
     def tick(self):
         rules = [rule for rule in self.store.rules()
-                 if rule['enabled'] and rule['status'] not in ('blocked', 'needs_user')]
+                 if rule['enabled'] and rule['status'] != 'blocked']
         scans = {}
+        busy = False
         for provider in dict.fromkeys(rule['provider'] for rule in rules):
             try:
                 scans[provider] = self.mcp.scan(provider)
+            except RuntimeToolError as error:
+                if error.code == 'provider_busy':
+                    # The runtime is driving WeChat's own search UI for a user-commanded
+                    # send. That is brief and expected: touch no status at all, skip this
+                    # cycle (the rules loop ignores providers missing from scans) and pick
+                    # the list up again on the next tick.
+                    busy = True
+                    continue
+                restored = self.recover_window(provider, error)
+                if restored is None:
+                    self.report_connection(rules, provider, error)
+                else:
+                    scans[provider] = restored
             except Exception as error:
-                for rule in rules:
-                    if rule['provider'] == provider:
-                        self.store.status(rule['id'], rule['revision'], 'waiting_connection',
-                                          '微信窗口暂不可捕获，系统每5秒自动重试；请保持微信主窗口可见。' + safe_error(error))
+                restored = self.recover_window(provider, error)
+                if restored is None:
+                    self.report_connection(rules, provider, error)
+                else:
+                    scans[provider] = restored
         for rule in rules:
             if self.stop.is_set():
                 return
             if rule['provider'] not in scans:
                 continue
-            fingerprint = scans[rule['provider']].get(rule['conversation'])
+            fingerprint_row = scans[rule['provider']].get(rule['conversation'])
+            fingerprint = fingerprint_row['fingerprint'] if fingerprint_row else None
+            if fingerprint is None:
+                fingerprint = self.recover_identity(rule, scans[rule['provider']])
             if fingerprint is None:
                 self.store.status(rule['id'], rule['revision'], 'waiting_visible', '当前微信可见会话列表中未找到；第一版不会翻页或搜索')
                 continue
@@ -301,19 +477,29 @@ class Worker:
                 if activity == 'settling':
                     self.store.status(rule['id'], rule['revision'], 'settling', '发现可见会话摘要变化，等待稳定')
                 elif activity == 'changed':
-                    if self.poll(rule):
+                    if self.poll(rule, fingerprint):
                         self.store.commit_activity(rule, fingerprint)
                 elif activity == 'initialized':
                     self.store.status(rule['id'], rule['revision'], 'listening', '')
                 else:
                     self.store.status(rule['id'], rule['revision'], 'listening', '')
+            except RuntimeToolError as error:
+                if error.code == 'wechat_in_use':
+                    self.defer_for_user(rule)
+                else:
+                    self.store.status(rule['id'], rule['revision'], 'waiting_connection',
+                                      '暂时读不到微信消息，助手每 5 秒会自动重试。' + safe_error(error))
             except ValueError as error:
                 self.store.status(rule['id'], rule['revision'], 'resyncing', safe_error(error))
             except KeyError as error:
                 self.store.status(rule['id'], rule['revision'], 'blocked', safe_error(error))
             except Exception as error:
                 self.store.status(rule['id'], rule['revision'], 'waiting_connection',
-                                  '微信窗口暂不可捕获，系统每5秒自动重试；请保持微信主窗口可见。' + safe_error(error))
+                                  '暂时读不到微信消息，助手每 5 秒会自动重试。' + safe_error(error))
+        if busy:
+            # Defer pending sends too: the UI is momentarily owned by the foreground
+            # search, so a send started now would either queue behind it or fail.
+            return
         for job in self.store.pending():
             if self.stop.is_set():
                 return

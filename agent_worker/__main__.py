@@ -65,6 +65,8 @@ def handler(worker, token):
                 rules = [{k: v for k, v in r.items() if k not in ('baseline', 'candidate')} for r in worker.store.rules()]
                 self.response(200, {'rules': rules, 'jobs': worker.store.recent(), 'error': worker.last_error,
                                     'agent': 'DeepSeek Harness', 'model': worker.config['model'], 'started_at': worker.started_at})
+            elif self.path == '/api/settings':
+                self.response(200, {'settings': {'auto_restore_window': worker.store.setting('auto_restore_window', '1') == '1'}})
             elif self.path == '/api/conversations':
                 try:
                     self.response(200, worker.mcp.call('list_conversations', {'provider': 'wechat-main'}))
@@ -87,10 +89,17 @@ def handler(worker, token):
                 if self.path == '/api/rules':
                     # Resolve from current provider output; do not trust a client-supplied display name.
                     choices = worker.mcp.call('list_conversations', {'provider': 'wechat-main'})['conversations']
-                    matches = [c for c in choices if c['id'] == data['conversation_id']]
-                    if len(matches) != 1 or (matches[0].get('metadata') or {}).get('ambiguous') == 'true':
-                        raise ValueError('会话不存在或名称不唯一')
-                    rule_id = worker.store.add('wechat-main', matches[0]['id'], matches[0]['title'], data['kind'], data['prompt'])
+                    matches = [c for c in choices if c['id'] == data.get('conversation_id')]
+                    if not matches:
+                        raise ValueError('微信当前显示的聊天列表里没有这个会话。请把它滚动到可见位置，'
+                                         '点「重新读取微信」后再添加。')
+                    if len(matches) > 1 or (matches[0].get('metadata') or {}).get('ambiguous') == 'true':
+                        raise ValueError('微信里有多个同名会话，助手分不清是哪一个。请先给其中一个改名或加备注。')
+                    # The visible list cannot tell a group from a one-to-one chat yet, so the
+                    # client does not send a kind; default to direct instead of rejecting it.
+                    kind = data.get('kind') if data.get('kind') in ('direct', 'group') else 'direct'
+                    rule_id = worker.store.add('wechat-main', matches[0]['id'], matches[0]['title'], kind,
+                                               data.get('prompt', ''))
                     self.response(201, {'id': rule_id})
                 elif self.path in ('/api/enable', '/api/pause'):
                     worker.store.rule(data['id'])
@@ -100,10 +109,24 @@ def handler(worker, token):
                     worker.store.rule(data['id'])
                     worker.store.edit(data['id'], data['prompt'])
                     self.response(200, {'ok': True})
+                elif self.path == '/api/delete':
+                    worker.store.archive(data['id'])
+                    self.response(200, {'ok': True})
+                elif self.path == '/api/settings':
+                    if not isinstance(data.get('auto_restore_window'), bool):
+                        self.response(400, {'error': '设置值不正确'})
+                    else:
+                        worker.store.set_setting('auto_restore_window', data['auto_restore_window'])
+                        self.response(200, {'settings': {'auto_restore_window': data['auto_restore_window']}})
                 else:
                     self.response(404, {'error': 'Not found'})
+            except ValueError as error:
+                # These messages are written for the user; surfacing them is the whole point.
+                self.response(400, {'error': str(error)})
+            except (KeyError, TypeError):
+                self.response(400, {'error': '请求内容不完整，请刷新页面后重试'})
             except Exception:
-                self.response(400, {'error': '操作失败：检查会话是否唯一、规则是否重复及字段是否完整'})
+                self.response(400, {'error': '操作失败：请检查填写的内容是否完整'})
     return Handler
 
 

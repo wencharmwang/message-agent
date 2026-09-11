@@ -29,7 +29,7 @@ def main():
     env['MESSAGE_WORKER_TOKEN'] = Path(config['worker_token_file']).read_text().strip()
     env['PATH'] = str(Path(config['node_executable']).parent) + os.pathsep + env.get('PATH', '')
     log = open(ROOT / 'harness.log', 'a', encoding='utf-8')
-    command = [config['node_executable'],'--import','tsx/esm',str(Path(config['harness_root'])/'apps/cli/src/bin.ts'),
+    command = [config['node_executable'],'--import',(ROOT/'node-bootstrap.mjs').as_uri(),'--import','tsx/esm',str(Path(config['harness_root'])/'apps/cli/src/bin.ts'),
                '--profile','web','--patch',str(ROOT/'web.patch.yml'),'--port',str(config['harness_port']),'--no-open']
     host = subprocess.Popen(command,cwd=config['harness_root'],env=env,stdout=log,stderr=log,creationflags=subprocess.CREATE_NO_WINDOW)
     # The TCP listener opens before the message plugin finishes loading. Do not
