@@ -18,10 +18,11 @@ export function modelContext(value) {
 }
 
 /** Avoid replaying the complete visible chat snapshot into every persistent turn. */
-export function conversationTurnContext(value, reused, historyLimit = 8) {
+export function conversationTurnContext(value, reused, historyLimit = 12) {
   const data = value && typeof value === 'object' ? value : {};
   const incoming = Array.isArray(data.incoming) ? data.incoming : [];
-  if (reused) return {incoming};
+  // The current real snapshot is authoritative even when the Session is reused (spec §3.3).
+  // Dropping it would leave the model with only its own stale memory of the conversation.
   const messages = Array.isArray(data.messages) ? data.messages.slice(-historyLimit) : [];
   return {messages, incoming};
 }
@@ -34,5 +35,8 @@ export function validateSubmission(args, maxChars) {
     if (/\bsk-[A-Za-z0-9_-]{16,}\b/.test(args.text)) throw new Error('Do not include credentials in replies');
   } else if (args.text !== '') throw new Error('For skip/needs_user leave text empty and put the explanation in reason');
   if (args.action === 'needs_user' && !args.reason.trim()) throw new Error('Explain the concrete decision needed in reason');
-  return {action:args.action,text:args.text,reason:args.reason};
+  const intent = typeof args.intent === 'string' && args.intent.trim() ? args.intent.trim().slice(0, 40) : '';
+  const evidence_ids = Array.isArray(args.evidence_ids) ? args.evidence_ids.filter(x => typeof x === 'string' && x).slice(0, 20) : [];
+  const risk_tags = Array.isArray(args.risk_tags) ? args.risk_tags.filter(x => typeof x === 'string' && x).slice(0, 20) : [];
+  return {action: args.action, text: args.text, reason: args.reason, intent, evidence_ids, risk_tags};
 }

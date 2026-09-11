@@ -2,9 +2,11 @@ import { readFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
-import { REPLY_POLICY, conversationTurnContext, modelContext, validateSubmission } from './reply-policy.mjs';
+import { REPLY_POLICY, modelContext, validateSubmission } from './reply-policy.mjs';
 import { ConversationSessions, automaticRequestConfig, conversationKey, completedDecision } from './conversation-sessions.mjs';
 import { createProductApi } from './host/product.mjs';
+import { createCrm } from './host/crm.mjs';
+import { createReplyContextSystem, renderContextPrompt } from './host/reply-context/index.mjs';
 
 export const inject = ['webServer', 'agents', 'sessions', 'sessionQuery', 'sessionPersistence', 'agentPresets', 'workspaceRegistry', 'permissionPresets', 'sessionTitle'];
 const config = JSON.parse(readFileSync(process.env.MESSAGE_AGENT_CONFIG, 'utf8').replace(/^\uFEFF/, ''));
@@ -108,7 +110,9 @@ export function apply(ctx) {
     const failed = events.some(e => e.type === 'turn/end' && e.data?.reason?.kind && e.data.reason.kind !== 'completed');
     return {answer, tools, interrupted: failed, sessionId};
   };
-  const productApi = createProductApi({config, token, conversations, bindingsPath, respond, readBody: body, ensureInteractiveSession, askAssistant});
+  const crm = createCrm(join(dirname(config.database), 'crm.db'));
+  const contextSystem = createReplyContextSystem({databasePath: join(dirname(config.database), 'reply-context.db'), workspaceId: 'local', crm});
+  const productApi = createProductApi({config, token, conversations, bindingsPath, respond, readBody: body, ensureInteractiveSession, askAssistant, crm, context: contextSystem});
   ctx.effect(() => () => {
     for (const handle of active.values()) handle.agent.cancel({kind:'user'});
   });
@@ -175,7 +179,7 @@ export function apply(ctx) {
         cleanup.push(agentCtx.on('agent/request',async (_payload,next)=>automaticRequestConfig(await next(),config)));
         cleanup.push(agentCtx.tools.register(defineTool({
               name:'submit_reply_decision',description:'提交本条消息的处理决定，不执行发送。日常聊天优先自然回复；只有确实需要本人决定才转人工。',
-              parameters:{action:{type:'string',required:true,enum:['reply','skip','needs_user']},text:{type:'string',required:true,description:'只放发给联系人的正文；非 reply 必须为空'},reason:{type:'string',required:true,description:'供用户查看的简短理由，可为空；不发送给联系人'}},
+              parameters:{action:{type:'string',required:true,enum:['reply','skip','needs_user']},text:{type:'string',required:true,description:'只放发给联系人的正文；非 reply 必须为空'},reason:{type:'string',required:true,description:'供用户查看的简短理由，可为空；不发送给联系人'},intent:{type:'string',required:false,description:'可选：本条意图，如 faq/quote/refund/social 等'},evidence_ids:{type:'array',required:false,items:{type:'string'},description:'可选：引用本轮上下文中给出的 evidence id'},risk_tags:{type:'array',required:false,items:{type:'string'},description:'可选：如 price/commitment/refund，声明本条涉及的风险'}},
               output:{schema:{type:'object',additionalProperties:false,properties:{accepted:{type:'boolean',required:true}}},render:()=>[{type:'text',text:'回复决定已记录。'}]},
               execute(args,exec){
                 if(exec.agent?.session.id!==sessionId) throw new Error('Decision belongs to another session');
@@ -186,13 +190,17 @@ export function apply(ctx) {
                 return {accepted:true};
               }
             })));
-        const turnData = conversationTurnContext(JSON.parse(job.context), persisted || !!live);
+        const contextData = JSON.parse(job.context);
         const recentDeliveries = (payload.recent_deliveries ?? []).slice(0,3).map(({state,text})=>({state,text}));
+        // Build the canonical context pack once, then hand the model the real message snapshot
+        // plus CRM, open loops, profile, knowledge and live facts (spec §7). The persistent
+        // Session only provides language continuity; this pack is the authoritative facts.
+        const contextRun = await contextSystem.build({jobId: job.id, identity: {provider: rule.provider, conversation: rule.conversation}, conversationKey: key, rule, contextData, recentDeliveries});
         // A received WeChat message is user-authored input. Marking it as a
         // webhook kept it out of DSH's durable lastPromptAt projection, so a
         // visibly updated conversation remained buried at its creation time.
         const message = createUserMessage({source:{kind:'user'},
-          content:[{type:'text',text:REPLY_POLICY+'\n'+JSON.stringify(modelContext({rule:rule.prompt,conversation:{title:rule.title,kind:rule.kind},data:turnData,recent_deliveries:recentDeliveries}))}]});
+          content:[{type:'text',text:modelContext(REPLY_POLICY+'\n'+renderContextPrompt({contextPack:contextRun.contextPack,evidenceCatalog:contextRun.evidenceCatalog,rule}))}]});
         const start = handle.agent.session.events.length;
         handle.agent.followup(message);
         await Promise.race([handle.agent.whenIdle(),new Promise((_,reject)=>{timer=setTimeout(()=>{handle.agent.cancel({kind:'user'});reject(new Error('Task timed out'));},config.response_timeout_seconds*1000);})]);
@@ -204,8 +212,26 @@ export function apply(ctx) {
           }));
         }
         if(!decision) throw new Error('Agent did not submit a reply decision');
+        // Evidence & Risk Gate (spec §10): validate evidence ids, live-fact expiry, risk grade
+        // and commitment/banned-word rules before the decision can leave the Host. The audit
+        // row records the context hash, evidence and gate outcome (§9).
+        const gate = contextSystem.gate({decision, run: contextRun});
+        const modelAudit = {intent: decision.intent ?? null, evidence_ids: decision.evidence_ids ?? [], risk_tags: decision.risk_tags ?? []};
+        contextSystem.audit.write({jobId: job.id, workspaceId: contextSystem.workspaceId, conversationKey: key,
+          contextHash: contextRun.contextHash, profileId: contextRun.profile?.id ?? null, profileRevision: contextRun.profile?.revision ?? null,
+          evidence: contextRun.evidenceCatalog, retrievalTrace: contextRun.retrievalTrace, modelAudit,
+          gateOutcome: gate.outcome, gateReasonCode: gate.reasonCode});
+        if (gate.outcome === 'reject') {
+          await ctx.sessions.flush(handle.agent.session);
+          throw new Error('回复未通过风险校验：' + gate.reasonCode);
+        }
+        let finalDecision = gate.finalDecision;
+        if (gate.outcome === 'needs_user') finalDecision = {...finalDecision, reason: gate.userMessage};
         await ctx.sessions.flush(handle.agent.session);
-        respond(res,200,{session_id:sessionId,session_reused:persisted || !!live,response:JSON.stringify(decision)});
+        // Strip audit-only fields before returning: the Worker's wire contract stays
+        // job_id / event_id / action / text / reason (spec §9, agent_worker/decision.py).
+        respond(res,200,{session_id:sessionId,session_reused:persisted || !!live,
+          response:JSON.stringify({job_id:finalDecision.job_id,event_id:finalDecision.event_id,action:finalDecision.action,text:finalDecision.text,reason:finalDecision.reason})});
         });
       } catch (error) {
         ctx.logger.warn('Messaging task failed: ' + (error instanceof Error ? error.message : 'unknown'));

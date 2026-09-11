@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { Drafts, readBindings, validateDraftText } from './storage.mjs';
 import { RuntimeAdapter } from './runtime.mjs';
 import { createCrm } from './crm.mjs';
+import { classifyIntent, detectRiskTags, maxRiskGrade, DEFAULT_DECISION_POLICY } from './reply-context/risk-gate.mjs';
 
 /**
  * Conversation identity key. Automatic sessions keep the historical key
@@ -254,10 +255,11 @@ export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [
  * (architecture §6). Returns true when the request was handled. index.mjs applies
  * the same-origin guards before delegating here.
  */
-export function createProductApi({config, token, conversations, bindingsPath, respond, readBody, ensureInteractiveSession, askAssistant}) {
+export function createProductApi({config, token, conversations, bindingsPath, respond, readBody, ensureInteractiveSession, askAssistant, crm: crmInjected, context: contextSystem}) {
   const runtime = new RuntimeAdapter({controlPort: config.control_port, token});
   const drafts = new Drafts(join(dirname(config.database), 'drafts.json'));
-  const crm = createCrm(join(dirname(config.database), 'crm.db'));
+  const crm = crmInjected ?? createCrm(join(dirname(config.database), 'crm.db'));
+  const context = contextSystem ?? null;
   // "I looked at it" is a host-side bookkeeping detail, not worker state: the delivery
   // record itself must stay untouched.
   const reviewedPath = join(dirname(config.database), 'reviewed.json');
@@ -324,6 +326,102 @@ export function createProductApi({config, token, conversations, bindingsPath, re
           items, drafts: drafts.list(), jobs: status.jobs ?? [],
           todoBuckets: crm.todoBuckets(), now: Date.now() / 1000
         }));
+        return true;
+      }
+      // ---- reply-context system (spec §13) ---------------------------------
+      if (path === '/message-agent/api/context' || path.startsWith('/message-agent/api/context/')) {
+        if (!context) { respond(res, 503, {error: '回复上下文系统未启用'}); return true; }
+        const ws = context.workspaceId;
+        const parts = path.replace('/message-agent/api/context', '').split('/').filter(Boolean);
+        const [resource, id, action] = parts;
+
+        if (resource === 'profiles') {
+          if (!id && req.method === 'GET') { respond(res, 200, {items: context.profiles.list(ws)}); return true; }
+          if (!id && req.method === 'POST') { respond(res, 201, context.profiles.create(ws, await readBody(req))); return true; }
+          if (id && req.method === 'PATCH') { respond(res, 200, context.profiles.update(ws, id, await readBody(req))); return true; }
+          if (id && (action === 'activate' || action === 'retire') && req.method === 'POST') {
+            respond(res, 200, context.profiles[action](ws, id)); return true;
+          }
+          if (id && !action && req.method === 'GET') {
+            const p = context.profiles.get(id, ws);
+            if (!p) throw Object.assign(new Error('没有这个说话方式'), {code: 'CONTEXT_NOT_FOUND'});
+            respond(res, 200, p); return true;
+          }
+        }
+        if (resource === 'profile-bindings') {
+          if (req.method === 'GET') { respond(res, 200, {items: context.profiles.listBindings(ws)}); return true; }
+          if (req.method === 'POST') { respond(res, 201, context.profiles.bind(ws, await readBody(req))); return true; }
+        }
+        if (resource === 'knowledge') {
+          if (!id && req.method === 'GET') {
+            const status = url.searchParams.get('status') ?? undefined;
+            respond(res, 200, {items: context.knowledge.list(ws, {status})}); return true;
+          }
+          if (!id && req.method === 'POST') { respond(res, 201, context.knowledge.create(ws, await readBody(req))); return true; }
+          if (id && req.method === 'PATCH') { respond(res, 200, context.knowledge.update(ws, id, await readBody(req))); return true; }
+          if (id && ['publish', 'retire', 'rollback'].includes(action) && req.method === 'POST') {
+            const p = await readBody(req).catch(() => ({}));
+            respond(res, 200, context.knowledge[action](ws, id, p)); return true;
+          }
+          if (id && !action && req.method === 'GET') {
+            const k = context.knowledge.get(id, ws);
+            if (!k) throw Object.assign(new Error('没有这条知识'), {code: 'CONTEXT_NOT_FOUND'});
+            respond(res, 200, k); return true;
+          }
+        }
+        if (resource === 'memories') {
+          if (!id && req.method === 'GET') {
+            const ck = url.searchParams.get('conversation') ?? undefined;
+            respond(res, 200, {items: context.memory.list(ws, {conversationKey: ck})}); return true;
+          }
+          if (!id && req.method === 'POST') { respond(res, 201, context.memory.add(ws, await readBody(req))); return true; }
+          if (id && (action === 'resolve' || action === 'confirm') && req.method === 'POST') {
+            respond(res, 200, context.memory[action](ws, id)); return true;
+          }
+        }
+        if (resource === 'candidates') {
+          if (!id && req.method === 'GET') { respond(res, 200, {items: context.candidates.list('pending')}); return true; }
+          if (id && (action === 'accept' || action === 'reject') && req.method === 'POST') {
+            respond(res, 200, context.candidates.decide(id, action === 'accept')); return true;
+          }
+        }
+        if (resource === 'runs' && id && req.method === 'GET') {
+          const run = context.audit.get(id, ws);
+          if (!run) throw Object.assign(new Error('没有这次处理记录'), {code: 'CONTEXT_NOT_FOUND'});
+          respond(res, 200, run); return true;
+        }
+        if (resource === 'preview' && req.method === 'POST') {
+          const p = await readBody(req);
+          // Server-side identity only: the browser cannot invent a conversation to inspect.
+          const {items} = await aggregate();
+          const target = items.find(i => i.identity.provider === p.provider && i.identity.conversation === p.conversation);
+          if (!target) throw Object.assign(new Error('目标会话未接入，不能预览'), {code: 'CONVERSATION_NOT_FOUND'});
+          const text = typeof p.text === 'string' ? p.text.trim().slice(0, 2000) : '';
+          const conversationKey = identityKey(target.identity.provider, target.identity.conversation);
+          const rule = {provider: target.identity.provider, conversation: target.identity.conversation, title: target.identity.title, kind: target.identity.kind, prompt: ''};
+          const run = await context.build({
+            jobId: 'preview', identity: target.identity, conversationKey, rule,
+            contextData: {messages: text ? [{direction: 'incoming', content: text, sender: null, type: 'text'}] : []},
+            recentDeliveries: []
+          });
+          // A rule-based "simulated decision": the risk grade and whether a human is required.
+          const intent = classifyIntent(text);
+          const tags = detectRiskTags(text);
+          const grade = maxRiskGrade(tags);
+          const unresolved = run.unresolvedLiveIntents ?? [];
+          const wouldNeedHuman = grade === 'L3' || DEFAULT_DECISION_POLICY.humanIntents.includes(intent)
+            || ((grade === 'L2' || DEFAULT_DECISION_POLICY.draftIntents.includes(intent)) && !run.evidenceCatalog.some(e => e.kind === 'published_knowledge'))
+            || unresolved.length > 0;
+          respond(res, 200, {
+            profile: run.contextPack.profile, knowledge: run.contextPack.knowledge,
+            liveStatus: unresolved.length ? 'unavailable' : 'ok', unresolvedLiveIntents: unresolved,
+            detectedIntent: intent, riskTags: tags, riskGrade: grade,
+            simulated: {intent, riskGrade, wouldNeedHuman},
+            contextHash: run.contextHash
+          });
+          return true;
+        }
+        respond(res, 405, {error: 'Method not allowed'});
         return true;
       }
       // ---- to-dos ----------------------------------------------------------
@@ -508,6 +606,7 @@ export function createProductApi({config, token, conversations, bindingsPath, re
     } catch (error) {
       const status = {DRAFT_NOT_FOUND: 404, CONVERSATION_NOT_FOUND: 404, CRM_NOT_FOUND: 404, DRAFT_REVISION_CONFLICT: 409,
         DRAFT_CLOSED: 409, DRAFT_INVALID_TEXT: 400, CRM_INVALID: 400, INBOX_BAD_FILTER: 400, INBOX_CURSOR_STALE: 409,
+        CONTEXT_NOT_FOUND: 404, CONTEXT_INVALID: 400, CONTEXT_CONFLICT: 409, CONTEXT_REVISION_CONFLICT: 409,
         WORKER_UNAVAILABLE: 503, WORKER_ERROR: 502, ASSISTANT_BUSY: 409, ASSISTANT_TIMEOUT: 504}[error.code] ?? 400;
       respond(res, status, {error: error.message, code: error.code ?? 'PRODUCT_API_ERROR'});
       return true;
