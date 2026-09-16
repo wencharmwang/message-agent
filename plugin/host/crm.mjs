@@ -126,6 +126,27 @@ export class Crm {
     return this.#decorate(this.#customerRow(key));
   }
 
+  /**
+   * Re-point the contact at a new conversation id when OCR read its name differently and
+   * the id (a hash of the name) changed. Keeps todos/follow-ups attached to the person
+   * instead of orphaning them under the stale id. No-op when there is no such customer.
+   */
+  rekey(oldKey, newKey, {provider, conversation, displayName, kind} = {}) {
+    const existing = this.#customerRow(oldKey);
+    if (!existing) return false;
+    this.db.prepare('UPDATE todos SET conversation_key = ? WHERE conversation_key = ?').run(newKey, oldKey);
+    this.db.prepare('UPDATE followups SET conversation_key = ? WHERE conversation_key = ?').run(newKey, oldKey);
+    this.db.prepare(`UPDATE customers SET conversation_key = ?, provider = ?, conversation = ?, display_name = ?, kind = ?, updated_at = ?
+      WHERE conversation_key = ?`)
+      .run(newKey,
+        provider ? text(provider, 60) : existing.provider,
+        conversation ? text(conversation, 200) : existing.conversation,
+        displayName ? text(displayName, 200) : existing.display_name,
+        kind ? text(kind, 20) : existing.kind,
+        now(), oldKey);
+    return true;
+  }
+
   listCustomers() {
     const rows = this.db.prepare(`SELECT * FROM customers ORDER BY
       (SELECT MAX(created_at) FROM followups WHERE conversation_key = customers.conversation_key) IS NULL,
@@ -143,6 +164,20 @@ export class Crm {
         patch.note === undefined ? row.note : text(patch.note, 2000),
         now(), key);
     return this.getCustomer(key);
+  }
+
+  /**
+   * Remove the contact together with everything recorded under it. The follow-ups and
+   * to-dos only exist because of this contact, so leaving them behind would be an orphan
+   * list nobody can act on. Automatic-reply rules live in the Worker's database and are
+   * deliberately untouched.
+   */
+  deleteCustomer(key) {
+    if (!this.#customerRow(key)) throw Object.assign(new Error('还没有这个联系人的资料'), {code: 'CRM_NOT_FOUND'});
+    this.db.prepare('DELETE FROM todos WHERE conversation_key = ?').run(key);
+    this.db.prepare('DELETE FROM followups WHERE conversation_key = ?').run(key);
+    this.db.prepare('DELETE FROM customers WHERE conversation_key = ?').run(key);
+    return true;
   }
 
   // ---- follow-ups ----------------------------------------------------------

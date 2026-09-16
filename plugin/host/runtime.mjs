@@ -19,12 +19,25 @@ export class RuntimeAdapter {
         body: data === undefined ? undefined : JSON.stringify(data),
         signal: AbortSignal.timeout(this.timeoutMs)
       });
-    } catch {
-      throw Object.assign(new Error('消息监听服务不可用'), {code: 'WORKER_UNAVAILABLE'});
+    } catch (cause) {
+      // A refused connection is not the same as a slow one, and the caller used to lose
+      // the distinction entirely: both became "消息监听服务不可用" with nothing attached.
+      throw Object.assign(new Error('消息监听服务不可用'), {
+        code: 'WORKER_UNAVAILABLE',
+        dev: {code: 'WORKER_UNAVAILABLE', message: String(cause?.message ?? cause),
+              where: 'host->worker:' + path, at: new Date().toISOString()},
+        cause
+      });
     }
     const result = await upstream.json().catch(() => ({}));
     if (!upstream.ok) {
-      throw Object.assign(new Error(result.error || '消息服务请求失败'), {code: 'WORKER_ERROR', status: upstream.status});
+      // Keep the upstream code: the product layer maps runtime codes (conversation_unverified,
+      // wechat_in_use, …) to a plain sentence. Flattening it to WORKER_ERROR lost that and
+      // showed the user a raw code instead. `dev` carries the worker's own diagnostics
+      // block through untouched — the developer view is the only consumer.
+      throw Object.assign(new Error(result.error || '消息服务请求失败'),
+        {code: result.code || 'WORKER_ERROR', status: upstream.status,
+         detail: result.detail ?? '', dev: result.dev ?? null});
     }
     return result;
   }
@@ -35,5 +48,34 @@ export class RuntimeAdapter {
   /** Explicit visible-list read. Callers must treat this as a user-initiated sync only. */
   listConversations() {
     return this.#call('GET', '/api/conversations');
+  }
+  /**
+   * Cached discovery result for the visible conversation list. The Worker refreshes it
+   * once per poll cycle; calling this never turns into another WeChat read, which is why
+   * the message centre can poll it freely.
+   */
+  observe() {
+    return this.#call('GET', '/api/observe');
+  }
+  /**
+   * Read one conversation's latest messages. This DOES open the chat, so it is only ever
+   * called for a conversation the user asked about (or when they explicitly allowed the
+   * assistant to read bodies). In WeChat an opened chat loses its unread badge.
+   */
+  readConversation({provider, conversation, limit}) {
+    return this.#call('POST', '/api/read', {provider, conversation_id: conversation, limit});
+  }
+  /** Turn visible-list discovery on or off. Discovery never opens a chat. */
+  setObserving(enabled) {
+    return this.#call('POST', '/api/settings', {observe_enabled: !!enabled});
+  }
+  /**
+   * Actually send a message through the trusted worker path. origin=user_request is the
+   * honest classification here: the user just confirmed this exact draft. Returns the
+   * Runtime receipt; the caller maps its status to a draft state and never resends on
+   * "uncertain".
+   */
+  sendMessage({provider, conversation, text, requestId}) {
+    return this.#call('POST', '/api/send', {provider, conversation_id: conversation, text, request_id: requestId});
   }
 }

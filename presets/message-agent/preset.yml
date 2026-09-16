@@ -1,0 +1,3 @@
+name: 消息助手
+description: 用于读取、分析并按用户要求处理微信消息的交互 Agent。
+order: 1

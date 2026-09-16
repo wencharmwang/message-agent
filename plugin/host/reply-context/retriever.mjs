@@ -44,6 +44,27 @@ export function retrieveKnowledge(knowledge, workspaceId, text, {limit = 8} = {}
   return hits;
 }
 
+/** 全量注入的上限：条目再多也不让上下文碎成几百行。 */
+const FULL_INJECT_MAX_ITEMS = 60;
+
+/**
+ * 决定「给模型看哪些知识」——只影响上下文，不影响判定。
+ *
+ * 已发布条目总量在预算内时**全部注入**：这个量级下关键词检索只是在丢信息
+ * （"怎么退钱"召不回"退款政策"，而条目其实全都在预算里装得下）。
+ * 超出预算（条目多、或单条很长）才退回关键词检索取 top-N。
+ *
+ * 注意 evidenceCatalog / retrievalTrace 仍按**检索命中**构造：门控拿它判断
+ * "这次有没有可引用的依据"，放宽了会让没有答案的问题也被当成有依据而自动回复。
+ */
+export function widenKnowledge(knowledge, workspaceId, hits, {budget = CONTEXT_BUDGET.knowledge, maxItems = FULL_INJECT_MAX_ITEMS} = {}) {
+  const active = knowledge.active(workspaceId);
+  if (!active.length) return hits;
+  const total = active.reduce((sum, item) => sum + (item.title?.length ?? 0) + (item.content?.length ?? 0), 0);
+  if (active.length <= maxItems && total <= budget) return active;
+  return hits;
+}
+
 /** Approved examples ranked for the current profile, scene, contact, then by review quality. */
 export function selectExamples(db, workspaceId, {profileId = null, conversationKey = null, intent = '', limit = 4} = {}) {
   if (!(db instanceof ReplyContextDatabase)) throw new Error('reply-context db required');

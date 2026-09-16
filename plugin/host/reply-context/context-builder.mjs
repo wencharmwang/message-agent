@@ -4,7 +4,7 @@ import { Profiles } from './profiles.mjs';
 import { Knowledge } from './knowledge.mjs';
 import { Memory } from './memory.mjs';
 import { createResolverRegistry, detectLiveIntents, extractIdentifiers } from './resolvers.mjs';
-import { retrieveKnowledge, selectExamples, CONTEXT_BUDGET } from './retriever.mjs';
+import { retrieveKnowledge, widenKnowledge, selectExamples, CONTEXT_BUDGET } from './retriever.mjs';
 import { classifyIntent, detectRiskTags, DEFAULT_DECISION_POLICY } from './risk-gate.mjs';
 
 /**
@@ -116,7 +116,10 @@ export function createContextBuilder({db, workspaceId = 'local', crm = null, res
     const identifiers = extractIdentifiers(currentQuestion);
 
     // 6. Static knowledge (published + valid only).
+    //    hits 只用于「这次有没有可引用的依据」；knowledgeForModel 才是喂给模型的知识段。
+    //    条目总量在预算内时全量给——这个量级下关键词检索只会丢信息；超预算才退回 top-N。
     const knowledgeHits = retrieveKnowledge(knowledge, workspaceId, currentQuestion, {limit: 8});
+    const knowledgeForModel = widenKnowledge(knowledge, workspaceId, knowledgeHits);
 
     // 7. Live resolvers (spec §5.4) — only when a trigger fires, scoped to server identity.
     const liveFacts = [];
@@ -174,7 +177,7 @@ export function createContextBuilder({db, workspaceId = 'local', crm = null, res
         currentQuestion,
         recentDeliveries: deliveries
       },
-      knowledge: trimArray(knowledgeHits.map(k => ({id: k.id, kind: k.kind, title: k.title, content: k.content, riskLevel: k.riskLevel})),
+      knowledge: trimArray(knowledgeForModel.map(k => ({id: k.id, kind: k.kind, title: k.title, content: k.content, riskLevel: k.riskLevel})),
         CONTEXT_BUDGET.knowledge, k => k.title + k.content),
       liveFacts: liveFacts.map(f => ({kind: f.kind, field: f.field, value: f.value, observedAt: f.observedAt, expiresAt: f.expiresAt, sourceRef: f.sourceRef})),
       examples: trimArray(examples, CONTEXT_BUDGET.examples, e => e.incomingText + e.outgoingText)
@@ -182,7 +185,7 @@ export function createContextBuilder({db, workspaceId = 'local', crm = null, res
 
     const retrievalTrace = {
       detectedIntent, detectedRiskTags, liveIntents, unresolvedLiveIntents,
-      knowledgeCount: knowledgeHits.length, exampleCount: examples.length,
+      knowledgeCount: knowledgeHits.length, knowledgeInjected: knowledgeForModel.length, exampleCount: examples.length,
       profileId: profile?.id ?? null, profileStatus: profile?.status ?? null,
       conversationMessages: messages.length
     };

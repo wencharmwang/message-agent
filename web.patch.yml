@@ -12,7 +12,7 @@
       read-only: {sandbox: read-only, approval: ask}
       workspace-write: {sandbox: workspace-write, approval: ask}
       danger-full-access: {sandbox: danger-full-access, approval: never}
-      message-auto: {sandbox: read-only, approval: never, name: '自动消息任务'}
+      message-auto: {sandbox: read-only, approval: never, name: '自动消息任务', selectable: false}
 
 # 消息产品只保留 messaging-runtime MCP 工具（+ 自动回复的 submit_reply_decision），
 # 关闭 Harness base 里通用的编码/联网/子代理等模型工具，减少每轮注入的 tool schema。

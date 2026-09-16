@@ -1,0 +1,4 @@
+name: 自动消息任务
+description: 监听已授权会话并按规则生成回复决策的后台 Agent。
+order: 2
+selectable: false

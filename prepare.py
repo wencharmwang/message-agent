@@ -40,10 +40,28 @@ config.update(harness_port=3080, agent_workspace=str(TARGET/'workspace'), respon
 # Preserve the reviewed lightweight preset instead of copying the coding preset.
 interactive = (ROOT/'presets/message-agent/agent.cordis.yml').read_text(encoding='utf-8')
 
-for name, text in [('message-agent', interactive), ('message-auto', AUTO_PRESET)]:
+# ``selectable: false`` on the background preset keeps it off every picker
+# without taking it off the roster: the plugin still resolves ``message-auto``
+# by id, and a session already running it keeps its own name and description on
+# the surfaces that only READ a preset. The interactive preset is the one choice
+# a person makes, so it stays selectable and stays the deployment default.
+PRESETS = [
+    ('message-agent', interactive,
+     'name: 消息助手\n'
+     'description: 用于读取、分析并按用户要求处理微信消息的交互 Agent。\n'
+     'order: 1\n'),
+    ('message-auto', AUTO_PRESET,
+     'name: 自动消息任务\n'
+     'description: 监听已授权会话并按规则生成回复决策的后台 Agent。\n'
+     'order: 2\n'
+     'selectable: false\n'),
+]
+
+for name, composition, metadata in PRESETS:
     directory = ROOT/'presets'/name
     directory.mkdir(parents=True, exist_ok=True)
-    (directory/'agent.cordis.yml').write_text(text, encoding='utf-8')
+    (directory/'agent.cordis.yml').write_text(composition, encoding='utf-8')
+    (directory/'preset.yml').write_text(metadata, encoding='utf-8')
 
 (ROOT/'web.patch.yml').write_text('''- id: agent-presets
   config:
@@ -59,7 +77,7 @@ for name, text in [('message-agent', interactive), ('message-auto', AUTO_PRESET)
       read-only: {sandbox: read-only, approval: ask}
       workspace-write: {sandbox: workspace-write, approval: ask}
       danger-full-access: {sandbox: danger-full-access, approval: never}
-      message-auto: {sandbox: read-only, approval: never, name: '自动消息任务'}
+      message-auto: {sandbox: read-only, approval: never, name: '自动消息任务', selectable: false}
 - insert:
     - id: messaging-agent-ui
       name: './plugin/index.mjs'

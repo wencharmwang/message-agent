@@ -51,7 +51,7 @@ export class Drafts {
     const draft = {
       id: randomUUID(), revision: 1, target, text, source: source ?? null,
       state: 'awaiting_confirmation', createdAt: now, updatedAt: now,
-      expiresAt: now + DRAFT_TTL_SECONDS, requestId: null, receipt: null
+      expiresAt: now + DRAFT_TTL_SECONDS, requestId: null, receipt: null, detail: ''
     };
     this.store.data.drafts[draft.id] = draft;
     this.store.save();
@@ -83,6 +83,32 @@ export class Drafts {
     // Cancelling an already-closed draft is a no-op so double clicks stay safe.
     if (draft.state !== 'awaiting_confirmation') return draft;
     draft.state = 'cancelled';
+    draft.updatedAt = now;
+    this.store.save();
+    return draft;
+  }
+  /**
+   * Claim the send for this exact version. The draft moves to `sending` and gets a fresh
+   * requestId; a second confirm either passes #mutable (only awaiting_confirmation can) or
+   * raises, so the same draft can never be submitted twice.
+   */
+  submit(id, expectedRevision, now = Date.now() / 1000) {
+    const draft = this.#mutable(id, expectedRevision, now);
+    draft.state = 'sending';
+    draft.requestId = randomUUID();
+    draft.updatedAt = now;
+    this.store.save();
+    return draft;
+  }
+  /**
+   * Record the Runtime outcome. `receipt` is the authoritative delivery fact; the draft
+   * never becomes its own "sent" claim — it only mirrors what Runtime reported.
+   */
+  settle(id, state, {receipt = null, detail = ''} = {}, now = Date.now() / 1000) {
+    const draft = this.get(id, now);
+    draft.state = state;
+    draft.receipt = receipt;
+    draft.detail = detail;
     draft.updatedAt = now;
     this.store.save();
     return draft;

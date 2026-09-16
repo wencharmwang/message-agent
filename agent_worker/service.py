@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import threading
 import time
+import traceback
 import unicodedata
 import urllib.request
 import re
@@ -12,11 +13,17 @@ from .harness import Harness
 
 
 class RuntimeToolError(RuntimeError):
-    """A tool call the runtime refused, carrying the runtime's own failure code."""
+    """A tool call the runtime refused, carrying the runtime's own failure code.
 
-    def __init__(self, code, message=None):
+    `detail` keeps the runtime's own explanation. The code alone ("layout_unverified")
+    says nothing about which sub-check failed, and that detail was being thrown away —
+    which is why a blocked read used to be undiagnosable from the product side.
+    """
+
+    def __init__(self, code, message=None, detail=''):
         super().__init__(message or ('Runtime: ' + code))
         self.code = code
+        self.detail = detail or ''
 
 
 class Mcp:
@@ -38,11 +45,13 @@ class Mcp:
         result = envelope['result']
         data = json.loads(result['content'][0]['text'])
         if result.get('isError'):
-            raise RuntimeToolError(data.get('code', 'tool_failed'), 'Runtime: ' + data.get('code', 'tool_failed'))
+            raise RuntimeToolError(data.get('code', 'tool_failed'),
+                                   'Runtime: ' + data.get('code', 'tool_failed'),
+                                   data.get('error', ''))
         return data
 
-    def observe(self, rule):
-        page = self.call('observe_latest', {'provider': rule['provider'], 'conversation_id': rule['conversation'], 'limit': 30})
+    def observe(self, rule, limit=30):
+        page = self.call('observe_latest', {'provider': rule['provider'], 'conversation_id': rule['conversation'], 'limit': limit})
         return canonical_messages(page['messages'])
 
     def scan(self, provider):
@@ -51,9 +60,23 @@ class Mcp:
         # open any chat; observe_latest below is the only operation that does.
         # The name travels with the fingerprint: a conversation id is a hash of that name,
         # so keeping it is what lets a rule find itself again when OCR read the name in pieces.
-        return {item['id']: {'fingerprint': (item.get('metadata') or {}).get('activity_fingerprint', ''),
-                             'name': item.get('title') or ''}
-                for item in page['conversations']}
+        # System folders (公众号/服务号/微信支付…) are dropped here: they are not chats, their
+        # preview is platform-pushed and changes constantly, and "opening" one switches views.
+        # preview_hash (hash of the preview text only) is kept because it is the stable
+        # "new content" signal — activity_fingerprint mixes in the relative display time,
+        # which WeChat rewrites as the clock moves and would churn the inbox on its own.
+        result = {}
+        for item in page['conversations']:
+            title = item.get('title') or ''
+            if is_system_entry(title):
+                continue
+            meta = item.get('metadata') or {}
+            result[item['id']] = {
+                'fingerprint': meta.get('activity_fingerprint', ''),
+                'preview_hash': meta.get('preview_hash', ''),
+                'name': title,
+            }
+        return result
 
 
 TIMESTAMP_NOISE = re.compile(r'^(?:(?:星期[一二三四五六日天]|\d{1,2}月\d{1,2}日|\d{4}年\d{1,2}月\d{1,2}日|\d{4}[/\-.]\d{1,2}[/\-.]\d{1,2}|昨天|前天|今天)\s*(?:\d{1,2}:\d{2})?|\d{1,2}:\d{2})$')
@@ -67,6 +90,29 @@ def name_key(text):
     identity recovery compares keys, never raw strings.
     """
     return ''.join(ch for ch in str(text or '') if ch.isalnum()).lower()
+
+
+# WeChat paints its own service folders into the chat list as if they were rows: 公众号,
+# 服务号, 微信支付, 订阅号, 文件传输助手. They are not conversations — their preview is
+# pushed by the platform (so it changes without any new message from a person), and opening
+# one switches to a different view instead of a chat. Watching them made the inbox churn and
+# duplicate, so they are ignored at the list read. Keyed with name_key so OCR spacing errors
+# (公众 号 → 公众号) still match.
+SYSTEM_ENTRY_NAMES = frozenset({
+    name_key('公众号'), name_key('服务号'), name_key('微信支付'), name_key('订阅号'),
+    name_key('文件传输助手'), name_key('服务通知'), name_key('腾讯新闻'), name_key('微信团队'),
+    name_key('企业微信'), name_key('视频号'), name_key('群发助手')
+})
+
+
+def is_system_entry(name):
+    return name_key(name) in SYSTEM_ENTRY_NAMES
+
+
+# Runtime codes that all mean "the WeChat window is not in a state we can read": hidden to
+# the tray, minimized, or a capture surface that renders blank. Any of them is worth one
+# restore attempt — see Worker.recover_window.
+WINDOW_RECOVERY_CODES = ('provider_unavailable', 'layout_unverified', 'capture_failed', 'window_unavailable')
 
 
 def one_character_added(left, right):
@@ -229,7 +275,82 @@ class Worker:
         self._deferred_since = 0.0
         # Jobs whose post-generation read was deferred; see process().
         self._deferred_jobs = {}
+        # Latest discovery pass over the visible conversation list. It is kept in
+        # memory so the UI can ask "did anything arrive" without triggering another
+        # WeChat read on every poll.
+        self.observation = {'scanned_at': 0.0, 'providers': {}}
+        self.observe_error = ''
+        self.observe_error_detail = ''
+        self.observe_error_trace = ''
         self.store.recover()
+
+    def observe_enabled(self):
+        """Discovery is on unless the user turned it off; it used to require a rule.
+
+        Stored as a boolean ('1'/'0') rather than a word: Store.set_setting maps the
+        string 'off' onto '0', so an 'on'|'off' vocabulary would never round-trip.
+        """
+        return self.store.setting('observe_enabled', '1') == '1'
+
+    def observe_providers(self):
+        raw = str(self.store.setting('observe_providers', 'wechat-main') or '')
+        return [part.strip() for part in raw.split(',') if part.strip()]
+
+    def read_list(self, provider):
+        """One visible-list read with the existing recovery ladder.
+
+        Returns (table, None) on success, or (None, ('busy'|'error', error)).
+        """
+        try:
+            return self.mcp.scan(provider), None
+        except RuntimeToolError as error:
+            if error.code == 'provider_busy':
+                return None, ('busy', error)
+            restored = self.recover_window(provider, error)
+            if restored is not None:
+                return restored, None
+            return None, ('error', error)
+        except Exception as error:
+            restored = self.recover_window(provider, error)
+            if restored is not None:
+                return restored, None
+            return None, ('error', error)
+
+    def discover(self):
+        """Read the visible list for every observed provider, with no rule involved.
+
+        This is the capability that used to be missing: tick() read the list only for
+        providers that already had a rule, so a contact the user deliberately left on
+        manual was invisible to the product. Discovery reads the list and nothing else
+        — opening a chat would clear the user's unread badge and move whatever they are
+        currently looking at, which is not ours to spend.
+        """
+        scanned, failure, detail, trace = {}, '', '', ''
+        if not self.observe_enabled():
+            return scanned
+        for provider in self.observe_providers():
+            table, problem = self.read_list(provider)
+            if table is None:
+                if not failure:
+                    failure = problem[1].code if problem[0] == 'busy' else safe_error(problem[1])
+                    detail = getattr(problem[1], 'detail', '')
+                    trace = error_trace(problem[1])
+                continue
+            scanned[provider] = dict(table)
+        self.observation = {'scanned_at': time.time(), 'providers': scanned}
+        self.observe_error = failure
+        self.observe_error_detail = detail
+        self.observe_error_trace = trace
+        return scanned
+
+    def observation_snapshot(self):
+        """Cached discovery result for the UI. Never triggers a WeChat read."""
+        return {'scanned_at': self.observation.get('scanned_at', 0.0),
+                'providers': self.observation.get('providers', {}),
+                'error': self.observe_error,
+                'error_detail': self.observe_error_detail,
+                'error_trace': self.observe_error_trace,
+                'level': 'list' if self.observe_enabled() else 'off'}
 
     def defer_for_user(self, rule):
         """The user is working in WeChat, and reading a chat means opening it.
@@ -256,12 +377,19 @@ class Worker:
     def recover_window(self, provider, error):
         """Opt-in recovery for a client the user minimized or hid to the tray.
 
-        Only the explicit 'auto_restore_window' setting asks for it, at most once a minute,
-        and only after a provider_unavailable read. The restore itself is a runtime
-        operation (the message layer owns device access); returns the re-scanned list or
-        None so the caller can keep reporting the original failure.
+        Only the explicit 'auto_restore_window' setting asks for it, at most once a minute.
+
+        The code guard used to be `provider_unavailable` only, so a minimized or
+        unrenderable window — which the driver reports as `layout_unverified`
+        ("the conversation-list boundary could not be identified") because a blank capture
+        has no divider — never triggered a restore, and the stall was permanent. Every
+        "we cannot see the window" code now earns one restore attempt.
+
+        The restore itself is a runtime operation (the message layer owns device access);
+        returns the re-scanned list or None so the caller can keep reporting the original
+        failure.
         """
-        if getattr(error, 'code', None) != 'provider_unavailable':
+        if getattr(error, 'code', None) not in WINDOW_RECOVERY_CODES:
             return None
         if self.store.setting('auto_restore_window', '1') != '1':
             return None
@@ -460,30 +588,25 @@ class Worker:
     def tick(self):
         rules = [rule for rule in self.store.rules()
                  if rule['enabled'] and rule['status'] != 'blocked']
-        scans = {}
+        # Discovery runs first and depends on no rule: it answers "did anything arrive",
+        # which the user needs whether or not the assistant is allowed to reply. Its
+        # scan is reused just below so each provider is still read once per cycle.
+        scans = dict(self.discover())
         busy = False
         for provider in dict.fromkeys(rule['provider'] for rule in rules):
-            try:
-                scans[provider] = self.mcp.scan(provider)
-            except RuntimeToolError as error:
-                if error.code == 'provider_busy':
-                    # The runtime is driving WeChat's own search UI for a user-commanded
-                    # send. That is brief and expected: touch no status at all, skip this
-                    # cycle (the rules loop ignores providers missing from scans) and pick
-                    # the list up again on the next tick.
-                    busy = True
-                    continue
-                restored = self.recover_window(provider, error)
-                if restored is None:
-                    self.report_connection(rules, provider, error)
-                else:
-                    scans[provider] = restored
-            except Exception as error:
-                restored = self.recover_window(provider, error)
-                if restored is None:
-                    self.report_connection(rules, provider, error)
-                else:
-                    scans[provider] = restored
+            if provider in scans:
+                continue
+            table, problem = self.read_list(provider)
+            if table is not None:
+                scans[provider] = table
+            elif problem[0] == 'busy':
+                # The runtime is driving WeChat's own search UI for a user-commanded
+                # send. That is brief and expected: touch no status at all, skip this
+                # cycle (the rules loop ignores providers missing from scans) and pick
+                # the list up again on the next tick.
+                busy = True
+            else:
+                self.report_connection(rules, provider, problem[1])
         for rule in rules:
             if self.stop.is_set():
                 return
@@ -551,3 +674,21 @@ def safe_error(error):
         if 'sk-' not in message and len(message) <= 300:
             return message
     return type(error).__name__ + ': 操作失败，请检查连接、配置或执行日志'
+
+
+def error_trace(error, limit=8):
+    """Short traceback for the developer view.
+
+    During development "读取不到消息" is undiagnosable without the frames that produced
+    it: the runtime only hands back a code, and the code alone does not say which
+    sub-check failed. `limit` keeps it to the tail (where the raise happened) instead of
+    the whole stack of the polling thread. Credential-looking text is still redacted,
+    because this string travels to the browser.
+    """
+    if error is None:
+        return ''
+    text = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
+    text = '\n'.join(line.rstrip() for line in text.strip().splitlines()[-limit:])
+    if 'sk-' in text:
+        return '(含疑似凭据，已省略调用栈)'
+    return text[:4000]

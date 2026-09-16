@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 
 export function automaticRequestConfig(proposed, settings) {
-  return {...proposed,maxTokens:settings.max_tokens,
+  return {...proposed,model:settings.model,maxTokens:settings.max_tokens,
     reasoningEffort:settings.auto_reasoning_effort ?? 'low'};
 }
 

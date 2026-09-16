@@ -4,7 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Drafts, DRAFT_TTL_SECONDS, validateDraftText } from './storage.mjs';
-import { identityKey, projectInbox, pageInbox, RUNTIME_MESSAGES } from './product.mjs';
+import { identityKey, projectInbox, pageInbox, projectToday, RUNTIME_MESSAGES, devDiagnosticsEnabled, DEV_LOG_FILE } from './product.mjs';
 
 // Development fixtures only: no real WeChat data, no real contact names.
 
@@ -174,4 +174,44 @@ test('pageInbox filters and paginates without overlap or loss', () => {
   assert.equal(pageInbox(items, {filter: 'pending'}).items.length, 0);
   assert.equal(pageInbox(items, {filter: 'error'}).items.length, 0);
   assert.throws(() => pageInbox(items, {limit: 2, cursor: '0:nonexistent'}), /分页位置已失效/);
+});
+
+// The developer view is a launch switch, not a feature flag to forget about: unset keeps
+// it on while the product is being built, and `dev_diagnostics: false` in config.json is
+// the one line that hides every raw error code and stack trace for release.
+test('the developer view is on until config.json turns it off', () => {
+  assert.equal(devDiagnosticsEnabled({}), true);
+  assert.equal(devDiagnosticsEnabled({dev_diagnostics: true}), true);
+  assert.equal(devDiagnosticsEnabled({dev_diagnostics: false}), false);
+  assert.equal(DEV_LOG_FILE, 'dev-errors.log');
+});
+
+// 客户端的按钮那一行现在只放按钮：联系人名字曾经渲染在按钮前面，名字长短不一，于是每一行的
+// 按钮被推到不同位置。名字因此必须由标题带出来，否则 pending 行（标题原本只有"为什么等你"）
+// 就再也看不到是谁了。这条钉住的就是那个前提。
+test('every 「今天要做的」 row names the contact in its title', () => {
+  const longName = '长江证券孙盛（投资投顾编号：S0490621050022)';
+  const items = projectInbox({
+    rules: [rule('nu', {status: 'needs_user', detail: '需要本人确认报价'})],
+    jobs: [],
+    bindings: {},
+    drafts: []
+  });
+  const page = projectToday({
+    items,
+    deferred: [{
+      key: 'deferred-key', identity: {provider: 'wechat-main', conversation: 'conv-def', title: longName, kind: 'direct'},
+      summary: ['问我文件收到没有'], since: 1, updatedAt: 2, classification: 'reply'
+    }]
+  });
+  const rows = page.groups.find(group => group.key === 'decide').items;
+  assert.equal(rows.length, 2, '一条 pending 会话 + 一条稍后处理');
+  for (const row of rows) {
+    assert.ok(row.identity?.title, '仍要保留 identity，跳转和按钮都要用它');
+    const escaped = row.identity.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(row.title, new RegExp(escaped), '标题里必须出现联系人名字：按钮那一行已经不渲染它了');
+  }
+  // deferred 行与 pending 行都叫 kind:'conversation'，用 attentionKind 区分。
+  assert.equal(rows.find(row => row.attentionKind === 'manual').title, 'Fixture nu：需要本人确认报价');
+  assert.equal(rows.find(row => row.attentionKind === 'deferred').title, '稍后再处理：' + longName);
 });

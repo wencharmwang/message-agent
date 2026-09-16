@@ -14,13 +14,18 @@ class Harness:
     def run(self, rule, job):
         token = Path(self.config['control_token_file']).read_text().strip()
         legacy_ids, deliveries = [], []
+        auto_model = self.config['model']
         if self.config.get('database') and Path(self.config['database']).exists():
             with closing(sqlite3.connect(Path(self.config['database']).as_uri() + '?mode=ro', uri=True)) as db:
                 rows = db.execute('SELECT id,state,text,detail FROM reply_jobs WHERE provider=? AND conversation=? AND id<>? ORDER BY created_at DESC LIMIT 100',
                                   (job['provider'], job['conversation'], job['id'])).fetchall()
+                model_row = db.execute("SELECT value FROM runtime_settings WHERE key='auto_model'").fetchone()
             legacy_ids = ['messaging-' + row[0] for row in rows]
             deliveries = [{'state': row[1], 'text': row[2]} for row in rows[:3]]
-        payload = json.dumps({'rule': rule, 'job': job, 'legacy_session_ids': legacy_ids, 'recent_deliveries': deliveries}, ensure_ascii=False).encode('utf-8')
+            if model_row and model_row[0]:
+                auto_model = model_row[0]
+        payload = json.dumps({'rule': rule, 'job': job, 'legacy_session_ids': legacy_ids,
+                              'recent_deliveries': deliveries, 'auto_model': auto_model}, ensure_ascii=False).encode('utf-8')
         request = urllib.request.Request(f"http://127.0.0.1:{self.config['harness_port']}/message-agent/job",payload,
                     headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
         try:
