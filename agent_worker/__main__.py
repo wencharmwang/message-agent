@@ -174,6 +174,14 @@ def handler(worker, token):
                     limit = max(5, min(limit, 60)) if isinstance(limit, int) and not isinstance(limit, bool) else 30
                     messages = worker.mcp.observe({'provider': provider, 'conversation': conversation}, limit)
                     self.response(200, {'provider': provider, 'conversation': conversation, 'messages': messages})
+                elif self.path == '/api/observe/refresh':
+                    # A visible-list read is now a user action. It never opens a chat, but
+                    # it must not be smuggled back into the worker's five-second loop.
+                    worker.discover(force=True)
+                    snapshot = worker.observation_snapshot()
+                    if not dev_diagnostics():
+                        snapshot.pop('error_trace', None)
+                    self.response(200, snapshot)
                 elif self.path == '/api/send':
                     # The Host's trusted manual-send path. origin=user_request is the exact
                     # classification the runtime documents for "the user confirmed this draft",
@@ -225,7 +233,9 @@ def handler(worker, token):
                     if 'observe_enabled' in data:
                         if not isinstance(data['observe_enabled'], bool):
                             raise ValueError('Invalid observe_enabled')
-                        worker.store.set_setting('observe_enabled', data['observe_enabled'])
+                        # Kept as a compatible no-op for older clients. Inbox observation
+                        # is manual; automatic-reply scanning is controlled by rule enablement.
+                        worker.store.set_setting('observe_enabled', False)
                         changed = True
                     if 'dev_diagnostics' in data:
                         if not isinstance(data['dev_diagnostics'], bool):

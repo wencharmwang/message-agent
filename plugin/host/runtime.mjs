@@ -57,6 +57,10 @@ export class RuntimeAdapter {
   observe() {
     return this.#call('GET', '/api/observe');
   }
+  /** User-initiated visible-list refresh. Never called by page polling. */
+  refreshObservation() {
+    return this.#call('POST', '/api/observe/refresh', {});
+  }
   /**
    * Read one conversation's latest messages. This DOES open the chat, so it is only ever
    * called for a conversation the user asked about (or when they explicitly allowed the
@@ -65,7 +69,7 @@ export class RuntimeAdapter {
   readConversation({provider, conversation, limit}) {
     return this.#call('POST', '/api/read', {provider, conversation_id: conversation, limit});
   }
-  /** Turn visible-list discovery on or off. Discovery never opens a chat. */
+  /** Compatibility shim: continuous inbox discovery no longer exists. */
   setObserving(enabled) {
     return this.#call('POST', '/api/settings', {observe_enabled: !!enabled});
   }

@@ -55,3 +55,10 @@ test('详情组件把「已读」状态当成本会话的本地状态，而不�
   // 刻意**不**断言 `key={item.key}` 出现：列表里的 map 到处都是这个写法，那种断言会在缺 key
   // 的情况下照样通过（已经踩到过）。真正管用的判定在上面那条渲染点检查里。
 });
+
+test('消息页以用户主动整理为首屏，不再引导持续监听', () => {
+  assert.match(source, /你想整理什么？/);
+  assert.match(source, /message-center\/organize/);
+  assert.match(source, /不会在后台持续监听/);
+  assert.doesNotMatch(source, /开始关注新消息/);
+});

@@ -556,7 +556,7 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
 
   function CenterRow({item,active,onClick}){
     const suggestion=item.classified?CLASS_LABEL[item.classification]:'待判断';
-    const meta=(item.summary&&item.summary.length)?firstLine(item.summary[0],44):(item.newCount===null?'有新消息 · 还没读':suggestion);
+    const meta=(item.summary&&item.summary.length)?firstLine(item.summary[0],44):(item.read?'已读取正文':'尚未读取正文');
     const extra=[
       item.following===false?'已忽略':'',
       item.pendingDrafts>0?'草稿待确认':'',
@@ -567,7 +567,7 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
     return h(Row,{key:item.key,title:item.identity.title,right:item.lastActivityAt?relativeTime(item.lastActivityAt):'',meta,active,inboxItem:true,onClick},
       h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,marginTop:8,flexWrap:'wrap'}},
         h('span',{style:pill(item.classified?CLASS_PILL[item.classification]:C.text3)},suggestion),
-        item.newCount!=null&&h('span',{style:{fontSize:13,color:C.text3}},item.newCount+' 条新消息'),
+        item.newCount!=null&&h('span',{style:{fontSize:13,color:C.text3}},item.newCount+' 条已整理'),
         item.identity.kind==='group'&&h('span',{style:{fontSize:13,color:C.text3}},'群聊')),
       extra&&h('div',{style:{marginTop:6,fontSize:13,color:C.text3}},extra));
   }
@@ -588,33 +588,76 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
         h('button',{onClick:onMarkAll,style:small(false)},'全部标为已看')));
   }
 
-  function CenterList({store,items,narrow,onStart,onMarkAll,stalled,stalledDev}){
-    const {contactKey,scope}=useStore(store),[query,setQuery]=useState('');
+  function CenterList({store,items,narrow}){
+    const {contactKey}=useStore(store),[query,setQuery]=useState('');
     const needle=query.trim().toLowerCase();
     const shown=items.filter(item=>!needle||item.identity.title.toLowerCase().includes(needle)||(item.summary||[]).join(' ').toLowerCase().includes(needle));
-    // Which group a row belongs to is decided server-side (`item.group`), so an
-    // unclassified row lands in exactly one group. Deriving it here with a ternary made
-    // the unclassified branch true for every group and rendered each row four times.
-    const grouped=scope==='attention'
-      ? ACTION_CLASSES.map(c=>({c,label:CLASS_LABEL[c],list:shown.filter(item=>item.group===c)}))
-      : [{c:'all',label:null,list:shown}];
     return h('section',{style:{display:'flex',flexDirection:'column',height:'100%',minWidth:0},'aria-label':'消息列表'},
       h('header',{style:{padding:narrow?'14px 14px 10px':'18px 18px 12px',borderBottom:'1px solid '+C.border}},
-        h('h1',{style:{...h1,fontSize:20,marginBottom:12}},'消息'),
-        h('div',{style:{display:'flex',gap:8,marginBottom:12,flexWrap:'wrap'}},SCOPE_TABS.map(([value,label])=>
-          h('button',{key:value,onClick:()=>store.set({scope:value}),'aria-pressed':scope===value,style:{...pill(scope===value?C.brand:null),background:scope===value?C.hover:'transparent',cursor:'pointer',minHeight:36}},label))),
-        h('input',{value:query,onChange:event=>setQuery(event.target.value),placeholder:'搜索联系人或内容','aria-label':'搜索消息',style:field}),
-        // A stalled scan must be explained: the rows below are the last known state, not
-        // the current one, and every read will fail until the window is readable again.
-        stalled&&h('div',{style:{marginTop:12,padding:'10px 12px',borderRadius:10,border:'1px solid '+C.warn,background:C.panel,fontSize:13,color:C.text2,lineHeight:1.7}},
-          h('div',null,'暂时读不到微信：'+stalled),
-          h(DevBox,{dev:stalledDev,code:stalledDev?.code,label:'读取失败原因'})),
-        h(CenterDigest,{items,onStart,onMarkAll})),
+        h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginBottom:12}},
+          h('h1',{style:{...h1,fontSize:20,margin:0}},'最近整理'),
+          h('button',{onClick:()=>store.set({contactKey:null}),style:small(false)},'整理消息')),
+        h('input',{value:query,onChange:event=>setQuery(event.target.value),placeholder:'搜索整理记录','aria-label':'搜索消息',style:field})),
       h('div',{style:{flex:1,overflowY:'auto'}},
-        !shown.length&&h('p',{style:{padding:24,textAlign:'center',color:C.text3,fontSize:14,lineHeight:1.8}},needle?'没有找到相关消息':(scope==='attention'?'暂时没有需要处理的新消息。':'这里暂时没有内容')),
-        grouped.map(group=>!group.list.length?null:h('div',{key:group.c},
-          group.label&&h('div',{style:{padding:'12px 15px 4px',fontSize:13,color:C.text3}},group.label+' · '+group.list.length),
-          group.list.map(item=>h(CenterRow,{key:item.key,item,active:contactKey===item.key,onClick:()=>store.set({contactKey:item.key})}))))));
+        !shown.length&&h('p',{style:{padding:24,textAlign:'center',color:C.text3,fontSize:14,lineHeight:1.8}},needle?'没有找到相关记录':'还没有整理记录'),
+        shown.map(item=>h(CenterRow,{key:item.key,item,active:contactKey===item.key,onClick:()=>store.set({contactKey:item.key})}))));
+  }
+
+  function OrganizerHome({items,onChanged,store,narrow}){
+    const [text,setText]=useState(''),[busy,setBusy]=useState(false),[refreshing,setRefreshing]=useState(false);
+    const [answer,setAnswer]=useState(null),[error,setError]=useState(''),[note,setNote]=useState('');
+    const quick=[
+      ['整理最近消息','查看微信当前可见的最近会话，读取最多 5 个最值得关注的会话，告诉我发生了什么，并列出需要我处理的事项。'],
+      ['找出需要回复的','查看最近会话，找出明确在等我回复的人。只给必要背景和建议回复方向，不要发送。'],
+      ['提取待办','从最近相关消息中提取需要我本人完成的事情；不需要回复的也要列出来。'],
+      ['看看有没有遗漏','检查最近会话里是否有日期、承诺、文件、付款或决定被我遗漏。']
+    ];
+    async function run(request){
+      const value=String(request??text).trim();if(!value||busy)return;
+      setBusy(true);setError('');setNote('');setAnswer(null);
+      try{setAnswer(await api('message-center/organize',{text:value}));setText('');onChanged();}
+      catch(e){setError(e.message);}finally{setBusy(false);}
+    }
+    async function refresh(){
+      setRefreshing(true);setError('');setNote('');
+      try{const result=await api('message-center/refresh',{});setNote(result.observationMessage||('已看到微信当前列表里的 '+result.visibleCount+' 个会话，没有打开聊天。'));await onChanged();}
+      catch(e){setError(e.message);}finally{setRefreshing(false);}
+    }
+    const todos=answer?answerListItems(answer.answer):[];
+    async function addTodos(){
+      setBusy(true);setError('');
+      try{for(const item of todos)await api('todos',{title:firstLine(item,40),detail:item,source:'assistant'});setNote('✓ 已把 '+todos.length+' 件事放进「今天要做的」');}
+      catch(e){setError(e.message);}finally{setBusy(false);}
+    }
+    return h('section',{style:{flex:1,minWidth:0,height:'100%',overflowY:'auto'}},
+      h('div',{style:{maxWidth:820,padding:narrow?'22px 16px 42px':'38px 42px 60px',margin:'0 auto'}},
+        h('h1',{style:{...h1,fontSize:28,marginBottom:8}},'你想整理什么？'),
+        h('p',{style:{...hint,fontSize:14,margin:'0 0 22px'}},'只有你发起整理时，助手才会查看微信；不会在后台持续监听，也不会发送消息。自动回复仍按单独配置运行。'),
+        h(Notice,{error}),
+        note&&h('p',{style:{color:C.ok,fontSize:14,lineHeight:1.7,margin:'0 0 14px'}},note),
+        h('div',{style:{display:'grid',gridTemplateColumns:narrow?'1fr':'repeat(2,minmax(0,1fr))',gap:12,marginBottom:18}},
+          quick.map(([title,prompt],index)=>h('button',{key:title,onClick:()=>run(prompt),disabled:busy,
+            style:{textAlign:'left',padding:'16px 17px',borderRadius:14,border:'1px solid '+C.border,background:index===0?C.hover:C.panel,color:C.text,cursor:busy?'default':'pointer',minHeight:92}},
+            h('strong',{style:{display:'block',fontSize:16,marginBottom:7}},title),
+            h('span',{style:{fontSize:13,color:C.text3,lineHeight:1.6}},firstLine(prompt,42))))),
+        h('div',{style:{display:'flex',gap:10,alignItems:'center',padding:10,border:'1px solid '+C.border,borderRadius:14,background:C.panel}},
+          h('input',{value:text,onChange:event=>setText(event.target.value),onKeyDown:event=>{if(event.key==='Enter')run();},
+            placeholder:'例如：帮我看看最近有没有要确认时间的消息','aria-label':'输入整理需求',style:{...field,border:'none',background:'transparent',flex:1,minWidth:0}}),
+          h('button',{onClick:()=>run(),disabled:busy||!text.trim(),style:button(true)},busy?'正在整理…':'开始整理')),
+        h('div',{style:{display:'flex',alignItems:'center',gap:10,marginTop:11,flexWrap:'wrap'}},
+          h('button',{onClick:refresh,disabled:refreshing||busy,style:small(false)},refreshing?'正在查看…':'只刷新会话列表'),
+          h('span',{style:{fontSize:12,color:C.text3}},'这个操作不会打开聊天，也不会清未读红点。')),
+        busy&&h('div',{style:{marginTop:18,padding:'13px 15px',borderRadius:12,background:C.panel,color:C.text2,fontSize:14}},'正在按你的要求读取和整理；遇到微信正在使用时会跳过，不会在后台反复重试。'),
+        answer&&h('div',{style:{marginTop:22,border:'1px solid '+C.border,borderRadius:14,background:C.panel,overflow:'hidden'}},
+          h('div',{style:{padding:'12px 16px',borderBottom:'1px solid '+C.border,fontSize:13,color:C.text3}},'整理结果'),
+          h('p',{style:{margin:0,padding:'16px 17px',whiteSpace:'pre-wrap',lineHeight:1.85,fontSize:15,color:C.text}},answer.answer),
+          !!todos.length&&h('div',{style:{padding:'0 17px 16px'}},h('button',{onClick:addTodos,disabled:busy,style:small(true)},'把 '+todos.length+' 件事加入今天要做的'))),
+        narrow&&!!items.length&&h('div',{style:{marginTop:28}},
+          h('h2',{style:{...h3,marginBottom:10}},'最近整理'),
+          items.slice(0,8).map(item=>h('button',{key:item.key,onClick:()=>store.set({contactKey:item.key}),
+            style:{display:'block',width:'100%',textAlign:'left',padding:'12px 4px',border:'none',borderTop:'1px solid '+C.border,background:'transparent',color:C.text}},
+            h('strong',{style:{fontSize:14}},item.identity.title),
+            h('span',{style:{display:'block',fontSize:13,color:C.text3,marginTop:4}},item.summary?.[0]||'查看整理记录'))))));
   }
 
   function CenterDetail({store,item,narrow,onChanged}){
@@ -734,36 +777,30 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
   }
 
   function MessagesPage({store,narrow}){
-    const {contactKey,scope}=useStore(store);
-    const order=scope==='attention'?'priority':'recent';
-    const center=usePoller(true,()=>api('message-center?scope='+scope+'&order='+order+'&limit=60'),5000);
-    const items=center.data?center.data.items:[];
-    const observing=center.data?.observing;
+    const {contactKey}=useStore(store);
+    const center=usePoller(true,()=>api('message-center?scope=all&order=recent&limit=60'),10000);
+    // Old continuous-observation rows are not "整理记录". Only show conversations for
+    // which the user actually read content or created an action.
+    const items=(center.data?.items||[]).filter(item=>item.read||(item.summary&&item.summary.length)
+      ||item.openTodos>0||item.pendingDrafts>0||item.actionState==='deferred');
     // Only judge "the selected conversation is gone" against a payload that was actually
     // fetched for the scope we are showing now. Jumping here from 「今天要做的」 sets the
     // scope to `all` and the selection at the same time, while `items` still holds the
     // previous scope's page — which of course does not contain it, so the selection was
     // cleared on the spot. That is why 「去看看」 looked like it did nothing.
-    const listedScope=center.data?.scope;
     useEffect(()=>{
-      if(!contactKey||!items.length||listedScope!==scope)return;
+      if(!contactKey||!items.length)return;
       if(!items.some(item=>item.key===contactKey))store.set({contactKey:null});
-    },[contactKey,items,listedScope,scope,store]);
-    if(center.loading&&!center.data)return h(Empty,{title:'正在读取消息',text:'请稍等一下…'});
+    },[contactKey,items,store]);
+    if(center.loading&&!center.data)return h(Empty,{title:'正在打开消息整理',text:'请稍等一下…'});
     if(center.error&&!center.data)return h('div',{style:{padding:24,maxWidth:640}},
       h(Empty,{title:'暂时读不到消息',text:center.error},h('button',{onClick:center.refresh,style:button(true)},'重新读取')),
       h(DevBox,{dev:center.errorDev,code:center.errorCode,label:'读取失败原因'}));
-    if(observing===false)return h(Empty,{title:'消息助手还没有开始关注',text:'打开后，助手会持续查看微信当前可见的会话列表，告诉你谁发了新消息。它只读列表、不打开聊天，不会动你的未读红点。'},
-      h('button',{onClick:async()=>{await api('message-center/preferences',{observe_enabled:true});center.refresh();},style:button(true)},'开始关注新消息'));
-    if(!items.length)return h(Empty,{title:'还没有会话动态',text:'微信当前可见的聊天列表里还没有内容，或还没有读到。助手会持续观察，有新消息会出现在这里。'});
     const item=items.find(entry=>entry.key===contactKey)||null;
-    const start=()=>{const first=items.find(entry=>entry.attention)||items[0];store.set({contactKey:first.key});};
-    const markAll=async()=>{for(const entry of items.slice(0,40)){if(entry.reading==='new'){try{await api('message-center/'+entry.key+'/seen',{});}catch{}}}center.refresh();};
     return h('div',{style:{display:'flex',height:'100%',width:'100%',minWidth:0}},
-      (!narrow||!contactKey)&&h('div',{style:{width:narrow?'100%':370,flexShrink:0,borderRight:narrow?'none':'1px solid '+C.border}},
-        h(CenterList,{store,items,narrow,onStart:start,onMarkAll:markAll,stalled:center.data?.observationMessage||'',
-          stalledDev:center.data?{code:center.data.observationError,detail:center.data.observationDetail,trace:center.data.observationTrace,where:'worker:observe'}:null})),
-      (!narrow||contactKey)&&(item?h(CenterDetail,{key:item.key,store,item,narrow,onChanged:center.refresh}):h(Empty,{title:'选一个会话',text:'左边点一个联系人，就能看到 AI 总结、要不要处理，以及怎么回。'})));
+      !narrow&&h('div',{style:{width:340,flexShrink:0,borderRight:'1px solid '+C.border}},h(CenterList,{store,items,narrow:false})),
+      item?h(CenterDetail,{key:item.key,store,item,narrow,onChanged:center.refresh})
+        :h(OrganizerHome,{items,onChanged:center.refresh,store,narrow}));
   }
 
   function NoConversations({store}){
@@ -1285,16 +1322,6 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
     const settings=usePoller(true,()=>api('settings'),15000);
     const catalog=usePoller(true,()=>api('models'),60000);
     const [savingModel,setSavingModel]=useState(false),[modelError,setModelError]=useState('');
-    // 「消息正文按需读取」原来只是一张写着「推荐设置」的说明卡，没有任何可操作的东西。
-    // 后端本来就有 read_bodies 这个偏好，接上开关即可。
-    const prefs=usePoller(true,()=>api('message-center/preferences'),20000);
-    const [savingPref,setSavingPref]=useState(''),[prefError,setPrefError]=useState('');
-    const readBodies=!!prefs.data?.read_bodies;
-    async function toggleReadBodies(){
-      setSavingPref('read_bodies');setPrefError('');
-      try{await api('message-center/preferences',{read_bodies:!readBodies});prefs.refresh();}
-      catch(e){setPrefError(e.message);}finally{setSavingPref('');}
-    }
     const ok=data&&!data.error;
     const autoModel=settings.data?.settings?.auto_model||data?.model||'';
     const listedModels=catalog.data?.models||[];
@@ -1309,7 +1336,7 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
     return h('div',{style:{width:'100%',overflowY:'auto'}},
       h('div',{style:{padding:'24px clamp(18px,4vw,48px) 60px',maxWidth:760}},
         h('h1',h1,'设置'),
-        h(Notice,{error:modelError||prefError||status.error||settings.error||catalog.error||prefs.error}),
+        h(Notice,{error:modelError||status.error||settings.error||catalog.error}),
         h('section',{style:card},
           h('div',{style:{display:'flex',alignItems:'center',gap:12}},
             h('span',{style:{fontSize:22,color:ok?C.ok:C.text3}},'●'),
@@ -1318,16 +1345,9 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
               h('span',{style:{fontSize:13,color:C.text3}},data?('已接入 '+data.rules.length+' 个联系人'):'请稍等…'))),
            h('p',{style:{marginTop:16,color:C.text2,fontSize:14,lineHeight:1.8}},'聊天内容、跟进记录和待办都存在这台电脑上。使用云端模型时，为了完成你的要求，相关聊天内容会发送给模型服务。')),
         h('section',{style:{...card,marginTop:16}},
-          h('h3',h3,'消息正文按需读取'),
-          h('p',{style:{...hint,margin:'0 0 12px'}},'读正文必须打开微信里的那个会话。打开会挤走你正在看的内容，也会清掉那个会话的未读红点（微信没有「看过但保留红点」）。所以默认只在你自己动手时才读。'),
-          h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:16,flexWrap:'wrap'}},
-            h('div',{style:{minWidth:240,flex:1}},
-              h('strong',{style:{display:'block',fontSize:15,color:C.text}},readBodies?'已开启：助手会主动读正文':'已关闭：只在你操作时读正文'),
-              h('span',{style:{fontSize:13,color:C.text3,lineHeight:1.7}},readBodies
-                ?'助手会在后台替你打开还没读过的会话，先把正文读出来做总结和分类，你打开时内容已经在了。每一轮最多读一个；你正在用微信时它会自动让开，等你停手再继续。'
-                :'推荐设置：后台观察只看会话列表，不打开聊天，不会动你的未读红点。')),
-            h(Toggle,{on:readBodies,onClick:toggleReadBodies,busy:savingPref==='read_bodies',disabled:!prefs.data,label:readBodies?'开启':'关闭'})),
-          readBodies&&h('p',{style:{...hint,marginTop:10}},'注意：开启后，被读过的会话在微信里的未读红点会被助手清掉。')),
+          h('h3',h3,'消息整理方式'),
+          h('strong',{style:{display:'block',fontSize:15,color:C.text,marginBottom:7}},'按需整理，不持续监听'),
+          h('p',{style:{...hint,margin:0}},'只有你在「消息」页发起整理或主动打开某个会话时，助手才会读取微信。读取正文可能会切换会话并清掉未读红点；页面刷新和后台轮询不会操作微信。自动回复是独立功能，仍按你启用的联系人规则运行。')),
         h('section',{style:{...card,marginTop:16}},
           h('h3',h3,'自动回复模型'),
           h('p',{style:{...hint,margin:'0 0 12px'}},'只影响后台自动消息任务，不会改变你在聊天页手动选择的模型。修改后从下一条新消息开始生效。'),

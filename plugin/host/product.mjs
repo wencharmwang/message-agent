@@ -375,12 +375,6 @@ export function createProductApi({config, token, conversations, bindingsPath, re
   const context = contextSystem ?? null;
   const center = messageCenterInjected
     ?? createMessageCenter({databasePath: join(dirname(config.database), 'inbox.db'), identityKey});
-  // Bounded background work for the message centre. Both budgets exist because every
-  // read opens a WeChat chat: doing them all at once would take the screen over.
-  const TRIAGE_BUDGET = 2;
-  // One conversation per poll when the user opted into background body reads. Opening a chat
-  // is visible and clears its unread badge, so it never happens in bulk.
-  const BODY_READ_BUDGET = 1;
   // "I looked at it" is a host-side bookkeeping detail, not worker state: the delivery
   // record itself must stay untouched.
   const reviewedPath = join(dirname(config.database), 'reviewed.json');
@@ -487,9 +481,17 @@ export function createProductApi({config, token, conversations, bindingsPath, re
     return map;
   }
   let lastCenterScanAt = 0;
-  /** Fold each worker discovery pass into the centre exactly once. No extra WeChat read. */
-  async function syncCenter() {
-    const [status, observation] = await Promise.all([runtime.status(), runtime.observe()]);
+  /**
+   * Fold a discovery snapshot into the centre exactly once.
+   *
+   * The default path is cache-only and is safe for page polling.  ``refresh`` is used
+   * exclusively by a user click and performs the one visible-list read for that action.
+   */
+  async function syncCenter({refresh = false} = {}) {
+    const [status, observation] = await Promise.all([
+      runtime.status(),
+      refresh ? runtime.refreshObservation() : runtime.observe()
+    ]);
     const scannedAt = Number(observation.scanned_at ?? 0);
     // Both the queue and the selected detail poll this cached result. Counting those HTTP
     // reads as separate observations let one noisy OCR frame satisfy the settling quorum
@@ -584,65 +586,6 @@ export function createProductApi({config, token, conversations, bindingsPath, re
       return null;
     }
   }
-  let pumping = false;
-  /**
-   * Bounded, sequential catch-up work for whatever the queue just showed.
-   *
-   * It only classifies snapshots that already exist. Opening a WeChat chat is never a
-   * background side effect of polling the page; body reads happen only after explicit
-   * read, draft, or ask actions initiated by the user.
-   */
-  async function pumpTriage() {
-    if (pumping) return;
-    pumping = true;
-    try {
-      for (const key of center.pendingClassification(TRIAGE_BUDGET)) {
-        // classifyOne already records its own failure; this guard exists so one bad batch
-        // cannot stop the rest of the queue from being classified.
-        try { await classifyOne(key); } catch (error) { devLog('triage:unexpected', error, {key}); }
-      }
-    } finally {
-      pumping = false;
-    }
-  }
-  let bodyPumping = false;
-  /**
-   * Opt-in background body reading — the switch the settings page shows as
-   * 「消息正文按需读取」. With it on, the assistant opens one unread conversation per poll so
-   * the summary and the four-way classification are ready by the time the user looks, instead
-   * of waiting for them to click.
-   *
-   * It is a real, visible cost that the user opted into: opening a chat clears its unread
-   * badge in WeChat and moves what they are looking at. So it is one conversation per cycle,
-   * never a conversation they stopped following, and `wechat_in_use` / unreadable-window
-   * failures simply leave the candidate pending for the next poll rather than fighting the
-   * user for the foreground.
-   */
-  async function pumpBodyReads() {
-    if (bodyPumping || !center.readBodiesEnabled()) return;
-    bodyPumping = true;
-    try {
-      for (const row of center.pendingBackgroundRead(BODY_READ_BUDGET)) {
-        try {
-          const page = await runtime.readConversation({provider: row.provider, conversation: row.conversation});
-          const attached = center.attachSnapshot(row.conversation_key, page.messages);
-          if (!attached.messages.length) {
-            devLog('body-read:empty', {code: 'READ_EMPTY_RESPONSE', message: 'runtime 返回了 0 条可读消息'},
-              {key: row.conversation_key});
-          }
-          await classifyOne(row.conversation_key);
-        } catch (error) {
-          // Expected and benign: the user is working in WeChat right now, or the window is
-          // not readable. Record the failure so the next poll backs off instead of clicking
-          // this conversation's row again five seconds later.
-          center.markReadFailed(row.conversation_key);
-          devLog('body-read', error, {key: row.conversation_key});
-        }
-      }
-    } finally {
-      bodyPumping = false;
-    }
-  }
   /**
    * The message centre API (product design §14). Every route works on the conversation
    * key, which is the same identity the CRM, drafts and automatic rules already use, so
@@ -664,13 +607,14 @@ export function createProductApi({config, token, conversations, bindingsPath, re
       const page = center.list({scope, order, limit, cursor: url.searchParams.get('cursor') ?? undefined, extra: centerExtra(status)});
       respond(res, 200, {
         ...page, scope, order, generatedAt: Date.now() / 1000,
-        observing: observation.level !== 'off',
-        readBodies: center.readBodiesEnabled(),
+        observing: false,
+        mode: 'manual',
+        readBodies: false,
         observationError: observation.error || '',
         // Plain sentence for the banner, so a stalled list is explained instead of
         // silently showing stale rows. `error_detail` is the runtime's own wording.
         observationMessage: observation.error
-          ? (humanizeDetail(observation.error) || RUNTIME_MESSAGES[observation.error] || '暂时读不到微信，助手会自动重试。') : '',
+          ? '上次刷新没有读到微信会话列表；助手不会后台重试。' : '',
         observationDetail: observation.error_detail || '',
         // Developer view only: the runtime's own wording and the stack behind it. Gated
         // here rather than in the browser so a launched build never ships them at all.
@@ -679,23 +623,59 @@ export function createProductApi({config, token, conversations, bindingsPath, re
         scannedAt: observation.scanned_at ?? 0,
         counts: {...page.counts, openTodos: crm.counts().open ?? 0}
       });
-      // Progressive catch-up: at most a couple of reads and classifications per poll, so
-      // the queue fills in without ever occupying WeChat for long. Body reading is a
-      // separate, opt-in budget — it is the only background work that opens a chat.
-      // Both go through `background`: a failed catch-up must never take the app down.
-      background('pump:triage', pumpTriage());
-      background('pump:body-read', pumpBodyReads());
+      return true;
+    }
+    if (!key && req.method === 'POST' && parts[0] === 'refresh') {
+      await readBody(req);
+      const {status, observation} = await syncCenter({refresh: true});
+      const page = center.list({scope: 'all', order: 'recent', limit: 50, extra: centerExtra(status)});
+      respond(res, 200, {
+        ok: true,
+        scannedAt: observation.scanned_at ?? 0,
+        visibleCount: Object.values(observation.providers ?? {})
+          .reduce((total, rows) => total + Object.keys(rows ?? {}).length, 0),
+        changed: page.counts.unread,
+        observationError: observation.error || '',
+        observationMessage: observation.error
+          ? '这次没有读到微信会话列表，已经停止，不会在后台重试。' : ''
+      });
+      return true;
+    }
+    if (!key && req.method === 'POST' && parts[0] === 'organize') {
+      const payload = await readBody(req);
+      if (!askAssistant) throw Object.assign(new Error('助手暂时不可用'), {code: 'WORKER_UNAVAILABLE'});
+      const text = typeof payload.text === 'string' ? payload.text.trim() : '';
+      if (!text) throw Object.assign(new Error('写一句你想整理什么'), {code: 'CONTEXT_INVALID'});
+      // Refreshing the visible list is cheap and does not open a conversation. Any body
+      // read after this point is performed by the interactive agent because the user just
+      // asked for this exact organisation task.
+      await syncCenter({refresh: true});
+      const policy = [
+        '这是用户主动发起的一次微信消息整理，不是后台监听。',
+        '只为完成用户这次明确的要求读取必要的会话；优先读取当前可见、最近、最相关的会话，最多 5 个。',
+        '不要持续等待新消息，不要安排后台重试，不要发送任何微信消息。',
+        '如果用户正在使用微信或某个会话读不到，跳过它并继续整理已取得的信息。',
+        '先给简短结论；需要用户做的事情用「- [ ] 」列出，最多 5 条。'
+      ].join('\n');
+      const answer = await askAssistant({
+        sessionId: 'messaging-organizer',
+        identity: {provider: 'wechat-main', conversation: '__organizer__', title: '消息整理', kind: 'workspace'},
+        text: policy + '\n\n用户这次的要求：' + text
+      });
+      respond(res, 200, answer);
       return true;
     }
     if (!key && req.method === 'GET' && parts[0] === 'preferences') {
-      respond(res, 200, {read_bodies: center.readBodiesEnabled()});
+      respond(res, 200, {read_bodies: false, mode: 'manual'});
       return true;
     }
     if (!key && req.method === 'POST' && parts[0] === 'preferences') {
       const payload = await readBody(req);
-      if (typeof payload.read_bodies === 'boolean') center.setPreference('read_bodies', payload.read_bodies ? '1' : '0');
-      if (typeof payload.observe_enabled === 'boolean') await runtime.setObserving(payload.observe_enabled);
-      respond(res, 200, {read_bodies: center.readBodiesEnabled()});
+      // Older clients may still post these fields. Persist the safe value and never
+      // re-enable a background reader.
+      if ('read_bodies' in payload) center.setPreference('read_bodies', '0');
+      if ('observe_enabled' in payload) await runtime.setObserving(false);
+      respond(res, 200, {read_bodies: false, mode: 'manual'});
       return true;
     }
     if (!key) { respond(res, 404, {error: 'Not found'}); return true; }

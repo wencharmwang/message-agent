@@ -1,10 +1,8 @@
-"""Discovery must not depend on an automatic-reply rule.
+"""The message organiser is manual; automatic reply keeps its own scan loop.
 
-The product bug this guards: tick() only read the visible list for providers that already
-had a rule, so a contact the user deliberately left on manual was completely invisible —
-"不想自动回复，但要知道有新消息" was impossible. These checks pin the two halves of the
-fix: discovery runs with zero rules, and it never opens a chat (opening clears the user's
-unread badge and moves what they are looking at).
+These checks pin the boundary that matters to the product: an idle worker with no enabled
+automatic rule does not touch WeChat, while an explicit organiser refresh may read the
+visible list but never opens a chat.
 
 Run: <messaging-runtime>/runtime/python/python.exe -m unittest agent_worker.test_observe -v
 """
@@ -55,24 +53,30 @@ class ObserveTest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.worker, self.mcp = make_worker(self.tmp)
 
-    def test_discovers_every_visible_conversation_with_no_rule(self):
+    def test_idle_worker_does_not_scan_without_an_automatic_rule(self):
         self.assertEqual(self.worker.store.rules(), [])
         self.worker.tick()
         snapshot = self.worker.observation_snapshot()
-        self.assertEqual(snapshot['level'], 'list')
+        self.assertEqual(snapshot['level'], 'manual')
+        self.assertEqual(snapshot['providers'], {})
+        self.assertEqual(self.mcp.scans, 0)
+
+    def test_user_refresh_discovers_visible_conversations(self):
+        self.worker.discover(force=True)
+        snapshot = self.worker.observation_snapshot()
         self.assertEqual(sorted(snapshot['providers']['wechat-main']), ['wechat:alice', 'wechat:bob'])
         self.assertEqual(snapshot['providers']['wechat-main']['wechat:alice']['name'], '小璐璐')
         self.assertTrue(snapshot['scanned_at'] > 0)
 
     def test_discovery_never_opens_a_chat(self):
-        self.worker.tick()
+        self.worker.discover(force=True)
         self.assertEqual(self.mcp.opens, 0)
 
-    def test_turning_observation_off_stops_reading_the_list(self):
-        self.worker.store.set_setting('observe_enabled', False)
+    def test_old_observation_setting_cannot_restart_continuous_scanning(self):
+        self.worker.store.set_setting('observe_enabled', True)
         self.worker.tick()
         self.assertEqual(self.mcp.scans, 0)
-        self.assertEqual(self.worker.observation_snapshot()['level'], 'off')
+        self.assertEqual(self.worker.observation_snapshot()['level'], 'manual')
         self.assertEqual(self.worker.observation.get('providers'), {})
 
     def test_a_provider_with_a_rule_is_still_read_once_per_tick(self):
@@ -80,7 +84,7 @@ class ObserveTest(unittest.TestCase):
         rule_id = self.worker.store.rules()[0]['id']
         self.worker.store.enable(rule_id, True)
         self.worker.tick()
-        # Discovery already read it; the rules pass must reuse that read, not repeat it.
+        # Automatic reply owns exactly one provider scan per tick.
         self.assertEqual(self.mcp.scans, 1)
 
 
@@ -152,7 +156,7 @@ class BlankWindowTest(unittest.TestCase):
     def test_a_blank_window_triggers_one_restore_and_recovers(self):
         mcp = BlankWindowMcp()
         worker = worker_with(mcp)
-        worker.tick()
+        worker.discover(force=True)
         self.assertEqual(mcp.restores, 1)
         self.assertEqual(mcp.scans, 2)            # the failed scan, then the post-restore one
         snapshot = worker.observation_snapshot()
@@ -162,7 +166,7 @@ class BlankWindowTest(unittest.TestCase):
     def test_the_runtime_detail_is_kept_for_diagnosis(self):
         mcp = BlankWindowMcp(recoverable=False)
         worker = worker_with(mcp)
-        worker.tick()
+        worker.discover(force=True)
         snapshot = worker.observation_snapshot()
         self.assertIn('layout_unverified', snapshot['error'])
         self.assertEqual(snapshot['error_detail'], 'The conversation-list boundary could not be identified.')
@@ -172,7 +176,7 @@ class BlankWindowTest(unittest.TestCase):
         # raised are kept too. `/api/observe` strips this field when the switch is off.
         mcp = BlankWindowMcp(recoverable=False)
         worker = worker_with(mcp)
-        worker.tick()
+        worker.discover(force=True)
         trace = worker.observation_snapshot()['error_trace']
         self.assertIn('layout_unverified', trace)
         self.assertIn('read_list', trace)

@@ -285,12 +285,13 @@ class Worker:
         self.store.recover()
 
     def observe_enabled(self):
-        """Discovery is on unless the user turned it off; it used to require a rule.
+        """Message-centre discovery is manual.
 
-        Stored as a boolean ('1'/'0') rather than a word: Store.set_setting maps the
-        string 'off' onto '0', so an 'on'|'off' vocabulary would never round-trip.
+        Automatic-reply rules still scan their own providers in ``tick``.  This flag is
+        deliberately false so an old persisted preference cannot bring back continuous
+        inbox monitoring after an upgrade.
         """
-        return self.store.setting('observe_enabled', '1') == '1'
+        return False
 
     def observe_providers(self):
         raw = str(self.store.setting('observe_providers', 'wechat-main') or '')
@@ -316,17 +317,14 @@ class Worker:
                 return restored, None
             return None, ('error', error)
 
-    def discover(self):
-        """Read the visible list for every observed provider, with no rule involved.
+    def discover(self, force=False):
+        """Read the visible list only for an explicit user-initiated refresh.
 
-        This is the capability that used to be missing: tick() read the list only for
-        providers that already had a rule, so a contact the user deliberately left on
-        manual was invisible to the product. Discovery reads the list and nothing else
-        — opening a chat would clear the user's unread badge and move whatever they are
-        currently looking at, which is not ours to spend.
+        ``tick`` never calls this method.  ``force`` is intentionally required because
+        persisted settings from older builds may still say observation was enabled.
         """
         scanned, failure, detail, trace = {}, '', '', ''
-        if not self.observe_enabled():
+        if not force:
             return scanned
         for provider in self.observe_providers():
             table, problem = self.read_list(provider)
@@ -350,7 +348,7 @@ class Worker:
                 'error': self.observe_error,
                 'error_detail': self.observe_error_detail,
                 'error_trace': self.observe_error_trace,
-                'level': 'list' if self.observe_enabled() else 'off'}
+                'level': 'manual'}
 
     def defer_for_user(self, rule):
         """The user is working in WeChat, and reading a chat means opening it.
@@ -588,10 +586,9 @@ class Worker:
     def tick(self):
         rules = [rule for rule in self.store.rules()
                  if rule['enabled'] and rule['status'] != 'blocked']
-        # Discovery runs first and depends on no rule: it answers "did anything arrive",
-        # which the user needs whether or not the assistant is allowed to reply. Its
-        # scan is reused just below so each provider is still read once per cycle.
-        scans = dict(self.discover())
+        # The message organiser is user initiated and never participates in this loop.
+        # Only automatic-reply rules retain continuous provider scans.
+        scans = {}
         busy = False
         for provider in dict.fromkeys(rule['provider'] for rule in rules):
             if provider in scans:
