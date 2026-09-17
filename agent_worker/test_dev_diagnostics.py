@@ -25,10 +25,16 @@ from agent_worker.service import RuntimeToolError, Worker
 class FailingReadMcp:
     """A runtime that refuses to open the chat, exactly as the WeChat driver does."""
 
+    def __init__(self):
+        self.observed = []
+
     def call(self, name, arguments):
+        if name == 'list_conversations':
+            return {'conversations': [{'id': 'wechat:target', 'title': '树袋熊', 'metadata': {}}]}
         raise AssertionError('unexpected tool ' + name)
 
     def observe(self, rule, limit=30):
+        self.observed.append(rule)
         raise RuntimeToolError('layout_unverified', 'Runtime: layout_unverified',
                                'The conversation-list boundary could not be identified.')
 
@@ -98,6 +104,12 @@ class DevDiagnosticsTest(unittest.TestCase):
         # Without the frames there is no way to tell which sub-check refused the read.
         self.assertIn('RuntimeToolError', body['dev']['trace'])
         self.assertIn('observe', body['dev']['trace'])
+
+    def test_manual_read_resolves_the_row_id_to_a_user_commanded_title(self):
+        self.worker.store.set_setting('dev_diagnostics', True)
+        self.read()
+        self.assertEqual(self.worker.mcp.observed[-1],
+                         {'provider': 'wechat-main', 'conversation': '树袋熊'})
 
     def test_switching_the_developer_view_off_attaches_nothing(self):
         self.worker.store.set_setting('dev_diagnostics', False)

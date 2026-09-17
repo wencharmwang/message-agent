@@ -172,7 +172,29 @@ def handler(worker, token):
                         raise ValueError('请指定要读取的会话')
                     limit = data.get('limit')
                     limit = max(5, min(limit, 60)) if isinstance(limit, int) and not isinstance(limit, bool) else 30
-                    messages = worker.mcp.observe({'provider': provider, 'conversation': conversation}, limit)
+                    # A `wechat:*` id is a hash derived from the visible-list OCR. Passing it to
+                    # Runtime selects by a background row click -- appropriate for automatic
+                    # replies, because that path must not steal focus, but not reliable enough
+                    # for an explicit user read on recent WeChat builds (the posted click can be
+                    # ignored and leave the previously open chat on screen).
+                    #
+                    # Re-resolve the id from a fresh list read, then pass the authoritative title
+                    # as a user-commanded target. Runtime consequently uses WeChat's guarded
+                    # search flow, verifies the resulting header, and restores the user's former
+                    # foreground window. This is deliberately confined to /api/read; automatic
+                    # reply rules keep their non-activating id-based path.
+                    read_target = conversation
+                    if provider == 'wechat-main' and conversation.startswith('wechat:'):
+                        choices = worker.mcp.call('list_conversations', {'provider': provider})['conversations']
+                        matches = [c for c in choices if c.get('id') == conversation]
+                        if len(matches) != 1:
+                            raise ValueError('微信当前显示的聊天列表里没有这个会话，请重新整理后再试。')
+                        if (matches[0].get('metadata') or {}).get('ambiguous') == 'true':
+                            raise ValueError('微信里有多个同名会话，助手分不清是哪一个。请先给其中一个改名或加备注。')
+                        read_target = matches[0].get('title') or ''
+                        if not read_target:
+                            raise ValueError('这个会话的名称没有读完，请重新整理后再试。')
+                    messages = worker.mcp.observe({'provider': provider, 'conversation': read_target}, limit)
                     self.response(200, {'provider': provider, 'conversation': conversation, 'messages': messages})
                 elif self.path == '/api/observe/refresh':
                     # A visible-list read is now a user action. It never opens a chat, but
