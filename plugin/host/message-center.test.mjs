@@ -136,6 +136,55 @@ test('attachSnapshot derives a real new-message count from the overlap', () => {
   assert.equal(attached.count, 1);
 });
 
+test('every conversation gets a permanent local identity and message continuity confirms it', () => {
+  const {center} = makeCenter();
+  center.sync({providers: LIST('fp-A')});
+  const first = center.list({scope: 'all'}).items[0];
+  assert.match(first.localIdentityId, /^[0-9a-f-]{36}$/);
+  assert.equal(first.identityStatus, 'provisional');
+  const base = [
+    {direction: 'incoming', content: '明天下午三点在会议室碰面'},
+    {direction: 'outgoing', content: '好的，我会提前十分钟到'}
+  ];
+  center.attachSnapshot(KEY, base);
+  center.attachSnapshot(KEY, [...base, {direction: 'incoming', content: '收到'}]);
+  const confirmed = center.list({scope: 'all'}).items[0];
+  assert.equal(confirmed.localIdentityId, first.localIdentityId);
+  assert.equal(confirmed.identityStatus, 'confirmed');
+  assert.equal(confirmed.identityConfidence, 0.97);
+});
+
+test('same OCR title with different preview is ambiguous instead of being auto-merged', () => {
+  const {center} = makeCenter();
+  center.sync({providers: {'wechat-main': {'wechat:A': {preview_hash: 'p1', name: '张伟'}}}});
+  center.sync({providers: {'wechat-main': {'wechat:B': {preview_hash: 'p2', name: '张伟'}}}});
+  const items = center.list({scope: 'all'}).items;
+  assert.equal(items.length, 2);
+  assert.deepEqual(items.map(item => item.identityStatus).sort(), ['ambiguous', 'ambiguous']);
+  assert.notEqual(items[0].localIdentityId, items[1].localIdentityId);
+});
+
+test('a strong message-tail match heals a renamed OCR identity', () => {
+  const {center} = makeCenter();
+  const oldMessages = [
+    {direction: 'incoming', content: '项目文件已经发到邮箱'},
+    {direction: 'outgoing', content: '看到了，我今天检查'},
+    {direction: 'incoming', content: '有问题随时告诉我'}
+  ];
+  center.sync({providers: {'wechat-main': {'wechat:A': {preview_hash: 'p1', name: '陈晓'}}}});
+  const original = center.list({scope: 'all'}).items[0];
+  center.attachSnapshot(original.key, oldMessages);
+
+  center.sync({providers: {'wechat-main': {'wechat:B': {preview_hash: 'p2', name: '晓陈'}}}});
+  const duplicate = center.list({scope: 'all'}).items.find(item => item.key !== original.key);
+  const attached = center.attachSnapshot(duplicate.key, [...oldMessages, {direction: 'incoming', content: '谢谢'}]);
+  assert.deepEqual(attached.rekeyed, {oldKey: duplicate.key, newKey: original.key});
+  const items = center.list({scope: 'all'}).items;
+  assert.equal(items.length, 1);
+  assert.equal(items[0].localIdentityId, original.localIdentityId);
+  assert.equal(items[0].identityStatus, 'confirmed');
+});
+
 test('reclassify records a correction without inventing a new batch', () => {
   const {center} = makeCenter();
   center.sync({providers: LIST('fp-A')});
@@ -161,6 +210,14 @@ test('newMessageCount aligns an appended tail', () => {
   assert.equal(newMessageCount(prev, prev), 0);
   assert.equal(newMessageCount([], next), 3);
   assert.equal(newMessageCount(prev, [{direction: 'outgoing', content: 'x'}]), 1);
+});
+
+test('message overlap tolerates one OCR glyph error but not short common phrases', () => {
+  const previous = [{direction: 'incoming', content: '周二轮滑1班（16:40-17:40）'}];
+  const jittered = [{direction: 'incoming', content: '周二轮滑0班（16:4017:40）'}];
+  assert.equal(newMessageCount(previous, jittered), 0);
+  assert.equal(newMessageCount([{direction: 'incoming', content: '好的'}],
+    [{direction: 'incoming', content: '好哒'}]), 1);
 });
 
 test('parseTriageAnswer returns unknown rather than guessing', () => {

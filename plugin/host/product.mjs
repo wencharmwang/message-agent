@@ -768,6 +768,10 @@ export function createProductApi({config, token, conversations, bindingsPath, re
       const page = await runtime.readConversation({provider: row.provider, conversation: row.conversation,
         title: row.display_name});
       const attached = center.attachSnapshot(key, page.messages);
+      if (attached.rekeyed) {
+        crm.rekey(attached.rekeyed.oldKey, attached.rekeyed.newKey,
+          {provider: row.provider, conversation: row.conversation, displayName: row.display_name});
+      }
       // A read that succeeds but returns nothing readable is the confusing case: nothing
       // raises, yet the conversation sits there with no content and classifies as 无法判断.
       if (!attached.messages.length) {
@@ -775,7 +779,7 @@ export function createProductApi({config, token, conversations, bindingsPath, re
           {key, title: row.display_name,
            rawMessages: Array.isArray(page.messages) ? page.messages.length : String(page.messages)});
       }
-      background('classify:after-read', classifyOne(key));
+      background('classify:after-read', classifyOne(attached.conversationKey));
       respond(res, 200, {
         messages: attached.messages, newCount: attached.count,
         devDiagnostics: devEnabled,
@@ -823,6 +827,13 @@ export function createProductApi({config, token, conversations, bindingsPath, re
       respond(res, 200, {ok: true, classification: batch.classification});
       return true;
     }
+    if (action === 'confirm-identity' && req.method === 'POST') {
+      await readBody(req).catch(() => ({}));
+      const confirmed = center.confirmIdentity(key);
+      respond(res, 200, {ok: true, localIdentityId: confirmed.identity_id,
+        identityStatus: confirmed.identity_status, identityConfidence: confirmed.identity_confidence});
+      return true;
+    }
     if (action === 'todos' && req.method === 'POST') {
       const payload = await readBody(req);
       const customer = ensureCustomerFor(identity, key);
@@ -849,14 +860,21 @@ export function createProductApi({config, token, conversations, bindingsPath, re
       // Drafting from an empty window would invite the model to invent the conversation,
       // so read it first — the user asked for a reply, which makes opening it expected.
       let messages = detail.messages;
+      let conversationKey = key;
       if (!messages.length) {
         const page = await runtime.readConversation({provider: row.provider, conversation: row.conversation,
           title: row.display_name});
-        messages = center.attachSnapshot(key, page.messages).messages;
+        const attached = center.attachSnapshot(key, page.messages);
+        messages = attached.messages;
+        conversationKey = attached.conversationKey;
+        if (attached.rekeyed) {
+          crm.rekey(attached.rekeyed.oldKey, attached.rekeyed.newKey,
+            {provider: row.provider, conversation: row.conversation, displayName: row.display_name});
+        }
       }
       const rule = (await runtime.status()).rules?.find(entry => entry.provider === row.provider && entry.conversation === row.conversation) ?? null;
       const generated = await draftReply({
-        identity, conversationKey: key,
+        identity, conversationKey,
         rule: rule ?? {provider: row.provider, conversation: row.conversation, title: row.display_name, kind: row.kind, prompt: ''},
         contextData: {messages},
         recentDeliveries: drafts.list(identity).filter(draft => draft.state === 'sent').slice(0, 3)
@@ -864,7 +882,7 @@ export function createProductApi({config, token, conversations, bindingsPath, re
       const created = drafts.create({
         target: identity, text: validateDraftText(generated.text, config.max_reply_chars), source: 'message-center'
       });
-      center.linkAction(key, 'draft', {linkedObjectId: created.id});
+      center.linkAction(conversationKey, 'draft', {linkedObjectId: created.id});
       respond(res, 201, {...created, evidence: generated.evidence ?? null});
       return true;
     }

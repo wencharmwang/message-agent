@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 /**
  * The message centre: "what happened, and does it need me".
@@ -89,14 +89,73 @@ function sameConversation(leftName, rightName, leftPreview, rightPreview) {
   const left = canonicalName(leftName);
   const right = canonicalName(rightName);
   if (!left || !right) return false;
-  if (left === right) return true;
   const preview = usablePreviewHash(leftPreview);
   if (!preview || preview !== usablePreviewHash(rightPreview)) return false;
+  if (left === right) return true;
   const shorter = left.length <= right.length ? left : right;
   const longer = left.length > right.length ? left : right;
   if (shorter.length >= 4 && longer.includes(shorter)) return true;
   const prefix = commonPrefixLength(left, right);
   return prefix >= 5 && prefix / Math.min(left.length, right.length) >= 0.7;
+}
+
+function normalizedMessage(message) {
+  const content = String(message?.content ?? '').normalize('NFKC')
+    .replace(/[\s\p{P}\p{S}]+/gu, '').toLowerCase();
+  return `${message?.direction ?? ''}\u0000${content}`;
+}
+
+function boundedEditDistance(left, right, limit) {
+  if (Math.abs(left.length - right.length) > limit) return limit + 1;
+  let previous = Array.from({length: right.length + 1}, (_, index) => index);
+  for (let i = 1; i <= left.length; i += 1) {
+    const current = [i];
+    let rowMin = current[0];
+    for (let j = 1; j <= right.length; j += 1) {
+      const value = Math.min(current[j - 1] + 1, previous[j] + 1,
+        previous[j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1));
+      current[j] = value;
+      rowMin = Math.min(rowMin, value);
+    }
+    if (rowMin > limit) return limit + 1;
+    previous = current;
+  }
+  return previous[right.length];
+}
+
+function sameObservedMessage(left, right) {
+  if ((left?.direction ?? '') !== (right?.direction ?? '')) return false;
+  const a = normalizedMessage(left).split('\u0000').slice(1).join('\u0000');
+  const b = normalizedMessage(right).split('\u0000').slice(1).join('\u0000');
+  if (a === b) return true;
+  // OCR commonly drops one separator or confuses one glyph (1/0/匦). Only tolerate that
+  // on reasonably long messages, and cap the edit budget at two characters.
+  if (Math.min(a.length, b.length) < 8) return false;
+  const limit = Math.min(2, Math.max(1, Math.floor(Math.max(a.length, b.length) * 0.06)));
+  return boundedEditDistance(a, b, limit) <= limit;
+}
+
+function messageOverlap(previous, current) {
+  const before = previous ?? [];
+  const after = current ?? [];
+  for (let size = Math.min(before.length, after.length); size > 0; size -= 1) {
+    const tail = before.slice(-size);
+    if (tail.every((value, index) => sameObservedMessage(value, after[index]))) {
+      return {size, characters: tail.reduce((sum, value) => sum + normalizedMessage(value).length, 0)};
+    }
+  }
+  return {size: 0, characters: 0};
+}
+
+function strongMessageOverlap(previous, current) {
+  const overlap = messageOverlap(previous, current);
+  return overlap.size >= 3 || (overlap.size >= 2 && overlap.characters >= 24) ? overlap : null;
+}
+
+function tailAnchor(messages) {
+  const tail = (messages ?? []).slice(-8).map(normalizedMessage).filter(Boolean);
+  if (!tail.length) return '';
+  return createHash('sha256').update(tail.join('\n')).digest('hex').slice(0, 24);
 }
 
 function displayNameScore(value) {
@@ -139,6 +198,24 @@ CREATE TABLE IF NOT EXISTS conversation_activity (
   observation_state TEXT NOT NULL DEFAULT 'seen',
   following        INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS conversation_alias (
+  conversation_key TEXT NOT NULL,
+  alias_key        TEXT NOT NULL,
+  display_name     TEXT NOT NULL,
+  first_seen_at    REAL NOT NULL,
+  last_seen_at     REAL NOT NULL,
+  hits             INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (conversation_key, alias_key)
+);
+CREATE INDEX IF NOT EXISTS conversation_alias_lookup ON conversation_alias(alias_key, last_seen_at);
+CREATE TABLE IF NOT EXISTS conversation_anchor (
+  conversation_key TEXT NOT NULL,
+  anchor_hash      TEXT NOT NULL,
+  message_count    INTEGER NOT NULL,
+  observed_at      REAL NOT NULL,
+  PRIMARY KEY (conversation_key, anchor_hash)
+);
+CREATE INDEX IF NOT EXISTS conversation_anchor_lookup ON conversation_anchor(anchor_hash);
 CREATE TABLE IF NOT EXISTS message_batch (
   id                     TEXT PRIMARY KEY,
   conversation_key       TEXT NOT NULL,
@@ -204,13 +281,12 @@ CREATE TABLE IF NOT EXISTS center_preference (
  * is "all of them are unfamiliar", which is what the caller turns into "还没读".
  */
 export function newMessageCount(previous, current) {
-  const key = message => `${message?.direction ?? ''}\u0000${message?.content ?? ''}`;
-  const before = (previous ?? []).map(key);
-  const after = (current ?? []).map(key);
+  const before = previous ?? [];
+  const after = current ?? [];
   for (let size = Math.min(before.length, after.length); size > 0; size -= 1) {
     const tail = before.slice(before.length - size);
     const head = after.slice(0, size);
-    if (tail.every((value, index) => value === head[index])) return after.length - size;
+    if (tail.every((value, index) => sameObservedMessage(value, head[index]))) return after.length - size;
   }
   return after.length;
 }
@@ -232,6 +308,11 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
   ensureColumn(db, 'conversation_activity', 'candidate', 'TEXT');
   ensureColumn(db, 'conversation_activity', 'candidate_since', 'REAL');
   ensureColumn(db, 'conversation_activity', 'candidate_hits', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'conversation_activity', 'identity_id', 'TEXT');
+  ensureColumn(db, 'conversation_activity', 'identity_status', "TEXT NOT NULL DEFAULT 'provisional'");
+  ensureColumn(db, 'conversation_activity', 'identity_confidence', 'REAL NOT NULL DEFAULT 0.35');
+  ensureColumn(db, 'conversation_activity', 'identity_confirmed_at', 'REAL');
+  ensureColumn(db, 'conversation_activity', 'avatar_hash', 'TEXT');
   // Why the last classification attempt did not produce a label. Without it a row stuck at
   // 待判断 has no explanation anywhere: the caller's catch is silent by design (the batch
   // must stay visible rather than disappear), so the reason has to be stored here.
@@ -241,9 +322,25 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
   // 重试了 56 次。失败次数 + 递增冷却一起挡住它。
   ensureColumn(db, 'message_batch', 'read_attempts', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'message_batch', 'read_failed_at', 'REAL');
+  // Legacy rows used an OCR-derived runtime id as their only identity. Give every one a
+  // permanent local UUID without re-keying existing CRM/todo/session references.
+  for (const row of db.prepare('SELECT conversation_key FROM conversation_activity WHERE identity_id IS NULL OR identity_id = ?').all('')) {
+    db.prepare('UPDATE conversation_activity SET identity_id = ? WHERE conversation_key = ?').run(randomUUID(), row.conversation_key);
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS conversation_identity_id ON conversation_activity(identity_id)');
   const keyOf = (provider, conversation) => identityKey(provider, conversation);
 
   const activity = key => db.prepare('SELECT * FROM conversation_activity WHERE conversation_key = ?').get(key) ?? null;
+  const rememberAlias = (key, name, at) => {
+    const alias = canonicalName(name);
+    if (!alias) return;
+    db.prepare(`INSERT INTO conversation_alias
+      (conversation_key, alias_key, display_name, first_seen_at, last_seen_at, hits)
+      VALUES (?, ?, ?, ?, ?, 1)
+      ON CONFLICT(conversation_key, alias_key) DO UPDATE SET
+        display_name = excluded.display_name, last_seen_at = excluded.last_seen_at, hits = hits + 1`)
+      .run(key, alias, name, at, at);
+  };
 
   return {
   /**
@@ -263,11 +360,12 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
     const rekeyed = [];
     const statement = {
       insert: db.prepare(`INSERT INTO conversation_activity
-        (conversation_key, provider, conversation, display_name, fingerprint, preview_hash, observed_at, observation_state)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'seen')`),
+        (conversation_key, identity_id, provider, conversation, display_name, fingerprint, preview_hash,
+         avatar_hash, identity_status, identity_confidence, observed_at, observation_state)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'seen')`),
       touch: db.prepare(`UPDATE conversation_activity
         SET conversation = ?, display_name = ?, observed_at = ?, fingerprint = ?, preview_hash = ?,
-            candidate = ?, candidate_since = ?, candidate_hits = ?
+            candidate = ?, candidate_since = ?, candidate_hits = ?, avatar_hash = COALESCE(?, avatar_hash)
         WHERE conversation_key = ?`),
       mark: db.prepare(`UPDATE conversation_activity
         SET last_activity_at = ?, observation_state = 'new' WHERE conversation_key = ?`)
@@ -279,33 +377,44 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
         if (!name || isSystemEntry(name)) continue;
         const fingerprint = typeof row?.fingerprint === 'string' ? row.fingerprint : '';
         const previewHash = usablePreviewHash(row?.preview_hash);
+        const avatarHash = typeof row?.avatar_hash === 'string' && row.avatar_hash ? row.avatar_hash : null;
         const rawKey = keyOf(provider, conversation);
         // The Runtime id is derived from OCR text, not a native WeChat id. Re-reading the
         // same display name differently must update the existing stable product row rather
         // than create/re-key a row on every scan.
-        let current = activity(rawKey)
-          ?? db.prepare('SELECT * FROM conversation_activity WHERE provider = ? AND conversation = ?').get(provider, conversation)
-          ?? db.prepare('SELECT * FROM conversation_activity WHERE provider = ? ORDER BY observed_at DESC').all(provider)
-            .find(entry => sameConversation(entry.display_name, name, entry.preview_hash, previewHash));
+        const direct = activity(rawKey)
+          ?? db.prepare('SELECT * FROM conversation_activity WHERE provider = ? AND conversation = ?').get(provider, conversation);
+        const alias = canonicalName(name);
+        const aliasKeys = new Set(alias ? db.prepare(`SELECT a.conversation_key FROM conversation_alias a
+          JOIN conversation_activity c ON c.conversation_key = a.conversation_key
+          WHERE c.provider = ? AND a.alias_key = ?`).all(provider, alias).map(entry => entry.conversation_key) : []);
+        const possible = direct ? [] : db.prepare('SELECT * FROM conversation_activity WHERE provider = ? ORDER BY observed_at DESC').all(provider)
+          .filter(entry => (avatarHash && entry.avatar_hash === avatarHash)
+            || sameConversation(entry.display_name, name, entry.preview_hash, previewHash)
+            || (aliasKeys.has(entry.conversation_key) && previewHash
+              && previewHash === usablePreviewHash(entry.preview_hash)));
+        // Never pick an arbitrary row when evidence matches more than one contact. That is
+        // precisely how two people with the same OCR name used to become one person.
+        let current = direct ?? (possible.length === 1 ? possible[0] : null);
         let key = current?.conversation_key ?? rawKey;
         if (!current) {
-          statement.insert.run(key, provider, conversation, name, fingerprint, previewHash, at);
+          const ambiguityKeys = new Set([...possible.map(entry => entry.conversation_key), ...aliasKeys]);
+          const ambiguous = ambiguityKeys.size > 0;
+          statement.insert.run(key, randomUUID(), provider, conversation, name, fingerprint, previewHash,
+            avatarHash, ambiguous ? 'ambiguous' : 'provisional', ambiguous ? 0 : 0.35, at);
           current = activity(key);
-        }
-        // Identity healing: fold stale OCR duplicates (same canonical name, old id gone)
-        // into this row. Runs whether the id is new or already tracked, so a contact that
-        // accumulated several name variants collapses even after its row is established.
-        if (canonicalName(name)) {
-          const duplicates = db.prepare('SELECT conversation_key, conversation, display_name, preview_hash FROM conversation_activity WHERE provider = ?')
-            .all(provider)
-            .filter(dup => dup.conversation_key !== key
-              && sameConversation(dup.display_name, name, dup.preview_hash, previewHash));
-          for (const dup of duplicates) {
-            this.mergeInto(key, dup.conversation_key);
-            rekeyed.push({oldKey: dup.conversation_key, newKey: key, provider, conversation,
-              name: preferredDisplayName(current.display_name, name)});
+          if (ambiguous) {
+            for (const candidateKey of ambiguityKeys) {
+              db.prepare("UPDATE conversation_activity SET identity_status = 'ambiguous', identity_confidence = 0 WHERE conversation_key = ?")
+                .run(candidateKey);
+            }
           }
+        } else if (!direct && current.identity_status !== 'confirmed') {
+          const confidence = avatarHash && current.avatar_hash === avatarHash ? 0.9 : 0.75;
+          db.prepare("UPDATE conversation_activity SET identity_status = 'provisional', identity_confidence = MAX(identity_confidence, ?) WHERE conversation_key = ?")
+            .run(confidence, key);
         }
+        rememberAlias(key, name, at);
         current = activity(key);
         // "New content" is preview_hash (hash of the preview text only); fingerprint mixes in
         // the relative display time and would churn on its own. The preview TEXT is still read
@@ -355,7 +464,7 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
           candidateHits = 0;
         }
         statement.touch.run(conversation, preferredDisplayName(current.display_name, name), at,
-          fingerprint || current.fingerprint, baseline, candidate, candidateSince, candidateHits, key);
+          fingerprint || current.fingerprint, baseline, candidate, candidateSince, candidateHits, avatarHash, key);
         if (!moved) continue;
         changed += 1;
         const open = db.prepare(
@@ -389,6 +498,23 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
     for (const table of ['message_batch', 'message_action', 'message_snapshot', 'triage_feedback']) {
       db.prepare(`UPDATE ${table} SET conversation_key = ? WHERE conversation_key = ?`).run(newKey, oldKey);
     }
+    for (const alias of db.prepare('SELECT * FROM conversation_alias WHERE conversation_key = ?').all(oldKey)) {
+      db.prepare(`INSERT INTO conversation_alias
+        (conversation_key, alias_key, display_name, first_seen_at, last_seen_at, hits)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(conversation_key, alias_key) DO UPDATE SET
+          first_seen_at = MIN(first_seen_at, excluded.first_seen_at),
+          last_seen_at = MAX(last_seen_at, excluded.last_seen_at), hits = hits + excluded.hits`)
+        .run(newKey, alias.alias_key, alias.display_name, alias.first_seen_at, alias.last_seen_at, alias.hits);
+    }
+    for (const anchor of db.prepare('SELECT * FROM conversation_anchor WHERE conversation_key = ?').all(oldKey)) {
+      db.prepare(`INSERT INTO conversation_anchor (conversation_key, anchor_hash, message_count, observed_at)
+        VALUES (?, ?, ?, ?) ON CONFLICT(conversation_key, anchor_hash) DO UPDATE SET
+        message_count = MAX(message_count, excluded.message_count), observed_at = MAX(observed_at, excluded.observed_at)`)
+        .run(newKey, anchor.anchor_hash, anchor.message_count, anchor.observed_at);
+    }
+    db.prepare('DELETE FROM conversation_alias WHERE conversation_key = ?').run(oldKey);
+    db.prepare('DELETE FROM conversation_anchor WHERE conversation_key = ?').run(oldKey);
     db.prepare(`UPDATE conversation_activity SET
       display_name = ?,
       last_activity_at = CASE
@@ -400,12 +526,20 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
         WHEN ? IS NULL THEN last_seen_at
         ELSE MAX(last_seen_at, ?) END,
       observation_state = CASE WHEN observation_state = 'new' OR ? = 'new' THEN 'new' ELSE observation_state END,
-      following = CASE WHEN following = 1 OR ? = 1 THEN 1 ELSE 0 END
+      following = CASE WHEN following = 1 OR ? = 1 THEN 1 ELSE 0 END,
+      identity_status = CASE
+        WHEN identity_status = 'confirmed' OR ? = 'confirmed' THEN 'confirmed'
+        WHEN identity_status = 'ambiguous' OR ? = 'ambiguous' THEN 'ambiguous'
+        ELSE 'provisional' END,
+      identity_confidence = MAX(identity_confidence, ?),
+      identity_confirmed_at = COALESCE(identity_confirmed_at, ?)
       WHERE conversation_key = ?`).run(
         preferredDisplayName(target.display_name, source.display_name),
         source.last_activity_at, source.last_activity_at, source.last_activity_at,
         source.last_seen_at, source.last_seen_at, source.last_seen_at,
-        source.observation_state, source.following, newKey);
+        source.observation_state, source.following,
+        source.identity_status, source.identity_status, source.identity_confidence,
+        source.identity_confirmed_at, newKey);
     db.prepare('DELETE FROM conversation_activity WHERE conversation_key = ?').run(oldKey);
   },
 
@@ -478,6 +612,9 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
       key: row.conversation_key,
       batchId: batch?.id ?? null,
       identity: {provider: row.provider, conversation: row.conversation, title: row.display_name, kind: row.kind},
+      localIdentityId: row.identity_id,
+      identityStatus: row.identity_status,
+      identityConfidence: row.identity_confidence,
       firstMessageAt: batch?.first_message_at ?? null,
       lastActivityAt: batch?.last_message_at ?? row.last_activity_at ?? null,
       observedAt: row.observed_at,
@@ -669,8 +806,42 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
    */
   attachSnapshot(key, messages, at = clock()) {
     const list = Array.isArray(messages) ? messages.filter(m => m && typeof m.content === 'string').slice(-60) : [];
-    const previous = db.prepare('SELECT * FROM message_snapshot WHERE conversation_key = ? ORDER BY observed_at DESC LIMIT 1').get(key);
-    const before = previous ? JSON.parse(previous.messages_json) : [];
+    let previous = db.prepare('SELECT * FROM message_snapshot WHERE conversation_key = ? ORDER BY observed_at DESC LIMIT 1').get(key);
+    let before = previous ? JSON.parse(previous.messages_json) : [];
+    let rekeyed = null;
+    // A newly-created OCR identity can be healed by its actual message tail. We require a
+    // substantial two-message overlap (or three messages) and exactly one candidate; one
+    // short common phrase such as “好的” is deliberately not enough.
+    if (!previous && list.length >= 2) {
+      const matches = [];
+      const owner = activity(key);
+      const snapshots = db.prepare(`SELECT s.* FROM message_snapshot s
+        JOIN (SELECT conversation_key, MAX(id) AS id FROM message_snapshot GROUP BY conversation_key) latest
+          ON latest.id = s.id
+        JOIN conversation_activity a ON a.conversation_key = s.conversation_key
+        WHERE s.conversation_key <> ? AND a.provider = ?`).all(key, owner?.provider ?? '');
+      for (const snapshot of snapshots) {
+        const candidateMessages = JSON.parse(snapshot.messages_json);
+        const overlap = strongMessageOverlap(candidateMessages, list);
+        if (overlap) matches.push({snapshot, messages: candidateMessages, overlap});
+      }
+      matches.sort((a, b) => b.overlap.size - a.overlap.size || b.overlap.characters - a.overlap.characters);
+      const best = matches[0];
+      const tied = best && matches[1]
+        && best.overlap.size === matches[1].overlap.size
+        && best.overlap.characters === matches[1].overlap.characters;
+      if (best && !tied) {
+        const oldKey = key;
+        key = best.snapshot.conversation_key;
+        this.mergeInto(key, oldKey);
+        previous = best.snapshot;
+        before = best.messages;
+        rekeyed = {oldKey, newKey: key};
+      } else if (matches.length) {
+        db.prepare("UPDATE conversation_activity SET identity_status = 'ambiguous', identity_confidence = 0 WHERE conversation_key = ?")
+          .run(key);
+      }
+    }
     const count = newMessageCount(before, list);
     db.prepare('INSERT INTO message_snapshot (conversation_key, observed_at, messages_json, message_count) VALUES (?, ?, ?, ?)')
       .run(key, at, JSON.stringify(list), count);
@@ -682,7 +853,25 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
       .run(count, at, `snapshot:${at}`, batch.id);
     db.prepare("UPDATE conversation_activity SET new_message_count = ?, observation_state = 'seen', last_seen_at = ? WHERE conversation_key = ?")
       .run(count, at, key);
-    return {count, messages: list};
+    const overlap = previous ? strongMessageOverlap(before, list) : null;
+    if (overlap) {
+      db.prepare(`UPDATE conversation_activity SET identity_status = 'confirmed',
+        identity_confidence = MAX(identity_confidence, 0.97), identity_confirmed_at = COALESCE(identity_confirmed_at, ?)
+        WHERE conversation_key = ?`).run(at, key);
+    }
+    const anchor = tailAnchor(list);
+    if (anchor) db.prepare(`INSERT INTO conversation_anchor (conversation_key, anchor_hash, message_count, observed_at)
+      VALUES (?, ?, ?, ?) ON CONFLICT(conversation_key, anchor_hash) DO UPDATE SET observed_at = excluded.observed_at`)
+      .run(key, anchor, list.length, at);
+    return {count, messages: list, conversationKey: key, rekeyed};
+  },
+
+  /** Explicit user confirmation wins over all heuristic evidence. */
+  confirmIdentity(key, at = clock()) {
+    const result = db.prepare(`UPDATE conversation_activity SET identity_status = 'confirmed',
+      identity_confidence = 1, identity_confirmed_at = ? WHERE conversation_key = ?`).run(at, key);
+    if (!result.changes) throw Object.assign(new Error('还没有关注这个会话'), {code: 'CONVERSATION_NOT_FOUND'});
+    return activity(key);
   },
 
   /** Attach the AI summary and the four-way classification to a batch. */
@@ -804,6 +993,8 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
     db.prepare('DELETE FROM message_action WHERE conversation_key = ?').run(key);
     db.prepare('DELETE FROM message_snapshot WHERE conversation_key = ?').run(key);
     db.prepare('DELETE FROM triage_feedback WHERE conversation_key = ?').run(key);
+    db.prepare('DELETE FROM conversation_alias WHERE conversation_key = ?').run(key);
+    db.prepare('DELETE FROM conversation_anchor WHERE conversation_key = ?').run(key);
     db.prepare('DELETE FROM conversation_activity WHERE conversation_key = ?').run(key);
     return true;
   },

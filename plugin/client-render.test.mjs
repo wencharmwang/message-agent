@@ -62,3 +62,9 @@ test('消息页以用户主动整理为首屏，不再引导持续监听', () =>
   assert.match(source, /不会在后台持续监听/);
   assert.doesNotMatch(source, /开始关注新消息/);
 });
+
+test('身份不确定时界面会明确提示并提供人工确认', () => {
+  assert.match(source, /item\.identityStatus==='ambiguous'/);
+  assert.match(source, /confirm-identity/);
+  assert.match(source, /确认当前联系人/);
+});

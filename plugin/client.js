@@ -670,6 +670,7 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
       item.following===false?'已忽略':'',
       item.pendingDrafts>0?'草稿待确认':'',
       item.openTodos>0?(item.openTodos+' 件待办'):'',
+      item.identityStatus==='ambiguous'?'联系人身份有冲突':'',
       item.automationState==='active'?'自动回复：开':'',
       item.automationProblem?'自动回复异常':''
     ].filter(Boolean).join(' · ');
@@ -886,6 +887,9 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
       {note:'✓ 已改成「'+CLASS_LABEL[classification]+'」。'});
     const follow=following=>run(()=>api('message-center/'+item.key+'/follow',{following}),
       {state:following?{seen:true}:{},note:following?'✓ 已恢复关注。':'✓ 已忽略这个会话，它不会再进队列。'});
+    const confirmIdentity=()=>run(()=>api('message-center/'+item.key+'/confirm-identity',{}),
+      {state:{identityConfirmed:true},note:'✓ 已确认这个本地联系人身份。以后名称识别有轻微变化也会继续归到这里。'});
+    const identityConfirmed=local.identityConfirmed||item.identityStatus==='confirmed';
     const classLabel=CLASS_LABEL[item.classification]||'无法判断';
     // 这几个动作里「读取这条会话」和「AI 帮我起草」都要十几秒到一分钟。按钮上只换文案时，
     // 用户看到的是一个不动的界面，会以为没点上；转一圈的指示器才说明「在跑，别重复点」。
@@ -915,6 +919,15 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
       h('div',{style:{padding:'20px 20px 24px',maxWidth:780}},
         h(Notice,{error:error||detail.error,dev:errorDev||detail.errorDev,code:errorDev?.code||detail.errorCode}),
         note&&h('p',{style:{color:C.ok,fontSize:14,margin:'0 0 12px'}},note),
+        !identityConfirmed&&h('div',{style:{padding:'11px 13px',borderRadius:10,
+          border:'1px solid '+(item.identityStatus==='ambiguous'?C.error:C.warn),background:C.panel,marginBottom:14}},
+          h('strong',{style:{fontSize:14,color:item.identityStatus==='ambiguous'?C.error:C.text}},
+            item.identityStatus==='ambiguous'?'联系人身份有冲突':'联系人身份尚未确认'),
+          h('p',{style:{margin:'5px 0 9px',fontSize:13,color:C.text2,lineHeight:1.65}},
+            item.identityStatus==='ambiguous'
+              ?'检测到同名或相似联系人，但现有证据不足。请先查看原消息，确认当前会话后再绑定。'
+              :'当前身份由 OCR 名称和会话特征暂时建立。确认一次后，本地 UUID 会作为长期身份。'),
+          h('button',{onClick:confirmIdentity,disabled:busy,style:small(true)},'确认当前联系人')),
         // 它现在在「今天要做的」里等着。这一页要能直接把它处理掉，而不是只把人送走：
         // 以前这里只有一个「去看看」，用户必须先跳过去再点一次，这一页却还挂着它。
         isDeferred&&h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',padding:'11px 13px',borderRadius:10,border:'1px solid '+C.border,background:C.panel,marginBottom:14}},
