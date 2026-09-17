@@ -3,18 +3,35 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
   const h=React.createElement;
   const {useEffect,useRef,useState,useSyncExternalStore,useCallback}=React;
 
-  async function api(path,data){
-    const response=await fetch('/message-agent/api/'+path,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json'},body:data===undefined?undefined:JSON.stringify(data)});
+  // 浏览器到宿主这一跳原来**没有任何超时**。宿主被重启、或连接被半开挂住时，fetch 既不
+  // resolve 也不 reject —— 于是 busy 永远清不掉，按钮一直显示「正在整理…」「正在记…」，
+  // 整页看起来卡死，只能刷新页面才能出来（实测就是这样卡住的）。
+  // 给每个请求一个上限：超时就会走到 catch/finally，页面自己恢复。
+  function apiTimeout(path){
+    if(/organize$/.test(path))return 180000;              // 一次整理要读几个会话，服务端上限 120s
+    if(/\/ask$/.test(path))return 180000;                 // 一次提问要调模型
+    if(/\/read$/.test(path))return 120000;                // 读一条会话要真的打开聊天
+    if(/message-center\/refresh$/.test(path))return 90000;
+    return 45000;
+  }
+  async function request(path,method,data){
+    let response;
+    try{
+      response=await fetch('/message-agent/api/'+path,{method,headers:{'Content-Type':'application/json'},
+        body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(apiTimeout(path))});
+    }catch(cause){
+      // 超时和"连不上"要说清楚，别把它伪装成产品文案。
+      const timeout=cause&&(cause.name==='TimeoutError'||cause.name==='AbortError');
+      const error=Error(timeout?'这次等太久了，可能消息服务刚重启过；请再试一次。':'连不上消息服务，可能它刚重启；请再试一次。');
+      error.code=timeout?'REQUEST_TIMEOUT':'REQUEST_UNREACHABLE';
+      throw error;
+    }
     const result=await response.json().catch(()=>({}));
     if(!response.ok){const error=Error(result.error||'操作没有完成，请稍后再试');error.code=result.code;error.dev=result.dev||null;throw error;}
     return result;
   }
-  async function mutate(path,method,data){
-    const response=await fetch('/message-agent/api/'+path,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(data||{})});
-    const result=await response.json().catch(()=>({}));
-    if(!response.ok){const error=Error(result.error||'操作没有完成，请稍后再试');error.code=result.code;error.dev=result.dev||null;throw error;}
-    return result;
-  }
+  const api=(path,data)=>request(path,data===undefined?'GET':'POST',data);
+  const mutate=(path,method,data)=>request(path,method,data||{});
   async function loadInbox(signal){
     const items=[];let cursor='';
     for(let page=0;page<20;page++){
@@ -296,13 +313,99 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
   // 所以这里不暴露中间步骤，只报「在处理」；结果必须能直接变成可执行的东西（待办/跟进）。
   // 只认「- [ ] 」任务语法：普通「- 」列表常用来陈述事实，误当待办会把
   // "微信窗口尺寸偏离标定"这种诊断结论也记成一条待办。
+  // 客户端只认「- [ ]」这一种写法为待办（后端提示词负责标成这个格式）。
+  const LIST_ITEM_LINE=/^\s*(?:[-*+]\s*)?(?:\[[ xX]?\]|[☐□])\s*(.{2,80}?)\s*$/;
+  function listItemText(line){
+    const match=String(line||'').match(LIST_ITEM_LINE);
+    return match?match[1].replace(/[*`]/g,'').replace(/[。；;,，]+$/,'').trim():null;
+  }
   function answerListItems(text){
-    const items=[];
-    for(const raw of String(text||'').split('\n')){
-      const match=raw.match(/^\s*(?:[-*+]\s*)?(?:\[[ xX]?\]|[☐□])\s*(.{2,80}?)\s*$/);
-      if(match)items.push(match[1].replace(/[*`]/g,'').replace(/[。；;,，]+$/,'').trim());
-    }
-    return items.filter(Boolean).slice(0,8);
+    return String(text||'').split('\n').map(listItemText).filter(Boolean).slice(0,8);
+  }
+
+  /**
+   * 答案正文，去掉已经单独呈现的那些条目。
+   *
+   * 「- [ ] 确认消杀安排」这类行既是答案的一部分，也是下面那份勾选清单的来源。两处都渲染
+   * 同一句话，用户看到的就是同一件事写了两遍（实测被指出来过）。所以正文里把这些行摘掉，
+   * 只留下真正是结论的文字；待办统一由清单那一处呈现，勾选即可。
+   */
+  function answerBody(text){
+    const items=new Set(answerListItems(text));
+    const kept=String(text||'').split('\n').filter(line=>!items.has(listItemText(line)));
+    return kept.join('\n').replace(/\n{3,}/g,'\n\n').trim();
+  }
+
+  /** A rotating ring for anything the user waits on. The host theme provides the colours. */
+  function Spinner({size=14}){
+    return h('span',{className:'ma-spin','aria-hidden':'true',style:{width:size,height:size,
+      borderRadius:'50%',border:'2px solid '+C.border,borderTopColor:C.brand,display:'inline-block',flexShrink:0}});
+  }
+
+  /**
+   * 统一的勾选框：整理页选待办、今天要做的标记完成，都用这一个。
+   *
+   * 原来各写各的 —— 整理页用原生 checkbox，今天要做的用一个自绘的方块按钮（未完成时也显示
+   * 一个灰勾）。同一个产品里"勾掉一件事"长成两个样子，用户认不出来那个方块是可以点的
+   * （实测被问过"这个待办怎么标记完成"）。
+   */
+  function Checkbox({checked,onChange,disabled,label,style}){
+    return h('input',{type:'checkbox',checked:!!checked,disabled:!!disabled,onChange,'aria-label':label,
+      style:{width:18,height:18,flexShrink:0,accentColor:C.brand,margin:0,
+        cursor:disabled?'default':'pointer',...style}});
+  }
+
+  // 整理结果留在浏览器里。整理是用户主动发起、要花十几秒到一分钟的操作，而它的产物只是
+  // 「看一眼」的结果——切到「今天要做的」再回来、或者关掉面板再打开，都会让这段结果消失，
+  // 用户于是被迫再整理一次（重新读微信、重新调模型）。只留最近一次，并显示它的时间。
+  const ORGANIZER_KEY='ma-organizer-result';
+  function readOrganizerResult(){
+    try{
+      const parsed=JSON.parse(localStorage.getItem(ORGANIZER_KEY)||'null');
+      return parsed&&typeof parsed.answer==='string'?parsed:null;
+    }catch(e){return null;}
+  }
+  function writeOrganizerResult(value){
+    try{if(value)localStorage.setItem(ORGANIZER_KEY,JSON.stringify(value));else localStorage.removeItem(ORGANIZER_KEY);}catch(e){}
+  }
+
+  // 整理请求挂在**模块级**，不挂在组件里，也不写 localStorage。
+  //
+  // 请求是在发起它的那个组件里等着的：用户切走再回来，组件会重建，请求却还在跑。上一版把
+  // "正在跑"存进 localStorage，回来时确实读得到"进行中"，但旧实例跑完后清掉的是那段存储 ——
+  // 新实例的 state 没人通知，动画就一直转，要再切一次页面才恢复（实测被指出来过）。
+  // 而纯 localStorage 方案还有更糟的一面：页面被刷新后请求已经不存在了，记录却还在，
+  // 那个动画永远不会结束。模块级变量正好只跨"同一个页面内的切换"，刷掉就没有，语义是对的。
+  let ORGANIZER_RUN=null;
+  let ORGANIZER_RUN_ERROR='';
+  const ORGANIZER_WATCHERS=new Set();
+  function notifyOrganizer(){for(const watcher of ORGANIZER_WATCHERS)watcher();}
+
+  /**
+   * 整理进行中的反馈。
+   *
+   * 整理这条链路上没有可观察的阶段事件（刷新列表 → 模型挑会话 → 读正文 → 生成结论都在一次
+   * 调用里），所以这里刻意不做假进度条：只给一个不确定的滑动条、一个真实计时和一句随耗时
+   * 变化的说明。用户要的是「它在动，不是我点漏了」，不是一个编出来的百分比。
+   */
+  function OrganizerProgress({startedAt,restored,onStuck}){
+    const [now,setNow]=useState(()=>Date.now());
+    useEffect(()=>{const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[]);
+    const seconds=Math.max(0,Math.round((now-startedAt)/1000));
+    const stage=seconds<10?'正在查看微信当前可见的会话…'
+      :seconds<40?'正在读取最相关的几个会话，并整理其中的信息…'
+      :'还在读取和整理（会话越多越慢，通常不超过一分钟）…';
+    return h('div',{role:'status','aria-live':'polite',style:{marginTop:18,padding:'14px 16px',borderRadius:12,border:'1px solid '+C.border,background:C.panel}},
+      h('div',{style:{display:'flex',alignItems:'center',gap:9,color:C.text,fontSize:14}},h(Spinner,{size:15}),stage),
+      h('div',{className:'ma-track',style:{marginTop:11,height:4,borderRadius:99,background:C.hover,overflow:'hidden'}},
+        h('div',{className:'ma-track-fill',style:{height:'100%',background:C.brand,borderRadius:99}})),
+      // 这一段只说真话：读不到的条目会被跳过，不承诺"过一会儿就好"（那要看具体原因），
+      // 也不再提"微信正在被使用"——用户主动发起的整理不会再因为这条让开（实测就是这么被误导的）。
+      h('p',{style:{...hint,margin:'9px 0 0'}},(restored?'这次整理还在进行中（你在别的页面发起的），结果出来会自动留在这一页。':'')
+        +'已经等了 '+seconds+' 秒。读不到的条目会跳过并继续整理已取得的信息，不会在后台反复重试。'),
+      // 真的断掉时（宿主重启、连接被挂住）要有一条自己出来的路：请求本身取消不了，
+      // 但界面不必陪着它卡住 —— 之前只能刷新整页才能出来。
+      seconds>180&&onStuck&&h('button',{onClick:onStuck,style:{...small(false),marginTop:10}},'好像断掉了 · 点这里重新开始'));
   }
 
   function AskDock({conversationKey,identity,onChanged,endpoint}){
@@ -335,6 +438,9 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
       }catch(e){setError(e.message);}finally{setBusy(false);}
     }
     const items=answer?answerListItems(answer.answer):[];
+    // 正文与下面的待办清单不重复：清单里的条目从正文里摘掉，只在清单那处呈现。
+    // 「存为跟进记录」保存的仍是完整答案（见上面的 saveFollowup），档案里不该丢东西。
+    const body=answer?answerBody(answer.answer):'';
     const evidence=answer&&answer.tools&&answer.tools.length?'已读取微信记录':'';
     // 提问保持自然口语；"哪些事要我做"由后端的产品级提示词负责标成「- [ ] 」，前端不再猜格式。
     const quick=[
@@ -349,7 +455,7 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
           h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline',padding:'11px 15px',borderBottom:'1px solid '+C.border,position:'sticky',top:0,background:C.panel}},
             h('span',{style:{fontSize:13,color:C.text3,minWidth:0,wordBreak:'break-word'}},'你问：'+asked),
             h('button',{onClick:()=>{setAnswer(null);setNote('');},'aria-label':'关闭回答',style:{...small(false,false,true),flexShrink:0}},'关闭')),
-          h('p',{style:{margin:0,padding:'14px 15px',fontSize:15,lineHeight:1.85,color:C.text,whiteSpace:'pre-wrap',wordBreak:'break-word'}},answer.answer),
+          body&&h('p',{style:{margin:0,padding:'14px 15px',fontSize:15,lineHeight:1.85,color:C.text,whiteSpace:'pre-wrap',wordBreak:'break-word'}},body),
           !!items.length&&h('div',{style:{padding:'0 15px 14px'}},
             h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,marginBottom:6}},
               h('span',{style:{fontSize:13,color:C.text3}},'以上可以直接变成待办'),
@@ -558,6 +664,9 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
     const suggestion=item.classified?CLASS_LABEL[item.classification]:'待判断';
     const meta=(item.summary&&item.summary.length)?firstLine(item.summary[0],44):(item.read?'已读取正文':'尚未读取正文');
     const extra=[
+      // 标为已看以前在列表上完全没有痕迹：服务端确实记下了（批次置为 reviewed，行状态
+      // 变成 done），但这一行照旧什么都不显示，所以点完的感觉是"什么都没发生"。把它写出来。
+      item.actionState==='done'?'已看':'',
       item.following===false?'已忽略':'',
       item.pendingDrafts>0?'草稿待确认':'',
       item.openTodos>0?(item.openTodos+' 件待办'):'',
@@ -596,7 +705,10 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
       h('header',{style:{padding:narrow?'14px 14px 10px':'18px 18px 12px',borderBottom:'1px solid '+C.border}},
         h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginBottom:12}},
           h('h1',{style:{...h1,fontSize:20,margin:0}},'最近整理'),
-          h('button',{onClick:()=>store.set({contactKey:null}),style:small(false)},'整理消息')),
+          // 「整理消息」读起来像在整理这份列表；它真正做的是回到「你想整理什么？」入口页
+          // （contactKey=null），不读微信、不发请求。名字改成动作本身，回路的另一头
+          // （详情页的「← 再整理一次」）也指向同一个地方。
+          h('button',{onClick:()=>store.set({contactKey:null}),title:'回到「你想整理什么？」',style:small(false)},'整理新消息')),
         h('input',{value:query,onChange:event=>setQuery(event.target.value),placeholder:'搜索整理记录','aria-label':'搜索消息',style:field})),
       h('div',{style:{flex:1,overflowY:'auto'}},
         !shown.length&&h('p',{style:{padding:24,textAlign:'center',color:C.text3,fontSize:14,lineHeight:1.8}},needle?'没有找到相关记录':'还没有整理记录'),
@@ -605,7 +717,19 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
 
   function OrganizerHome({items,onChanged,store,narrow}){
     const [text,setText]=useState(''),[busy,setBusy]=useState(false),[refreshing,setRefreshing]=useState(false);
-    const [answer,setAnswer]=useState(null),[error,setError]=useState(''),[note,setNote]=useState('');
+    // 结果来自浏览器里存的最近一次整理，所以切走再回来、或者关掉面板再打开都还在。
+    const [stored,setStored]=useState(()=>readOrganizerResult());
+    const [fresh,setFresh]=useState(false);
+    // 订阅模块级的"正在跑"：切走再回来动画和计时都在，而且旧实例跑完时这一份会一起更新，
+    // 不会卡住。也因为没有第二份状态，重复发起不可能发生。
+    const [,bumpRun]=useState(0);
+    useEffect(()=>{const watcher=()=>bumpRun(value=>value+1);ORGANIZER_WATCHERS.add(watcher);return()=>{ORGANIZER_WATCHERS.delete(watcher);};},[]);
+    const running=ORGANIZER_RUN;
+    const [picked,setPicked]=useState({}),[added,setAdded]=useState({});
+    const [error,setError]=useState(()=>ORGANIZER_RUN_ERROR),[note,setNote]=useState('');
+    useEffect(()=>{if(ORGANIZER_RUN_ERROR){setError(ORGANIZER_RUN_ERROR);ORGANIZER_RUN_ERROR='';}},[]);
+    // 进行中就锁住入口：包括"别处发起、这次回来才看到"的那种。
+    const locked=busy||!!running;
     const quick=[
       ['整理最近消息','查看微信当前可见的最近会话，读取最多 5 个最值得关注的会话，告诉我发生了什么，并列出需要我处理的事项。'],
       ['找出需要回复的','查看最近会话，找出明确在等我回复的人。只给必要背景和建议回复方向，不要发送。'],
@@ -613,21 +737,54 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
       ['看看有没有遗漏','检查最近会话里是否有日期、承诺、文件、付款或决定被我遗漏。']
     ];
     async function run(request){
-      const value=String(request??text).trim();if(!value||busy)return;
-      setBusy(true);setError('');setNote('');setAnswer(null);
-      try{setAnswer(await api('message-center/organize',{text:value}));setText('');onChanged();}
-      catch(e){setError(e.message);}finally{setBusy(false);}
+      const value=String(request??text).trim();if(!value||busy||ORGANIZER_RUN)return;
+      ORGANIZER_RUN={asked:value,startedAt:Date.now()};
+      setBusy(true);setError('');setNote('');notifyOrganizer();
+      try{
+        const result=await api('message-center/organize',{text:value});
+        const next={answer:String(result.answer||''),asked:value,at:Date.now()/1000};
+        setStored(next);writeOrganizerResult(next);
+        setFresh(true);setPicked({});setAdded({});setText('');onChanged();
+      }
+      // 失败信息也放在模块级：这一次整理是用户在别的页面时跑完的，光 setError 会随组件一起丢掉，
+      // 他回来只看到"什么都没发生"。module 级留着，谁挂载上来谁显示。
+      catch(e){ORGANIZER_RUN_ERROR=e.message;}
+      finally{ORGANIZER_RUN=null;notifyOrganizer();}
+    }
+    // 界面从"卡住"里出来。请求取消不了，但它已经不会再影响这一页（结果仍然会落到 localStorage）。
+    function unstick(){
+      ORGANIZER_RUN=null;setBusy(false);notifyOrganizer();
+      setError('这次整理好像断掉了（消息服务可能刚重启过），可以重新开始。');
+    }
+    function forget(){
+      writeOrganizerResult(null);setStored(null);setFresh(false);setPicked({});setAdded({});setNote('');
     }
     async function refresh(){
       setRefreshing(true);setError('');setNote('');
       try{const result=await api('message-center/refresh',{});setNote(result.observationMessage||('已看到微信当前列表里的 '+result.visibleCount+' 个会话，没有打开聊天。'));await onChanged();}
       catch(e){setError(e.message);}finally{setRefreshing(false);}
     }
-    const todos=answer?answerListItems(answer.answer):[];
-    async function addTodos(){
-      setBusy(true);setError('');
-      try{for(const item of todos)await api('todos',{title:firstLine(item,40),detail:item,source:'assistant'});setNote('✓ 已把 '+todos.length+' 件事放进「今天要做的」');}
-      catch(e){setError(e.message);}finally{setBusy(false);}
+    const todos=stored?answerListItems(stored.answer):[];
+    // 正文里已经不包含下面那份勾选清单的条目，同一件事不会写两遍。
+    const body=stored?answerBody(stored.answer):'';
+    const chosen=todos.map((item,index)=>index).filter(index=>picked[index]!==false&&!added[index]);
+    async function addPicked(){
+      const list=chosen.map(index=>({item:todos[index],index}));
+      if(!list.length||busy)return;
+      setBusy(true);setError('');setNote('');
+      try{
+        // 服务端对「同来源 + 同标题 + 未完成」的重复会返回已存在的那条（deduped），
+        // 这里照实说，不要报一个虚的数量。
+        let created=0;
+        for(const {item} of list){
+          const saved=await api('todos',{title:firstLine(item,40),detail:item,source:'assistant'});
+          if(!saved.deduped)created++;
+        }
+        setAdded(old=>{const next={...old};for(const {index} of list)next[index]=true;return next;});
+        setNote(created
+          ? ('✓ 已把 '+created+' 件放进「今天要做的」'+(list.length>created?('（另外 '+(list.length-created)+' 件之前已经记过，没有重复添加）'):''))
+          : '这几件之前已经记过了，没有重复添加。');
+      }catch(e){setError(e.message);}finally{setBusy(false);}
     }
     return h('section',{style:{flex:1,minWidth:0,height:'100%',overflowY:'auto'}},
       h('div',{style:{maxWidth:820,padding:narrow?'22px 16px 42px':'38px 42px 60px',margin:'0 auto'}},
@@ -636,22 +793,42 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
         h(Notice,{error}),
         note&&h('p',{style:{color:C.ok,fontSize:14,lineHeight:1.7,margin:'0 0 14px'}},note),
         h('div',{style:{display:'grid',gridTemplateColumns:narrow?'1fr':'repeat(2,minmax(0,1fr))',gap:12,marginBottom:18}},
-          quick.map(([title,prompt],index)=>h('button',{key:title,onClick:()=>run(prompt),disabled:busy,
-            style:{textAlign:'left',padding:'16px 17px',borderRadius:14,border:'1px solid '+C.border,background:index===0?C.hover:C.panel,color:C.text,cursor:busy?'default':'pointer',minHeight:92}},
-            h('strong',{style:{display:'block',fontSize:16,marginBottom:7}},title),
-            h('span',{style:{fontSize:13,color:C.text3,lineHeight:1.6}},firstLine(prompt,42))))),
+          quick.map(([title,prompt],index)=>h('button',{key:title,onClick:()=>run(prompt),disabled:locked,
+            style:{textAlign:'left',padding:'16px 17px',borderRadius:14,border:'1px solid '+C.border,background:index===0?C.hover:C.panel,color:C.text,cursor:locked?'default':'pointer',minHeight:92,opacity:locked&&!(running&&running.asked===prompt)?0.5:1}},
+            h('strong',{style:{display:'flex',alignItems:'center',gap:8,fontSize:16,marginBottom:7}},
+              running&&running.asked===prompt?h(Spinner,{size:15}):null,title),
+            h('span',{style:{fontSize:13,color:C.text3,lineHeight:1.6}},running&&running.asked===prompt?'正在整理，结果会留在这一页…':firstLine(prompt,42))))),
         h('div',{style:{display:'flex',gap:10,alignItems:'center',padding:10,border:'1px solid '+C.border,borderRadius:14,background:C.panel}},
           h('input',{value:text,onChange:event=>setText(event.target.value),onKeyDown:event=>{if(event.key==='Enter')run();},
             placeholder:'例如：帮我看看最近有没有要确认时间的消息','aria-label':'输入整理需求',style:{...field,border:'none',background:'transparent',flex:1,minWidth:0}}),
-          h('button',{onClick:()=>run(),disabled:busy||!text.trim(),style:button(true)},busy?'正在整理…':'开始整理')),
+          h('button',{onClick:()=>run(),disabled:locked||!text.trim(),style:{...button(true),display:'inline-flex',alignItems:'center',justifyContent:'center',gap:8,flexShrink:0}},
+            locked&&h(Spinner,{size:14}),locked?'正在整理…':'开始整理')),
         h('div',{style:{display:'flex',alignItems:'center',gap:10,marginTop:11,flexWrap:'wrap'}},
-          h('button',{onClick:refresh,disabled:refreshing||busy,style:small(false)},refreshing?'正在查看…':'只刷新会话列表'),
+          h('button',{onClick:refresh,disabled:refreshing||locked,style:small(false)},refreshing?'正在查看…':'只刷新会话列表'),
           h('span',{style:{fontSize:12,color:C.text3}},'这个操作不会打开聊天，也不会清未读红点。')),
-        busy&&h('div',{style:{marginTop:18,padding:'13px 15px',borderRadius:12,background:C.panel,color:C.text2,fontSize:14}},'正在按你的要求读取和整理；遇到微信正在使用时会跳过，不会在后台反复重试。'),
-        answer&&h('div',{style:{marginTop:22,border:'1px solid '+C.border,borderRadius:14,background:C.panel,overflow:'hidden'}},
-          h('div',{style:{padding:'12px 16px',borderBottom:'1px solid '+C.border,fontSize:13,color:C.text3}},'整理结果'),
-          h('p',{style:{margin:0,padding:'16px 17px',whiteSpace:'pre-wrap',lineHeight:1.85,fontSize:15,color:C.text}},answer.answer),
-          !!todos.length&&h('div',{style:{padding:'0 17px 16px'}},h('button',{onClick:addTodos,disabled:busy,style:small(true)},'把 '+todos.length+' 件事加入今天要做的'))),
+        running&&h(OrganizerProgress,{startedAt:running.startedAt,restored:!busy,onStuck:unstick}),
+        stored&&h('div',{style:{marginTop:22,border:'1px solid '+C.border,borderRadius:14,background:C.panel,overflow:'hidden'}},
+          h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,flexWrap:'wrap',padding:'12px 16px',borderBottom:'1px solid '+C.border}},
+            h('span',{style:{fontSize:13,color:C.text3}},fresh?'整理结果':('上次的整理结果 · '+(stored.at?relativeTime(stored.at):'之前'))),
+            h('div',{style:{display:'flex',gap:8,flexShrink:0}},
+              stored.asked&&h('button',{onClick:()=>run(stored.asked),disabled:locked,style:small(false,false,true)},'重新整理'),
+              h('button',{onClick:forget,disabled:busy,style:small(false,false,true)},'清空'))),
+          !fresh&&h('p',{style:{margin:0,padding:'11px 17px',borderBottom:'1px solid '+C.border,fontSize:13,color:C.text3,lineHeight:1.7}},'这是上一次整理的结论。微信里如果又来了新消息，点「重新整理」才会重新读取；不点就不会再动微信。'),
+          stored.asked&&h('p',{style:{margin:0,padding:'11px 17px 0',fontSize:13,color:C.text3,lineHeight:1.7}},'当时的要求：'+firstLine(stored.asked,60)),
+          body&&h('p',{style:{margin:0,padding:'16px 17px',whiteSpace:'pre-wrap',lineHeight:1.85,fontSize:15,color:C.text}},body),
+          !body&&!todos.length&&h('p',{style:{margin:0,padding:'16px 17px',fontSize:15,color:C.text2,lineHeight:1.85}},'这次整理没有给出可执行的事项。'),
+          !!todos.length&&h('div',{style:{padding:body?'4px 17px 16px':'16px 17px 16px'}},
+            h('p',{style:{...hint,margin:'0 0 8px'}},'勾选要放进「今天要做的」的条目（默认全选，可以只加其中几件）：'),
+            todos.map((item,index)=>h('label',{key:item+index,style:{display:'flex',gap:10,alignItems:'flex-start',padding:'9px 0',borderTop:'1px solid '+C.border,cursor:busy||added[index]?'default':'pointer'}},
+              h(Checkbox,{checked:picked[index]!==false&&!added[index],disabled:busy||!!added[index],label:firstLine(item,30),
+                onChange:event=>setPicked(old=>({...old,[index]:event.target.checked})),style:{marginTop:4}}),
+              h('span',{style:{flex:1,minWidth:0,fontSize:14,color:added[index]?C.text3:C.text2,lineHeight:1.7,textDecoration:added[index]?'line-through':'none'}},item),
+              added[index]&&h('span',{style:{fontSize:13,color:C.ok,flexShrink:0}},'✓ 已加入'))),
+            h('div',{style:{display:'flex',gap:8,alignItems:'center',marginTop:12,flexWrap:'wrap'}},
+              h('button',{onClick:addPicked,disabled:busy||!chosen.length,style:small(true)},
+                busy?'正在记…':(chosen.length?('加入选中的 '+chosen.length+' 件'):'没有选中任何条目')),
+              h('button',{onClick:()=>setPicked({}),disabled:busy||chosen.length===todos.length,style:small(false,false,true)},'全选'),
+              h('button',{onClick:()=>{const next={};for(const index of todos.map((_,i)=>i))next[index]=false;setPicked(next);},disabled:busy||!chosen.length,style:small(false,false,true)},'全不选')))),
         narrow&&!!items.length&&h('div',{style:{marginTop:28}},
           h('h2',{style:{...h3,marginBottom:10}},'最近整理'),
           items.slice(0,8).map(item=>h('button',{key:item.key,onClick:()=>store.set({contactKey:item.key}),
@@ -690,6 +867,10 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
     // 是不是还在「今天要做的」里，以服务端为准（`actionState` 走的是同一个 latestAction
     // 判定）；本地只覆盖点下去那一瞬间，成功之后交给刷新接管。
     const isDeferred=local.deferred!==undefined?local.deferred:item.actionState==='deferred';
+    // 「有事情要处理」= 已经有待办、已经有草稿等你确认，或者这次的判断本身就是「要回复/要处理」。
+    // 它决定要不要给出「放到今天要做的」——把一条没事的会话挂进去只是噪音。
+    const hasWork=(item.openTodos||0)>0||(item.pendingDrafts||0)>0
+      ||item.classification==='action'||item.classification==='reply';
     const seen=()=>run(()=>api('message-center/'+item.key+'/seen',{}),
       {state:{seen:true,deferred:false},note:'✓ 已标为已看，也从「今天要做的」里收起来了。'});
     const defer=()=>run(()=>api('message-center/'+item.key+'/defer',{}),
@@ -706,14 +887,21 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
     const follow=following=>run(()=>api('message-center/'+item.key+'/follow',{following}),
       {state:following?{seen:true}:{},note:following?'✓ 已恢复关注。':'✓ 已忽略这个会话，它不会再进队列。'});
     const classLabel=CLASS_LABEL[item.classification]||'无法判断';
-    const primary=item.classification==='reply'?h('button',{onClick:draft,disabled:busy,style:button(true)},busy?'正在…':'AI 帮我起草')
+    // 这几个动作里「读取这条会话」和「AI 帮我起草」都要十几秒到一分钟。按钮上只换文案时，
+    // 用户看到的是一个不动的界面，会以为没点上；转一圈的指示器才说明「在跑，别重复点」。
+    const busyStyle={...button(true),display:'inline-flex',alignItems:'center',justifyContent:'center',gap:8};
+    const primary=item.classification==='reply'?h('button',{onClick:draft,disabled:busy,style:busyStyle},busy&&h(Spinner,{size:14}),busy?'正在起草…':'AI 帮我起草')
       :item.classification==='action'?h('button',{onClick:()=>setTodoOpen(value=>!value),style:button(true)},'记为待办')
-      :item.classification==='fyi'?h('button',{onClick:seen,disabled:busy||local.seen,style:button(true)},local.seen?'✓ 已标为已看':'标为已看')
-      :h('button',{onClick:read,disabled:busy,style:button(true)},'查看原消息');
+      :item.classification==='fyi'?h('button',{onClick:seen,disabled:busy||local.seen,style:busyStyle},busy&&h(Spinner,{size:14}),local.seen?'✓ 已标为已看':'标为已看')
+      :h('button',{onClick:read,disabled:busy,style:busyStyle},busy&&h(Spinner,{size:14}),busy?'正在读取…':'查看原消息');
     return h('section',{style:{flex:1,display:'flex',flexDirection:'column',minWidth:0,minHeight:0},'aria-label':item.identity.title+'的消息详情'},
       h('header',{style:{position:'sticky',top:0,zIndex:1,padding:'14px 20px',borderBottom:'1px solid '+C.border,background:C.bg,display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:12}},
         h('div',{style:{display:'flex',alignItems:'center',gap:12,minWidth:0,flex:'1 1 auto'}},
-          narrow&&h('button',{onClick:()=>store.set({contactKey:null}),'aria-label':'返回消息列表',style:{...small(false),padding:'8px 12px',flexShrink:0}},'←'),
+          // 只有窄屏才需要：那时左栏被整块换掉，没有这个箭头就回不到入口页。
+          // 宽屏下左栏一直在，标题行里的「整理新消息」就是回路，再放一个「再整理一次」
+          // 是同一件事说两遍（实测被指出来过）。
+          narrow&&h('button',{onClick:()=>store.set({contactKey:null}),'aria-label':'回到整理入口（你想整理什么？）',
+            title:'回到「你想整理什么？」',style:{...small(false),padding:'8px 12px',flexShrink:0}},'←'),
           h('div',{style:{minWidth:0}},
             h('h2',{style:{margin:0,fontSize:20,color:C.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},item.identity.title),
             h('p',{style:{margin:'4px 0 0',fontSize:13,color:C.text3}},(item.identity.kind==='group'?'微信群聊':'微信联系人')
@@ -747,13 +935,20 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
               detail:item.classificationError.detail,
               at:item.classificationError.at?new Date(item.classificationError.at*1000).toLocaleString('zh-CN'):''
             }:null,label:'这次为什么没判断出来'}))),
-        h(Section,{title:'这条你要怎么处理'},
+        h(Section,{title:'这条你要怎么处理',meta:(item.openTodos||0)>0?('已有 '+item.openTodos+' 件待办'):''},
           h('div',{style:{display:'flex',gap:10,flexWrap:'wrap'}},
             primary,
-            h('button',{onClick:defer,disabled:busy,style:button(false)},isDeferred?'已放进今天要做的':'稍后处理'),
-            h('button',{onClick:seen,disabled:busy||local.seen,style:button(false)},local.seen?'✓ 已标为已看':'标为已看')),
-          h('div',{style:{display:'flex',gap:8,marginTop:10,flexWrap:'wrap'}},
-            ACTION_CLASSES.filter(c=>c!==item.classification).map(c=>h('button',{key:c,onClick:()=>reclassify(c),disabled:busy,style:small(false,false,true)},'其实是'+CLASS_LABEL[c]))),
+            // 「稍后处理」的真实含义是「把这条会话挂进『今天要做的』，我等下再管」。没有要管的
+            // 事时它就是个空操作，所以只在真有事情时才出现（用户原话：没有待办不需要稍后处理）。
+            hasWork&&h('button',{onClick:defer,disabled:busy,style:button(false)},isDeferred?'已在今天要做的':'放到今天要做的'),
+            // 「标为已看」只在它还不是主按钮的时候出现：分类是 fyi 时主按钮本身就是它，
+            // 原来同一行会写出两个一模一样的「标为已看」（实测被指出来过）。
+            item.classification!=='fyi'&&h('button',{onClick:seen,disabled:busy||local.seen,style:button(false)},local.seen?'✓ 已标为已看':'标为已看')),
+          // 改分类是纠错，不是日常动作：折叠起来，别让它和真正要点的按钮抢位置。
+          h('details',{style:{marginTop:10}},
+            h('summary',{style:{fontSize:13,color:C.text3,cursor:'pointer'}},'分类不对？改一下'),
+            h('div',{style:{display:'flex',gap:8,marginTop:10,flexWrap:'wrap'}},
+              ACTION_CLASSES.filter(c=>c!==item.classification).map(c=>h('button',{key:c,onClick:()=>reclassify(c),disabled:busy,style:small(false,false,true)},'其实是'+CLASS_LABEL[c])))),
           todoOpen&&h('div',{style:{marginTop:12,border:'1px solid '+C.border,borderRadius:12,padding:12,background:C.panel}},
             h('input',{value:todoText,onChange:event=>setTodoText(event.target.value),placeholder:'要做什么？'+(item.summary&&item.summary.length?'（默认：'+firstLine(item.summary[0],20)+'）':''),style:field}),
             h('div',{style:{display:'flex',gap:10,marginTop:10}},
@@ -767,7 +962,8 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
           !messages.length
             ? h('div',null,
                 h('p',{style:hint},'助手还没有读这条会话的正文。'),
-                h('button',{onClick:read,disabled:busy,style:small(true)},'读取这条会话（会消掉它在微信里的未读红点）'))
+                h('button',{onClick:read,disabled:busy,style:{...small(true),display:'inline-flex',alignItems:'center',gap:8}},
+                  busy&&h(Spinner,{size:13}),busy?'正在读取微信…':'读取这条会话（会消掉它在微信里的未读红点）'))
             : h('div',{style:{marginTop:4}},
                 messages.slice(-30).map((message,index)=>
                   h('div',{key:index,style:{padding:'8px 0',borderBottom:'1px solid '+C.border}},
@@ -876,19 +1072,18 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
   function TodoRow({todo,onAction,busy}){
     const due=dueInfo(todo.dueAt),done=todo.state!=='open';
     return h('div',{style:{display:'flex',gap:12,alignItems:'flex-start',padding:'13px 15px',borderBottom:'1px solid '+C.border}},
-      // 以前未完成时这个方框是空的（done?'✓':''），用户看不出它能点——"这个待办怎么标记完成？"。
-      // 现在未完成也给一个浅灰勾，语义一眼可辨；悬停再高亮成品牌色。
-      h('button',{onClick:()=>onAction(done?'reopen':'done',todo),disabled:busy,title:done?'重新打开':'标记完成','aria-label':done?'重新打开':'标记完成',
-        'data-todo-toggle':done?'done':'open',
-        style:{width:22,height:22,marginTop:2,borderRadius:6,border:'1px solid '+(done?C.ok:C.border),background:done?C.ok:'transparent',cursor:'pointer',flexShrink:0,color:done?'var(--dsw-alias-bg-base)':C.text3,fontSize:13,lineHeight:1,padding:0}},'✓'),
+      h(Checkbox,{checked:done,disabled:busy,label:done?'重新打开：「'+firstLine(todo.title,20)+'」':'标记完成：「'+firstLine(todo.title,20)+'」',
+        onChange:()=>onAction(done?'reopen':'done',todo),style:{marginTop:3}}),
       h('div',{style:{flex:1,minWidth:0}},
         h('div',{style:{fontSize:15,color:done?C.text3:C.text,lineHeight:1.6,textDecoration:done?'line-through':'none',wordBreak:'break-word'}},todo.title),
         todo.detail&&todo.detail!==todo.title&&h('p',{style:{margin:'5px 0 0',fontSize:13,color:C.text2,lineHeight:1.7,whiteSpace:'pre-wrap',maxHeight:60,overflow:'hidden'}},todo.detail),
         h('div',{style:{display:'flex',gap:8,alignItems:'center',marginTop:6,flexWrap:'wrap'}},
           due&&h('span',{style:pill(due.color)},due.text),
           todo.identity&&h('span',{style:{fontSize:13,color:C.text3}},'来自 '+todo.identity.title),
-          todo.source==='assistant'&&h('span',{style:{fontSize:13,color:C.text3}},'助手记的'),
-          !todo.identity&&h('span',{style:{fontSize:13,color:C.text3}},'自己记的'))),
+          // 只留一个维度：这条是谁记下来的。
+          // 原来这里是两条独立判断 —— 「助手记的」看 source、「自己记的」看有没有挂联系人 ——
+          // 于是一条没有联系人的助手待办会同时出现两个标签，互相打架（用户直接说看不懂）。
+          h('span',{style:{fontSize:13,color:C.text3}},todo.source==='assistant'?'助手记的':'自己记的'))),
       !done&&h('div',{style:{display:'flex',gap:6,flexShrink:0}},
         h('button',{onClick:()=>onAction('tomorrow',todo),disabled:busy,style:small(false)},'明天'),
         h('button',{onClick:()=>onAction('delete',todo),disabled:busy,style:small(false,true)},'删除')));
@@ -913,6 +1108,10 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
     async function addTodo(_,text,dueAt){try{await api('todos',{title:text,dueAt,source:'manual'});setAdding(false);today.refresh();}catch(e){setError(e.message);}}
     const go=(key)=>{store.set({tab:'messages',contactKey:key,scope:'all'});};
     const total=counts.decide+counts.confirm+counts.todos;
+    // 首次加载时先给一句"正在打开"，不要先摆出空列表：接口要等 Worker 一圈（实测 0.3–0.8s），
+    // 这段时间里页面会显示"今天没有等你处理的事"，然后内容突然冒出来 —— 看起来既慢又是错的。
+    if(today.loading&&!data)return h('div',{style:{width:'100%',display:'flex'}},
+      h(Empty,{title:'正在打开今天要做的',text:'请稍等一下…'}));
     return h('div',{style:{width:'100%',overflowY:'auto'}},
       h('div',{style:{padding:'24px clamp(18px,4vw,48px) 60px',maxWidth:860}},
         h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:16,flexWrap:'wrap'}},
@@ -951,7 +1150,10 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
           h('details',{key:group.key,style:{borderTop:'1px solid '+C.border,paddingTop:16,marginBottom:20}},
             h('summary',{style:{fontSize:15,color:C.text}},'助手已处理'+(group.items.length?('（'+group.items.length+' 个会话）'):'')),
             !group.items.length&&h('p',{style:hint},'还没有已处理的记录。'),
-            group.items.map(entry=>h(Row,{key:entry.id,title:entry.identity.title,right:relativeTime(entry.updatedAt),meta:JOB[entry.state]||('已处理'+(entry.detail?(' · '+firstLine(entry.detail,60)):''))}))))));
+            group.items.map(entry=>h(Row,{key:entry.id,title:entry.identity.title,right:relativeTime(entry.updatedAt),
+              // 写清是谁处理掉的、处理成了什么样。「已处理」三个字既没说人也没说事，
+              // 用户看完不知道助手到底做了什么（实测被问过"助手怎么处理呢"）。
+              meta:(entry.actor==='you'?'你':'助手')+' · '+firstLine(entry.detail||'处理完了',60)}))))));
   }
 
   // ---- 联系人 ---------------------------------------------------------------------------------------------------------------------
@@ -1432,7 +1634,7 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
       value==='today'&&store.get().pending?h('span',{style:{marginLeft:'auto',minWidth:22,height:22,padding:'0 6px',borderRadius:11,background:C.error,color:'var(--dsw-alias-bg-base)',fontSize:12,display:'inline-flex',alignItems:'center',justifyContent:'center'}},store.get().pending):null));
     return h('div',{role:'dialog','aria-modal':'true','aria-label':'消息助手','data-ma':'root',
       style:{position:'fixed',inset:0,zIndex:60,display:'flex',background:C.bg,pointerEvents:'auto',color:C.text}},
-      h('style',null,'[data-ma] button:focus-visible,[data-ma] input:focus-visible,[data-ma] textarea:focus-visible,[data-ma] select:focus-visible{outline:3px solid var(--dsw-alias-brand-primary);outline-offset:2px}[data-ma] button:disabled{opacity:.55;cursor:not-allowed}[data-ma] summary{cursor:pointer}[data-ma] [data-todo-toggle="open"]:hover{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}[data-ma] .ma-pulse{animation:ma-pulse 1.3s ease-in-out infinite}@keyframes ma-pulse{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}'),
+      h('style',null,'[data-ma] button:focus-visible,[data-ma] input:focus-visible,[data-ma] textarea:focus-visible,[data-ma] select:focus-visible{outline:3px solid var(--dsw-alias-brand-primary);outline-offset:2px}[data-ma] button:disabled{opacity:.55;cursor:not-allowed}[data-ma] summary{cursor:pointer}[data-ma] [data-todo-toggle="open"]:hover{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}[data-ma] .ma-pulse{animation:ma-pulse 1.3s ease-in-out infinite}@keyframes ma-pulse{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}[data-ma] .ma-spin{animation:ma-spin .8s linear infinite}@keyframes ma-spin{to{transform:rotate(360deg)}}[data-ma] .ma-track-fill{animation:ma-track 1.6s ease-in-out infinite}@keyframes ma-track{0%{transform:translateX(-110%)}100%{transform:translateX(320%)}}@media (prefers-reduced-motion: reduce){[data-ma] .ma-pulse,[data-ma] .ma-spin,[data-ma] .ma-track-fill{animation:none}[data-ma] .ma-track-fill{width:100%;opacity:.5}}'),
       h('nav',{'data-ma':'nav','aria-label':'主要功能',style:{width:narrow?84:200,flexShrink:0,padding:'16px 10px',borderRight:'1px solid '+C.border,background:C.panel,display:'flex',flexDirection:'column',gap:6}},
         h('div',{style:{padding:'2px 10px 16px',fontSize:narrow?18:18,fontWeight:700}},narrow?'助手':'消息助手'),
         narrow?items:wideItems,

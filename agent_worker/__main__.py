@@ -9,7 +9,7 @@ import re
 import threading
 import time
 import uuid
-from .service import Worker, RuntimeToolError, is_system_entry, error_trace
+from .service import Worker, RuntimeToolError, is_system_entry, error_trace, names_match, name_key, strip_ocr_noise
 from .harness import Harness
 
 
@@ -187,11 +187,26 @@ def handler(worker, token):
                     if provider == 'wechat-main' and conversation.startswith('wechat:'):
                         choices = worker.mcp.call('list_conversations', {'provider': provider})['conversations']
                         matches = [c for c in choices if c.get('id') == conversation]
+                        # OCR cleanup can improve a visible name between discovery and the click
+                        # (for example 树袋熊.. -> 树袋熊), which necessarily changes its
+                        # display-name-derived runtime id. The Host supplies the title stored on
+                        # the server-side message-centre row; use it only to recover a unique
+                        # current visible row, never as an unchecked target.
+                        if not matches:
+                            stored_title = data.get('conversation_title')
+                            if isinstance(stored_title, str) and stored_title.strip():
+                                # An exact key match wins: names_match accepts "the shorter name
+                                # is a piece of the longer one", so a stored 树袋熊 would also
+                                # collect 树袋熊电竞 and turn a good read into 没有唯一匹配的会话.
+                                wanted = name_key(stored_title)
+                                exact = [c for c in choices if name_key(c.get('title') or '') == wanted]
+                                matches = exact or [c for c in choices
+                                                    if names_match(stored_title, c.get('title') or '')]
                         if len(matches) != 1:
-                            raise ValueError('微信当前显示的聊天列表里没有这个会话，请重新整理后再试。')
+                            raise ValueError('微信当前显示的聊天列表里没有唯一匹配的会话，请重新整理后再试。')
                         if (matches[0].get('metadata') or {}).get('ambiguous') == 'true':
                             raise ValueError('微信里有多个同名会话，助手分不清是哪一个。请先给其中一个改名或加备注。')
-                        read_target = matches[0].get('title') or ''
+                        read_target = strip_ocr_noise(matches[0].get('title') or '')
                         if not read_target:
                             raise ValueError('这个会话的名称没有读完，请重新整理后再试。')
                     messages = worker.mcp.observe({'provider': provider, 'conversation': read_target}, limit)

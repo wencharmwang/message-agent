@@ -40,3 +40,21 @@ test('rekey on a contact that does not exist is a no-op', () => {
   const crm = makeCrm();
   assert.equal(crm.rekey('missing', 'new', {}), false);
 });
+
+test('同一件事不会被记成两条待办', () => {
+  const crm = makeCrm();
+  const first = crm.createTodo({title: '确认消杀后的宠物和门窗安排', source: 'assistant'});
+  const again = crm.createTodo({title: '确认消杀后的宠物和门窗安排', source: 'assistant'});
+  assert.equal(again.id, first.id);
+  assert.equal(again.deduped, true);
+  assert.equal(crm.listTodos({state: 'open'}).length, 1);
+
+  // 不同来源、或完成之后重记，都是新的事，不该被挡。
+  crm.createTodo({title: '确认消杀后的宠物和门窗安排', source: 'manual'});
+  assert.equal(crm.listTodos({state: 'open'}).length, 2);
+  crm.setTodoState(first.id, 'done');
+  const reopened = crm.createTodo({title: '确认消杀后的宠物和门窗安排', source: 'assistant'});
+  assert.notEqual(reopened.id, first.id);
+  assert.equal(reopened.deduped, undefined);
+  assert.equal(crm.listTodos({state: 'open'}).length, 2);
+});

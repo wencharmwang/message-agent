@@ -75,10 +75,13 @@ class DevDiagnosticsTest(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         self.thread.start()
 
-    def read(self):
+    def read(self, conversation_id='wechat:target', conversation_title=None):
+        payload = {'provider': 'wechat-main', 'conversation_id': conversation_id}
+        if conversation_title is not None:
+            payload['conversation_title'] = conversation_title
         request = urllib.request.Request(
             'http://127.0.0.1:%d/api/read' % self.port,
-            json.dumps({'provider': 'wechat-main', 'conversation_id': 'wechat:target'}).encode('utf-8'),
+            json.dumps(payload).encode('utf-8'),
             headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json'})
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
@@ -108,6 +111,12 @@ class DevDiagnosticsTest(unittest.TestCase):
     def test_manual_read_resolves_the_row_id_to_a_user_commanded_title(self):
         self.worker.store.set_setting('dev_diagnostics', True)
         self.read()
+        self.assertEqual(self.worker.mcp.observed[-1],
+                         {'provider': 'wechat-main', 'conversation': '树袋熊'})
+
+    def test_manual_read_recovers_a_stale_ocr_id_from_the_server_side_title(self):
+        self.worker.store.set_setting('dev_diagnostics', True)
+        self.read('wechat:stale-id', '树袋熊…')
         self.assertEqual(self.worker.mcp.observed[-1],
                          {'provider': 'wechat-main', 'conversation': '树袋熊'})
 

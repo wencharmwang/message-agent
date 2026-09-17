@@ -109,6 +109,30 @@ def is_system_entry(name):
     return name_key(name) in SYSTEM_ENTRY_NAMES
 
 
+def strip_ocr_noise(name):
+    """Drop the characters OCR invents at the end of a display name.
+
+    A conversation name is also the query WeChat's global search is given, and that search
+    has to match the contact exactly: one fabricated trailing character turns every read of
+    that conversation into contact_not_found. Observed on one real contact (the name carries
+    a trailing emoji none of the OCR engines can render): it came back as 树袋熊…, 树袋熊。
+    and 树袋熊? on different frames, and the reads failed until the runtime learned the same
+    cleanup.
+
+    The dot handling mirrors the runtime's ConversationListLocator.SplitName on purpose:
+    trailing dots on a SHORT name are OCR noise, while on a long name they are WeChat's own
+    truncation marker and must be kept, or the folded name stops matching the row.
+    """
+    text = str(name or '').strip()
+    if not text:
+        return ''
+    text = text.rstrip('。')
+    stem = text.rstrip('.．·…').rstrip()
+    if stem and stem != text and len(name_key(stem)) <= 8:
+        text = stem
+    return text.rstrip('?？\ufffd\u25a1').strip() or str(name or '').strip()
+
+
 # Runtime codes that all mean "the WeChat window is not in a state we can read": hidden to
 # the tray, minimized, or a capture surface that renders blank. Any of them is worth one
 # restore attempt — see Worker.recover_window.

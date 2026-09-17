@@ -575,6 +575,34 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
     return db.prepare("SELECT * FROM message_batch WHERE conversation_key = ? AND state = 'open' ORDER BY created_at DESC LIMIT 1").get(key) ?? null;
   },
 
+  /**
+   * 最近被**用户**处理掉的会话，带上是哪一种处理。
+   *
+   * 「已完成」那一栏原来只列助手的作业，用户自己点「标为已看」「处理完了」的会话一条都不出现 ——
+   * 于是点完的感觉是"什么都没发生"，也无从回看自己刚处理掉什么。这里按会话取最后一次动作，
+   * 只认真的表示"处理掉了"的那两种（标为已看 / 处理完了）；稍后处理不算，它是待办。
+   */
+  completedRecent({limit = 8, window = 48 * 3600, at = clock()} = {}) {
+    const rows = db.prepare(`SELECT conversation_key, action_type, created_at
+      FROM message_action ORDER BY created_at DESC, rowid DESC`).all();
+    const latest = new Map();
+    for (const row of rows) if (!latest.has(row.conversation_key)) latest.set(row.conversation_key, row);
+    const out = [];
+    for (const [key, row] of latest) {
+      if (row.action_type !== 'complete' && row.action_type !== 'mark_seen') continue;
+      if (row.created_at < at - window) continue;
+      const record = activity(key);
+      if (!record) continue;
+      out.push({
+        key, action: row.action_type, updatedAt: row.created_at,
+        identity: {provider: record.provider, conversation: record.conversation,
+                   title: record.display_name, kind: record.kind}
+      });
+      if (out.length >= limit) break;
+    }
+    return out;
+  },
+
   recordAction(key, type, {batchId, linkedObjectId, note = ''} = {}, at = clock()) {
     const batch = batchId ? {id: batchId} : (this.openBatch(key) ?? this.latestBatch(key));
     db.prepare(`INSERT INTO message_action

@@ -66,8 +66,9 @@ export class RuntimeAdapter {
    * called for a conversation the user asked about (or when they explicitly allowed the
    * assistant to read bodies). In WeChat an opened chat loses its unread badge.
    */
-  readConversation({provider, conversation, limit}) {
-    return this.#call('POST', '/api/read', {provider, conversation_id: conversation, limit});
+  readConversation({provider, conversation, title, limit}) {
+    return this.#call('POST', '/api/read', {provider, conversation_id: conversation,
+      conversation_title: title, limit});
   }
   /** Compatibility shim: continuous inbox discovery no longer exists. */
   setObserving(enabled) {

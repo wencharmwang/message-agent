@@ -11,7 +11,36 @@ import os
 import tempfile
 import unittest
 
-from agent_worker.service import Worker, name_key, names_match
+from agent_worker.service import Worker, name_key, names_match, strip_ocr_noise
+
+
+class OcrNoiseTests(unittest.TestCase):
+    """A name is also the query given to WeChat's global search, so OCR noise must be stripped.
+
+    Measured on one real contact whose name ends with an emoji no OCR engine can render: the
+    same row read as 树袋熊, 树袋熊…, 树袋熊。 and 树袋熊? on different frames, and every read
+    that carried the noise failed with contact_not_found. The id is hashed from the same name,
+    so this also stops the contact's identity from churning.
+    """
+
+    def test_a_short_name_loses_the_fabricated_trailing_character(self):
+        for noisy in ('树袋熊…', '树袋熊。', '树袋熊?', '树袋熊？', '树袋熊..', '树袋熊···'):
+            self.assertEqual(strip_ocr_noise(noisy), '树袋熊', noisy)
+
+    def test_a_clean_name_is_returned_unchanged(self):
+        for clean in ('树袋熊', 'Bros', 'Wencharm', '小璐璐', '大三班(柠檬班)'):
+            self.assertEqual(strip_ocr_noise(clean), clean)
+
+    def test_a_long_name_keeps_the_ellipsis_wechat_itself_used(self):
+        # On a long row the same glyphs are WeChat's truncation marker, not noise. Dropping
+        # them would search for a name no row reports and detach the conversation.
+        long_name = '新爱书（小规模）&灏天来财税...'
+        self.assertEqual(strip_ocr_noise(long_name), long_name)
+
+    def test_nothing_but_noise_falls_back_to_the_raw_name(self):
+        self.assertEqual(strip_ocr_noise('…'), '…')
+        self.assertEqual(strip_ocr_noise(''), '')
+        self.assertEqual(strip_ocr_noise(None), '')
 
 
 class NameMatchingTests(unittest.TestCase):

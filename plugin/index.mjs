@@ -111,19 +111,48 @@ export function apply(ctx) {
     '3) 读不到内容时，直说没读到什么，再给一句可执行的建议；不要逐条罗列尝试过什么。',
     '4) 需要用户本人做的事放在最后，每条以「- [ ] 」开头，最多 5 条。说明性的列表不要加中括号。',
     '5) 结论部分控制在 200 字以内，简短直白。',
-    '6) 微信窗口大小与读取能力无关：拉高窗口是为了多看几行会话，属于正确用法。读不到内容的真实原因只有两类——'
-      + '对方正在用微信操作（助手主动让开，等一会儿即可），或那个会话不在当前可见列表里。'
+    '6) 微信窗口大小与读取能力无关：拉高窗口是为了多看几行会话，属于正确用法。'
       + '绝不要建议用户调整窗口大小、恢复默认尺寸或改动任何设置。',
-    '7) 正文读不到时，可以退一步把会话列表里"看起来需要留意"的摘要条目列出来给他参考，'
-      + '但必须标明这是列表摘要、没读正文，不能当作已确认的事实，也不要写成待办（不要用「- [ ] 」）。'
+    // 原来这一条把"读不到"硬性归成两个原因（"对方正在用微信，助手让开"或"不在可见列表"），
+    // 于是工具报别的错（比如核不过会话标题）时，模型会照着这条编出一个"你正在微信里操作，
+    // 过一会儿再看就行"。实测用户被这么误导过两次，其中一次他根本没在用微信。
+    // 实测被抱怨过：把"哪几条没读成"写成一张清单、再附一句"你可以再点一次"，等于把活推回给用户；
+    // 而"另有两条摘要…仅供参考"这种凑数段落也只会让人更迷惑。
+    '7) 没读到的条目用一句话带过就够（哪几条、这次没读成），不要逐条重复、不要教用户点哪个按钮、'
+      + '不要承诺"过一会儿就好"、也不要把它们写成待办。'
+      + '只有工具确实返回"用户正在微信里操作"时才可以说"助手让开了"；其余情况不要编造原因。',
+    '8) 不要用列表摘要凑内容：没读正文的东西不要写进结论，也不要单独列一段"仅供参考"。'
+      + '读不到就直说读不到，然后把已读到的部分讲清楚。'
   ].join('\n');
+  /**
+   * 这次提问针对哪个会话。
+   *
+   * 以前只有会话 id 进了 session 本身（绑定 + 标题），提示词里一个字都没带：用户在一个
+   * 联系人的页面里问「最近有什么事要处理？」，模型得先自己猜"他"是谁，猜不出来只能靠该
+   * session 的历史兜底。现在明确写进去 —— 名字给模型理解对象，id 给它直接读消息用。
+   */
+  const askScope = identity => {
+    if (!identity || identity.kind === 'workspace') return '';
+    const title = typeof identity.title === 'string' ? identity.title.trim() : '';
+    const conversation = typeof identity.conversation === 'string' ? identity.conversation.trim() : '';
+    if (!title || !conversation) return '';
+    const kind = identity.kind === 'group' ? '微信群聊' : '微信联系人';
+    // 读的时候给**名字**而不是 id：微信只渲染当前可见的那十来行，被滚到下面的会话在
+    // list_conversations 里不存在，而 id 不含名字 —— 运行时既定位不到也没东西可搜索。
+    // 显示名能走微信自己的全局搜索，不受滚动位置影响。
+    return `这次提问的对象是${kind}「${title}」（内部标识 ${conversation}）。`
+      + '用户说的「他／这个人／这段聊天／这个群」默认都指它；需要读消息时直接用「'
+      + title + '」这个名字作为 conversation_id 去读（运行时会用微信搜索定位），'
+      + '不要先去确认他是谁，也不要换成别的会话。回答里不要出现那个内部标识。';
+  };
   const askAssistant = async ({sessionId, identity, text}) => {
     const question = typeof text === 'string' ? text.trim() : '';
     if (!question || question.length > 2000) throw Object.assign(new Error('请先写清楚要问助手什么'), {code: 'PRODUCT_API_ERROR'});
     const handle = await ensureInteractiveSession({sessionId, identity});
     const agent = handle.agent;
     if (agent.status !== 'idle') throw Object.assign(new Error('助手正在回答上一个问题，请等几秒再试'), {code: 'ASSISTANT_BUSY'});
-    const message = createUserMessage({source: {kind: 'user'}, content: [{type: 'text', text: ASK_POLICY + '\n\n用户的问题：' + question}]});
+    const prompt = [ASK_POLICY, askScope(identity), '用户的问题：' + question].filter(Boolean).join('\n\n');
+    const message = createUserMessage({source: {kind: 'user'}, content: [{type: 'text', text: prompt}]});
     const start = agent.session.events.length;
     let timer;
     agent.followup(message);

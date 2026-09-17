@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { Drafts, readBindings, validateDraftText } from './storage.mjs';
 import { RuntimeAdapter } from './runtime.mjs';
 import { createCrm } from './crm.mjs';
-import { CLASSIFICATIONS, ORDERS, SCOPES, createMessageCenter } from './message-center.mjs';
+import { CLASSIFICATIONS, ORDERS, SCOPES, createMessageCenter, isSystemEntry } from './message-center.mjs';
 import { classifyIntent, detectRiskTags, maxRiskGrade, DEFAULT_DECISION_POLICY } from './reply-context/risk-gate.mjs';
 import { fetchPageText, splitKnowledge } from './reply-context/import.mjs';
 
@@ -43,7 +43,12 @@ export const RUNTIME_MESSAGES = {
   layout_unverified: '现在读不到微信窗口（可能被最小化、被其他窗口完全挡住，或者窗口被拖得太窄看不到聊天列表）。把微信主窗口恢复成正常大小、显示出来，助手会自动重试，不用一直点。',
   layout_changed: '微信窗口在读取时变了大小，这一次跳过，助手会自动重试。',
   window_unavailable: '找不到微信主窗口，请确认微信没有退出、也没有收进托盘。',
-  capture_failed: '截取微信窗口失败，请确认微信窗口正常显示，助手会自动重试。',
+  // Not "check that the window is displayed": the window is usually fine, and the read had
+  // already passed the window-health check by the time this is thrown. What actually happens
+  // is that a Qt window (WeChat's search popup, or a re-created main window) was replaced
+  // between being located and being captured, so the handle was already dead. Telling the
+  // user to go fix a healthy window sends them after the wrong thing.
+  capture_failed: '读取微信窗口画面时窗口正好被重建，这次没读到内容，助手会重新定位窗口后重试。',
   // Codes the runtime uses when a read was refused for a reason that is not a window
   // problem. They were missing from this map, so `Runtime: conversation_not_visible`
   // lost its code in stripRuntimeNoise and collapsed into "操作没有完成，请稍后重试。" —
@@ -294,7 +299,7 @@ async function importKnowledge(context, workspaceId, payload = {}) {
  * own, what is waiting for your send confirmation, and everything you wrote down
  * yourself. Finished work stays folded at the bottom as a receipt, not a task.
  */
-export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [], today: [], later: [], someday: []}, jobs = [], deferred = [], now = Date.now() / 1000} = {}) {  const decide = [];
+export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [], today: [], later: [], someday: []}, jobs = [], deferred = [], completed = [], doneTodos = [], now = Date.now() / 1000} = {}) {  const decide = [];
   // Deferred conversations are the user's own "not now" — they belong to today's list,
   // not to the queue, but they must stay reachable from where they came from.
   for (const entry of deferred) {
@@ -331,7 +336,13 @@ export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [
       todos.push({...todo, kind: 'todo', id: 'todo:' + todo.id, todoId: todo.id, dueState: dueState[bucketName] ?? 'someday'});
     }
   }
-  // "助手已处理" is a receipt: one line per conversation, most recent work only.
+  // 完成的待办留在列表后面打成勾：原来点一下它就整条消失，用户看到的是"点了没打勾"，
+  // 也没有任何地方能回看自己刚做完什么。
+  for (const todo of doneTodos ?? []) {
+    todos.push({...todo, kind: 'todo', id: 'todo:' + todo.id, todoId: todo.id, dueState: 'done'});
+  }
+  // 「助手已处理」原来只列助手的作业。用户自己点掉的那些（标为已看 / 处理完了）一条都不出现，
+  // 于是"已完成"这件事在两处都查不到。现在合并成一张回执，每行写清**谁**把它处理成了什么样。
   const identityByRule = new Map(items.map(item => [item.rule.id, item]));
   const handled = [];
   const seen = new Set();
@@ -341,18 +352,27 @@ export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [
     if ((job.finished_at ?? 0) < now - 48 * 3600) continue;
     seen.add(item.key);
     handled.push({
-      id: 'job:' + job.id, kind: 'handled', conversationKey: item.key, identity: item.identity,
-      title: item.identity.title, detail: job.text || humanizeDetail(job.detail) || '',
+      id: 'job:' + job.id, kind: 'handled', actor: 'assistant', conversationKey: item.key, identity: item.identity,
+      title: item.identity.title, detail: job.text || humanizeDetail(job.detail) || '处理完了',
       state: job.state, updatedAt: job.finished_at || job.created_at
     });
-    if (handled.length >= 8) break;
   }
+  for (const entry of completed ?? []) {
+    if (!entry?.identity) continue;
+    handled.push({
+      id: 'done:' + entry.key, kind: 'handled', actor: 'you', conversationKey: entry.key,
+      identity: entry.identity, title: entry.identity.title,
+      detail: entry.action === 'complete' ? '处理完了' : '标为已看',
+      state: 'done', updatedAt: entry.updatedAt
+    });
+  }
+  const receipts = handled.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, 8);
   return {
     groups: [
       {key: 'decide', title: '需要你决定', hint: '助手拿不准，等你拍板', items: decide},
       {key: 'confirm', title: '等你确认发送', hint: '正文已经拟好，确认后才会发出', items: confirm},
-      {key: 'todos', title: '我记的待办', hint: '', items: todos},
-      {key: 'handled', title: '助手已处理', hint: '', items: handled}
+      {key: 'todos', title: '我记的待办', hint: '勾掉就完成，完成的留在下面', items: todos},
+      {key: 'handled', title: '已完成', hint: '你和助手处理掉的，只留最近几条', items: receipts}
     ],
     counts: {
       decide: decide.length, confirm: confirm.length, todos: todos.length,
@@ -492,7 +512,17 @@ export function createProductApi({config, token, conversations, bindingsPath, re
       runtime.status(),
       refresh ? runtime.refreshObservation() : runtime.observe()
     ]);
-    const scannedAt = Number(observation.scanned_at ?? 0);
+    return foldObservation({status, observation});
+  }
+
+  /**
+   * Fold one observation into the centre and keep the CRM on the same identity.
+   *
+   * Split out of syncCenter so a caller that already has both halves (the today page fetches
+   * them in parallel) does not have to fetch them a second time just to reuse this.
+   */
+  function foldObservation({status, observation}) {
+    const scannedAt = Number(observation?.scanned_at ?? 0);
     // Both the queue and the selected detail poll this cached result. Counting those HTTP
     // reads as separate observations let one noisy OCR frame satisfy the settling quorum
     // without WeChat ever changing.
@@ -506,6 +536,13 @@ export function createProductApi({config, token, conversations, bindingsPath, re
       crm.rekey(entry.oldKey, entry.newKey, {provider: entry.provider, conversation: entry.conversation, displayName: entry.name});
     }
     return {status, observation};
+  }
+
+  /** 最近完成掉的待办，供「今天要做的」在下面按打勾的样子回看。 */
+  function doneTodosForToday() {
+    return crm.listTodos({state: 'done', limit: 50})
+      .sort((a, b) => (b.doneAt ?? 0) - (a.doneAt ?? 0))
+      .slice(0, 6);
   }
   function centerExtra(status) {
     return {rules: status?.rules ?? [], openTodos: openTodoCounts(), pendingDrafts: pendingDraftCounts()};
@@ -649,18 +686,44 @@ export function createProductApi({config, token, conversations, bindingsPath, re
       // Refreshing the visible list is cheap and does not open a conversation. Any body
       // read after this point is performed by the interactive agent because the user just
       // asked for this exact organisation task.
-      await syncCenter({refresh: true});
+      const {status} = await syncCenter({refresh: true});
+      // 候选会话用**显示名**给出去，而不是运行时 id。
+      //
+      // 微信只渲染当前可见的那十来行：被滚到下面的会话在 list_conversations 里根本不存在，而
+      // wechat:<id> 本身不含名字 —— 运行时既定位不到它，也没有东西可以拿去搜索，于是直接报
+      // conversation_not_found（实测「轮滑班群」就是这么失败的）。显示名是运行时唯一能交给
+      // 微信全局搜索的东西，而全局搜索不受滚动位置影响。
+      const candidates = center.list({scope: 'all', order: 'recent', limit: 12, extra: centerExtra(status)})
+        .items.filter(item => item.identity?.title && !isSystemEntry(item.identity.title))
+        .map(item => item.identity.title);
       const policy = [
         '这是用户主动发起的一次微信消息整理，不是后台监听。',
-        '只为完成用户这次明确的要求读取必要的会话；优先读取当前可见、最近、最相关的会话，最多 5 个。',
+        '只为完成用户这次明确的要求读取必要的会话；优先读取最近、最相关的会话，最多 5 个。',
+        candidates.length
+          ? '要读哪个会话，用下面给出的**显示名**作为 conversation_id（例如 conversation_id: "张三"）。'
+            + '运行时会用微信自己的搜索定位它，不受聊天列表滚动到哪的影响；'
+            + '会话 id 只对当前正好显示在列表里的那几条有效，被滚下去的会直接读不到。'
+          : '',
         '不要持续等待新消息，不要安排后台重试，不要发送任何微信消息。',
-        '如果用户正在使用微信或某个会话读不到，跳过它并继续整理已取得的信息。',
+        // 用户主动发起的整理不会再因为"微信在使用中"被让开（交互式读取已不再让开），所以这里
+        // 不能把失败归到那个原因上——工具报别的错时，模型照着这句会编出"你正在微信里操作"。
+        '某个会话读不到时，跳过它继续整理已取得的信息；结论里用一句话带过"哪几条这次没读成"就够了。'
+          + '不要教用户去点哪个按钮、不要把没读成的条目写成待办、不要编造失败原因、不要承诺"过一会儿就好"；'
+          + '只有工具明确报了"用户正在微信里操作"时才可以说助手让开了。'
+          + '也不要用会话列表的摘要凑内容：没读正文的不要写成事实。',
         '先给简短结论；需要用户做的事情用「- [ ] 」列出，最多 5 条。'
-      ].join('\n');
+      ].filter(Boolean).join('\n');
       const answer = await askAssistant({
         sessionId: 'messaging-organizer',
         identity: {provider: 'wechat-main', conversation: '__organizer__', title: '消息整理', kind: 'workspace'},
-        text: policy + '\n\n用户这次的要求：' + text
+        text: [
+          policy,
+          candidates.length
+            ? '值得看的会话（按最近有动静排序，最多 12 个；名字可以直接当 conversation_id 用）：'
+              + candidates.join('、')
+            : '',
+          '用户这次的要求：' + text
+        ].filter(Boolean).join('\n\n')
       });
       respond(res, 200, answer);
       return true;
@@ -702,7 +765,8 @@ export function createProductApi({config, token, conversations, bindingsPath, re
     if (action === 'read' && req.method === 'POST') {
       // The one place a chat is opened on demand. WeChat clears that chat's unread badge
       // as a side effect, which is why this is a user action and not a background habit.
-      const page = await runtime.readConversation({provider: row.provider, conversation: row.conversation});
+      const page = await runtime.readConversation({provider: row.provider, conversation: row.conversation,
+        title: row.display_name});
       const attached = center.attachSnapshot(key, page.messages);
       // A read that succeeds but returns nothing readable is the confusing case: nothing
       // raises, yet the conversation sits there with no content and classifies as 无法判断.
@@ -786,7 +850,8 @@ export function createProductApi({config, token, conversations, bindingsPath, re
       // so read it first — the user asked for a reply, which makes opening it expected.
       let messages = detail.messages;
       if (!messages.length) {
-        const page = await runtime.readConversation({provider: row.provider, conversation: row.conversation});
+        const page = await runtime.readConversation({provider: row.provider, conversation: row.conversation,
+          title: row.display_name});
         messages = center.attachSnapshot(key, page.messages).messages;
       }
       const rule = (await runtime.status()).rules?.find(entry => entry.provider === row.provider && entry.conversation === row.conversation) ?? null;
@@ -837,11 +902,18 @@ export function createProductApi({config, token, conversations, bindingsPath, re
         return true;
       }
       if (path === '/message-agent/api/today' && req.method === 'GET') {
-        const {status, items} = await aggregate();
-        await syncCenter().catch(() => {});
+        // 这两件事互不依赖，串行做等于把两次 loopback 的延迟相加 —— 而这一页每次打开、每 8 秒
+        // 轮询都吃这份延迟（实测串行 0.6–0.8s，且会跟着 Worker 的轮询抖动）。并发后只取较大值，
+        // 而且顺手省掉了一次重复的 /api/status。
+        const [{status, items}, observation] = await Promise.all([
+          aggregate(),
+          runtime.observe().catch(() => null)
+        ]);
+        foldObservation({status, observation: observation ?? {}});
         respond(res, 200, projectToday({
           items, drafts: drafts.list(), jobs: status.jobs ?? [],
-          todoBuckets: crm.todoBuckets(), deferred: center.deferred(), now: Date.now() / 1000
+          todoBuckets: crm.todoBuckets(), deferred: center.deferred(),
+          completed: center.completedRecent(), doneTodos: doneTodosForToday(), now: Date.now() / 1000
         }));
         return true;
       }
@@ -868,7 +940,8 @@ export function createProductApi({config, token, conversations, bindingsPath, re
               throw Object.assign(new Error('请先选一个要分析的会话'), {code: 'CONTEXT_INVALID'});
             }
             const identity = await resolveIdentity(provider, payload.conversation);
-            const page = await runtime.readConversation({provider, conversation: payload.conversation});
+            const page = await runtime.readConversation({provider, conversation: payload.conversation,
+              title: identity.title});
             const result = await analyzeStyle({identity, messages: page.messages});
             const profile = context.profiles.create(ws, {name: result.name, rules: result.rules});
             let binding = null;

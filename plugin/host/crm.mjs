@@ -207,14 +207,29 @@ export class Crm {
 
   // ---- to-dos --------------------------------------------------------------
 
+  /**
+   * 记一条待办。
+   *
+   * 同一件事不该被记两次：整理结果是可以反复点「加入待办」的（刷新之后界面记不住哪几条已经加过），
+   * 而这里原来是无条件 INSERT —— 一次请求卡住后重试就会留下两份一模一样的待办。
+   * 所以对「同来源 + 同标题 + 同一会话 + 还没完成 + 24 小时内」的重复，直接返回已经存在的那条。
+   * 只挡**未完成**的：同名的那条如果已经做完，这是一件新的事，应该能再记一次。
+   */
   createTodo({conversationKey, title, detail, evidence, source, dueAt} = {}) {
     const key = conversationKey ? String(conversationKey) : null;
     if (key && !this.#customerRow(key)) throw Object.assign(new Error('还没有这个联系人的资料'), {code: 'CRM_NOT_FOUND'});
     const at = now();
+    const wanted = text(title, 200, {required: true});
+    const from = text(source, 20) || 'manual';
+    const duplicate = this.db.prepare(`SELECT id FROM todos
+      WHERE state = 'open' AND title = ? AND source = ?
+        AND COALESCE(conversation_key, '') = COALESCE(?, '') AND created_at > ?
+      ORDER BY created_at DESC LIMIT 1`).get(wanted, from, key, at - 24 * 3600);
+    if (duplicate) return {...this.#todo(duplicate.id), deduped: true};
     const row = {
       id: randomUUID(), conversation_key: key,
-      title: text(title, 200, {required: true}), detail: text(detail, 1000), evidence: text(evidence, 500),
-      source: text(source, 20) || 'manual', due_at: optionalTime(dueAt), state: 'open',
+      title: wanted, detail: text(detail, 1000), evidence: text(evidence, 500),
+      source: from, due_at: optionalTime(dueAt), state: 'open',
       created_at: at, updated_at: at, done_at: null
     };
     this.db.prepare(`INSERT INTO todos
