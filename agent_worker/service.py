@@ -305,6 +305,148 @@ class Worker:
                 pass
         return sessions
 
+    def db_messages(self, username, limit=200):
+        """读 DB 里某个会话的最近消息（username 定位），返回 canonical 格式。
+
+        供「分析说话方式」等用户点名功能使用：直接读 watcher 子进程解锁出的明文
+        message_N.db（标准 sqlite3，无需 cryptography），不再 OCR 打开会话。
+        message_content 只做纯 UTF-8 / 容器头解码（不做 zstd，长文本退化为占位），
+        对"分析日常短文本说话习惯"足够。
+        """
+        import sqlite3
+        import hashlib
+
+        def decode(content, local_type):
+            if content is None:
+                return ''
+            if isinstance(content, str):
+                return content
+            raw = bytes(content)
+            if not raw:
+                return ''
+            try:
+                return raw.decode('utf-8').strip()
+            except UnicodeDecodeError:
+                pass
+            for offset in (10, 0):
+                chunk = raw[offset:]
+                if b'\x01\x00' in chunk:
+                    chunk = chunk.split(b'\x01\x00')[0]
+                try:
+                    text = chunk.decode('utf-8').strip()
+                    if text:
+                        return text
+                except UnicodeDecodeError:
+                    continue
+            return ''
+
+        watcher = self._watcher()
+        if not watcher.ready(timeout=30):
+            return {'username': username, 'display': username, 'messages': []}
+        workspace = watcher.workspace()
+        if not workspace:
+            return {'username': username, 'display': username, 'messages': []}
+        plain = Path(workspace) / 'plain'
+
+        # sender id -> username（name2id 分片内 + SenderName2Id 权威）
+        sender_index = {}
+        msg_dir = plain / 'message'
+        if msg_dir.exists():
+            for db_file in sorted(msg_dir.glob('message_*.db')):
+                name = db_file.name
+                if name.endswith('_fts.db') or name.endswith('_resource.db'):
+                    continue
+                try:
+                    conn = sqlite3.connect(f'file:{db_file.as_posix()}?mode=ro&immutable=1', uri=True)
+                    try:
+                        tables = [r[0] for r in conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'")]
+                        name2id = next((t for t in tables if t.lower() == 'name2id'), None)
+                        if name2id:
+                            cols = [r[1] for r in conn.execute(f'PRAGMA table_info("{name2id}")')]
+                            col = 'user_name' if 'user_name' in cols else 'username'
+                            for row in conn.execute(f'SELECT rowid, "{col}" FROM "{name2id}"'):
+                                if row[1]:
+                                    sender_index.setdefault(int(row[0]), row[1])
+                    finally:
+                        conn.close()
+                except sqlite3.Error:
+                    continue
+        resource = plain / 'message' / 'message_resource.db'
+        if resource.exists():
+            try:
+                conn = sqlite3.connect(f'file:{resource.as_posix()}?mode=ro&immutable=1', uri=True)
+                try:
+                    tables = [r[0] for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'")]
+                    sendername = next((t for t in tables if t.lower() == 'sendername2id'), None)
+                    if sendername:
+                        cols = [r[1] for r in conn.execute(f'PRAGMA table_info("{sendername}")')]
+                        col = 'user_name' if 'user_name' in cols else cols[0]
+                        for row in conn.execute(f'SELECT rowid, "{col}" FROM "{sendername}"'):
+                            if row[1]:
+                                sender_index[int(row[0])] = row[1]
+                finally:
+                    conn.close()
+            except sqlite3.Error:
+                pass
+
+        # 自己是谁（账号目录名去尾缀）
+        account = ''
+        try:
+            account = json.loads((Path(workspace) / 'manifest.json').read_text(encoding='utf-8')).get('account', '')
+        except Exception:
+            pass
+        self_names = {account.rsplit('_', 1)[0], account}
+
+        # display
+        display = username
+        contact_db = plain / 'contact' / 'contact.db'
+        if contact_db.exists():
+            try:
+                conn = sqlite3.connect(f'file:{contact_db.as_posix()}?mode=ro&immutable=1', uri=True)
+                try:
+                    row = conn.execute('SELECT remark, nick_name FROM contact WHERE username=?', (username,)).fetchone()
+                    if row:
+                        display = row[0] or row[1] or username
+                finally:
+                    conn.close()
+            except sqlite3.Error:
+                pass
+
+        # 读该会话消息（跨分片）
+        table = 'Msg_' + hashlib.md5(username.encode('utf-8')).hexdigest()
+        messages = []
+        if msg_dir.exists():
+            for db_file in sorted(msg_dir.glob('message_*.db')):
+                name = db_file.name
+                if name.endswith('_fts.db') or name.endswith('_resource.db'):
+                    continue
+                try:
+                    conn = sqlite3.connect(f'file:{db_file.as_posix()}?mode=ro&immutable=1', uri=True)
+                    try:
+                        rows = conn.execute(
+                            f'SELECT local_id, local_type, sort_seq, real_sender_id, create_time, message_content '
+                            f'FROM "{table}" ORDER BY sort_seq DESC LIMIT ?', (limit,)).fetchall()
+                        for r in rows:
+                            sender_id = r[3]
+                            sender_user = sender_index.get(int(sender_id), '') if sender_id is not None else ''
+                            mine = bool(sender_user) and sender_user in self_names
+                            messages.append({
+                                'direction': 'outgoing' if mine else 'incoming',
+                                'content': decode(r[5], r[1]),
+                                'sender': sender_user or '',
+                                'type': 'text' if r[1] == 1 else str(r[1]),
+                                'sort_seq': r[2],
+                            })
+                    finally:
+                        conn.close()
+                except sqlite3.Error:
+                    continue
+        messages.sort(key=lambda m: m.get('sort_seq') or 0)
+        messages = messages[-limit:]
+        return {'username': username, 'display': display, 'messages': messages}
+
     # ---- watcher 子进程 ----
     def _watcher(self):
         # 自愈 + 线程安全：watcher 子进程崩溃后（进程退出），下次 tick 重新拉起；

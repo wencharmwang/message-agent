@@ -942,9 +942,12 @@ export function createProductApi({config, token, conversations, bindingsPath, re
               throw Object.assign(new Error('请先选一个要分析的会话'), {code: 'CONTEXT_INVALID'});
             }
             const identity = await resolveIdentity(provider, payload.conversation);
-            const page = await runtime.readConversation({provider, conversation: payload.conversation,
-              title: identity.title, backgroundOnly: true});
-            const result = await analyzeStyle({identity, messages: page.messages});
+            // 从解密后的本地 DB 读联系人消息分析（username 定位），不再 OCR 打开会话。
+            const page = await runtime.readConversationFromDb({username: payload.conversation});
+            if (page?.display && (!identity.title || identity.title === payload.conversation)) {
+              identity.title = page.display;
+            }
+            const result = await analyzeStyle({identity, messages: page?.messages ?? []});
             const profile = context.profiles.create(ws, {name: result.name, rules: result.rules});
             let binding = null;
             if (payload.bind !== false) {

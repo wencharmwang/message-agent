@@ -133,7 +133,15 @@ def handler(worker, token):
                 if not 0 < length <= 20000:
                     raise ValueError('Invalid request size')
                 data = json.loads(self.rfile.read(length))
-                if self.path == '/api/rules':
+                if self.path == '/api/db_messages':
+                    # 读 DB 会话消息（username 定位），供「分析说话方式」等使用，不再 OCR 打开会话。
+                    username = data.get('username')
+                    if not isinstance(username, str) or not username:
+                        raise ValueError('请指定要分析的会话')
+                    limit = data.get('limit')
+                    limit = max(5, min(limit, 300)) if isinstance(limit, int) and not isinstance(limit, bool) else 200
+                    self.response(200, worker.db_messages(username, limit))
+                elif self.path == '/api/rules':
                     # 从 DB 会话列表解析，身份是 username；不再依赖 OCR 可见列表。
                     sessions = worker.db_sessions()
                     matches = [c for c in sessions if c['id'] == data.get('conversation_id')]

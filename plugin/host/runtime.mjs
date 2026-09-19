@@ -70,6 +70,14 @@ export class RuntimeAdapter {
     return this.#call('POST', '/api/read', {provider, conversation_id: conversation,
       conversation_title: title, limit, background_only: backgroundOnly});
   }
+  /**
+   * Read one conversation's recent messages from the decrypted local DB (username 定位),
+   * instead of OCR-opening the chat. Used by style analysis and other read-only features
+   * that no longer need the UI. Never opens a chat, never touches the foreground.
+   */
+  readConversationFromDb({username, limit}) {
+    return this.#call('POST', '/api/db_messages', {username, limit});
+  }
   /** Compatibility shim: continuous inbox discovery no longer exists. */
   setObserving(enabled) {
     return this.#call('POST', '/api/settings', {observe_enabled: !!enabled});

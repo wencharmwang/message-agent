@@ -1820,8 +1820,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       setSaving(true);setSettingError('');
       try{await api('settings',{auto_reply_paused:!paused});settings.refresh();}
       catch(e){setSettingError(e.message);}finally{setSaving(false);}
-    }
-    return h('div',{style:{width:'100%',overflowY:'auto'}},
+    }    return h('div',{style:{width:'100%',overflowY:'auto'}},
       h('div',{style:{width:'100%',boxSizing:'border-box',padding:'28px clamp(24px,4vw,52px) 64px',maxWidth:1180,margin:'0 auto'}},
         // 英雄区：一块玻璃板，不再是绿色大色块。装饰圆换成很淡的品牌色，
         // 只当玻璃上的折射依据，不再当主视觉。
