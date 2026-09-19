@@ -86,11 +86,23 @@ class StubMcp:
         self.conversation = conversation
         self.name = name
         self.fingerprint = fingerprint
+        # A test sets one of these to model a conversation sitting above the viewport: the
+        # visible-list read cannot see it, and only a scroll-back brings it into view.
+        self.hidden_until_scroll = False
+        self.hidden_forever = False
+        self.scrolls = 0
 
     def call(self, name, arguments):
+        if name == 'scroll_conversation_list_to_top':
+            self.scrolls += 1
+            return {'scrolled': True}
         raise AssertionError('unexpected tool ' + name)
 
-    def scan(self, provider):
+    def scan(self, provider, scroll_to_top=False):
+        if scroll_to_top:
+            self.call('scroll_conversation_list_to_top', {'provider': provider})
+        if self.hidden_forever or (self.hidden_until_scroll and not scroll_to_top):
+            return {}
         return {self.conversation: {'fingerprint': self.fingerprint, 'name': self.name}}
 
     def observe(self, rule):
@@ -142,6 +154,50 @@ class IdentityRecoveryTests(unittest.TestCase):
         self.worker.store.rebind(self.worker.store.rule(self.rule_id), 'wechat:stored-partial', '小璐璐')
         self.worker.tick()
         self.assertEqual(self.worker.store.rule(self.rule_id)['conversation'], 'wechat:misread')
+
+
+class ListVisibilityRecoveryTests(unittest.TestCase):
+    """WeChat moves a conversation that received a message to the first row but does not bring
+    the viewport with it, so a list that has been scrolled down hides exactly the rows the poller
+    needs.
+
+    Measured symptom: a rule watching one contact reported 当前微信可见会话列表中未找到 while the
+    conversation sat right above the viewport, and the person found that opening that chat once by
+    hand made the assistant start working again.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.worker, self.mcp, self.rule_id = make_worker(self.tmp, 'wechat:x', '小璐璐')
+        self.worker.store.rebind(self.worker.store.rule(self.rule_id), 'wechat:x', '小璐璐')
+
+    def status(self):
+        return self.worker.store.rule(self.rule_id)['status']
+
+    def test_a_row_above_the_viewport_is_found_after_scrolling_back(self):
+        self.mcp.hidden_until_scroll = True
+        self.worker.tick()
+        self.assertEqual(self.mcp.scrolls, 1)
+        self.assertNotEqual(self.status(), 'waiting_visible')
+
+    def test_nothing_is_scrolled_while_the_row_is_visible(self):
+        self.worker.tick()
+        self.assertEqual(self.mcp.scrolls, 0)
+
+    def test_scrolling_is_throttled_so_the_person_keeps_their_list(self):
+        self.mcp.hidden_forever = True
+        for _ in range(3):
+            self.worker.tick()
+        self.assertEqual(self.mcp.scrolls, 1)
+        self.assertEqual(self.status(), 'waiting_visible')
+
+    def test_a_reply_in_flight_is_not_relabelled_as_missing(self):
+        # The reported contradiction: the answer went out and the status still said 找不到联系人.
+        self.mcp.hidden_forever = True
+        rule = self.worker.store.rule(self.rule_id)
+        self.worker.store.status(rule['id'], rule['revision'], 'sending', '正在发送')
+        self.worker.tick()
+        self.assertEqual(self.status(), 'sending')
 
 
 if __name__ == '__main__':

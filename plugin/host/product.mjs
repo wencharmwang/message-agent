@@ -295,34 +295,18 @@ async function importKnowledge(context, workspaceId, payload = {}) {
 }
 
 /**
- * "今天要做的" projection (architecture §8): what the assistant could not decide on its
- * own, what is waiting for your send confirmation, and everything you wrote down
- * yourself. Finished work stays folded at the bottom as a receipt, not a task.
+ * 「待办」projection (architecture §8) —— 界面上这一页就叫「待办」。
+ *
+ * 这一页现在只回答一个问题：**我要做什么**。所以只有三块内容 —— 待办（要做/在做）、
+ * 等你确认发送的回复、以及做完之后的回执。原来还有一块「需要你决定」，是拿模型给消息
+ * 打的分类（需要回复 / 只需了解…）当任务列出来：那既不是用户记下的事，模型判断错的时候
+ * 还会把一条跟自己无关的群聊塞进今天要做的事里（用户实测报的就是这个，原话「我都不知道
+ * 是什么」「为什么会提示我今天要做」）。分类不再面向用户，这一块也就没有存在的理由。
+ *
+ * 自动回复真正卡住、需要人处理的那种情况不属于"分类"，它仍然要能看见 —— 但不再占一块
+ * 分类区，只由界面用一行指路（counts.automation）。
  */
-export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [], today: [], later: [], someday: []}, jobs = [], deferred = [], completed = [], doneTodos = [], now = Date.now() / 1000} = {}) {  const decide = [];
-  // Deferred conversations are the user's own "not now" — they belong to today's list,
-  // not to the queue, but they must stay reachable from where they came from.
-  for (const entry of deferred) {
-    decide.push({
-      id: 'deferred:' + entry.key, kind: 'conversation', conversationKey: entry.key,
-      identity: entry.identity, title: '稍后再处理：' + entry.identity.title,
-      detail: (entry.summary ?? []).join('　') || '你把它放进了稍后处理。',
-      attentionKind: 'deferred', updatedAt: entry.updatedAt
-    });
-  }
-  for (const item of items) {
-    if (item.bucket !== 'pending' || item.attentionKind === 'draft') continue;
-    decide.push({
-      id: 'conversation:' + item.key, kind: 'conversation', conversationKey: item.key,
-      identity: item.identity,
-      // The contact name belongs in the title. The client used to print it again in front of
-      // the row's buttons, which pushed each row's buttons to a different x depending on how
-      // long the name was — and the row is easier to scan when every title names the contact.
-      title: [item.identity?.title, item.attentionReason || '需要你处理'].filter(Boolean).join('：'),
-      detail: item.summary || '', attentionKind: item.attentionKind,
-      updatedAt: item.updatedAt
-    });
-  }
+export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [], today: [], later: [], someday: []}, jobs = [], completed = [], doneTodos = [], now = Date.now() / 1000} = {}) {
   const confirm = drafts.filter(d => d.state === 'awaiting_confirmation').map(d => ({
     id: 'draft:' + d.id, kind: 'draft', draftId: d.id, revision: d.revision,
     conversationKey: identityKey(d.target.provider, d.target.conversation),
@@ -330,18 +314,19 @@ export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [
     expiresAt: d.expiresAt, updatedAt: d.updatedAt
   }));
   const dueState = {overdue: 'overdue', today: 'today', later: 'later', someday: 'someday'};
-  const todos = [];
+  const openTodos = [];
   for (const [bucketName, list] of Object.entries(todoBuckets)) {
     for (const todo of list ?? []) {
-      todos.push({...todo, kind: 'todo', id: 'todo:' + todo.id, todoId: todo.id, dueState: dueState[bucketName] ?? 'someday'});
+      openTodos.push({...todo, kind: 'todo', id: 'todo:' + todo.id, todoId: todo.id, dueState: dueState[bucketName] ?? 'someday'});
     }
   }
-  // 完成的待办留在列表后面打成勾：原来点一下它就整条消失，用户看到的是"点了没打勾"，
-  // 也没有任何地方能回看自己刚做完什么。
-  for (const todo of doneTodos ?? []) {
-    todos.push({...todo, kind: 'todo', id: 'todo:' + todo.id, todoId: todo.id, dueState: 'done'});
-  }
-  // 「助手已处理」原来只列助手的作业。用户自己点掉的那些（标为已看 / 处理完了）一条都不出现，
+  // 「在做」排到最前：正在推进的那件比还没开始的更该在视线里。sort 在现代 V8 里是稳定的，
+  // 所以同一组内部原来的排序（逾期 → 今天 → 以后 → 没有日期）不会被这次重排打乱。
+  openTodos.sort((a, b) => (a.state === 'doing' ? 0 : 1) - (b.state === 'doing' ? 0 : 1));
+  // 做完的留在同一张清单的后面：点一下它就整条消失的话，用户看到的是"点了没打勾"，
+  // 也没有地方回看自己刚做完什么。
+  const todos = openTodos.concat((doneTodos ?? []).map(todo => ({...todo, kind: 'todo', id: 'todo:' + todo.id, todoId: todo.id, dueState: 'done'})));
+  // 「已完成」原来只列助手的作业。用户自己点掉的那些（标为已看 / 处理完了）一条都不出现，
   // 于是"已完成"这件事在两处都查不到。现在合并成一张回执，每行写清**谁**把它处理成了什么样。
   const identityByRule = new Map(items.map(item => [item.rule.id, item]));
   const handled = [];
@@ -367,17 +352,22 @@ export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [
     });
   }
   const receipts = handled.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, 8);
+  // 自动回复自己卡住了（规则被拦住、读不到微信）不属于"分类"，是故障，界面用一行指路。
+  // 待确认的草稿不重复计：它在上面那块里有自己的位置。
+  const automation = items.filter(item => item.bucket === 'pending' && item.attentionKind !== 'draft').length;
   return {
     groups: [
-      {key: 'decide', title: '需要你决定', hint: '助手拿不准，等你拍板', items: decide},
       {key: 'confirm', title: '等你确认发送', hint: '正文已经拟好，确认后才会发出', items: confirm},
-      {key: 'todos', title: '我记的待办', hint: '勾掉就完成，完成的留在下面', items: todos},
+      {key: 'todos', title: '待办', hint: '要做、在做、做完都在这里', items: todos},
       {key: 'handled', title: '已完成', hint: '你和助手处理掉的，只留最近几条', items: receipts}
     ],
     counts: {
-      decide: decide.length, confirm: confirm.length, todos: todos.length,
+      todos: openTodos.length, doing: openTodos.filter(todo => todo.state === 'doing').length,
+      done: (doneTodos ?? []).length, confirm: confirm.length,
       overdue: (todoBuckets.overdue ?? []).length,
-      attention: decide.length + confirm.length + (todoBuckets.overdue ?? []).length
+      automation,
+      // 侧边栏红点数的就是这一项：还没做完的待办 + 等你确认的回复。
+      attention: openTodos.length + confirm.length
     },
     generatedAt: now
   };
@@ -485,7 +475,7 @@ export function createProductApi({config, token, conversations, bindingsPath, re
   // ---- message centre plumbing -------------------------------------------
   function openTodoCounts() {
     const map = new Map();
-    for (const todo of crm.listTodos({state: 'open'})) {
+    for (const todo of crm.listActiveTodos()) {
       if (!todo.conversationKey) continue;
       map.set(todo.conversationKey, (map.get(todo.conversationKey) ?? 0) + 1);
     }
@@ -538,7 +528,7 @@ export function createProductApi({config, token, conversations, bindingsPath, re
     return {status, observation};
   }
 
-  /** 最近完成掉的待办，供「今天要做的」在下面按打勾的样子回看。 */
+  /** 最近完成掉的待办，供「待办」页在下面按打勾的样子回看。 */
   function doneTodosForToday() {
     return crm.listTodos({state: 'done', limit: 50})
       .sort((a, b) => (b.doneAt ?? 0) - (a.doneAt ?? 0))
@@ -599,7 +589,7 @@ export function createProductApi({config, token, conversations, bindingsPath, re
         identity,
         messages: detail.messages,
         contact: crm.getCustomer(key),
-        openLoops: crm.listTodos({state: 'open', conversationKey: key}),
+        openLoops: crm.listActiveTodos({conversationKey: key}),
         now: new Date()
       });
       center.applyClassification(key, result);
@@ -808,12 +798,6 @@ export function createProductApi({config, token, conversations, bindingsPath, re
       respond(res, 200, {ok: true, state: 'seen'});
       return true;
     }
-    if (action === 'defer' && req.method === 'POST') {
-      const payload = await readBody(req).catch(() => ({}));
-      center.defer(key, {note: payload.note ?? ''});
-      respond(res, 200, {ok: true, state: 'deferred'});
-      return true;
-    }
     if (action === 'complete' && req.method === 'POST') {
       const payload = await readBody(req).catch(() => ({}));
       center.complete(key, {note: payload.note ?? ''});
@@ -930,7 +914,7 @@ export function createProductApi({config, token, conversations, bindingsPath, re
         foldObservation({status, observation: observation ?? {}});
         respond(res, 200, projectToday({
           items, drafts: drafts.list(), jobs: status.jobs ?? [],
-          todoBuckets: crm.todoBuckets(), deferred: center.deferred(),
+          todoBuckets: crm.todoBuckets(),
           completed: center.completedRecent(), doneTodos: doneTodosForToday(), now: Date.now() / 1000
         }));
         return true;
@@ -959,7 +943,7 @@ export function createProductApi({config, token, conversations, bindingsPath, re
             }
             const identity = await resolveIdentity(provider, payload.conversation);
             const page = await runtime.readConversation({provider, conversation: payload.conversation,
-              title: identity.title});
+              title: identity.title, backgroundOnly: true});
             const result = await analyzeStyle({identity, messages: page.messages});
             const profile = context.profiles.create(ws, {name: result.name, rules: result.rules});
             let binding = null;
@@ -1063,13 +1047,18 @@ export function createProductApi({config, token, conversations, bindingsPath, re
         return true;
       }
       // ---- to-dos ----------------------------------------------------------
-      const todo = path.match(/^\/message-agent\/api\/todos(?:\/([0-9a-f-]{36})(?:\/(done|reopen|delete))?)?$/);
+      const todo = path.match(/^\/message-agent\/api\/todos(?:\/([0-9a-f-]{36})(?:\/(done|doing|reopen|delete))?)?$/);
       if (todo) {
         const [, id, action] = todo;
         if (!id && req.method === 'GET') {
-          const state = url.searchParams.get('state') ?? 'open';
+          // 默认给"还没做完的"（要做 + 在做）：客户端问的是「还有什么要做」，
+          // 只给 open 会把正在做的那条漏掉。
+          const state = url.searchParams.get('state');
           const conversationKey = url.searchParams.get('conversation') ?? undefined;
-          respond(res, 200, {items: crm.listTodos({state, conversationKey}), counts: crm.counts()});
+          respond(res, 200, {
+            items: state ? crm.listTodos({state, conversationKey}) : crm.listActiveTodos({conversationKey}),
+            counts: crm.counts()
+          });
           return true;
         }
         if (!id && req.method === 'POST') {
@@ -1091,9 +1080,10 @@ export function createProductApi({config, token, conversations, bindingsPath, re
         if (id && action === 'delete' && req.method === 'POST') {
           respond(res, 200, crm.deleteTodo(id)); return true;
         }
-        if (id && (action === 'done' || action === 'reopen') && req.method === 'POST') {
+        if (id && (action === 'done' || action === 'doing' || action === 'reopen') && req.method === 'POST') {
           const payload = await readBody(req).catch(() => ({}));
-          respond(res, 200, crm.setTodoState(id, action === 'done' ? 'done' : 'open', payload?.dueAt));
+          const next = action === 'reopen' ? 'open' : action;
+          respond(res, 200, crm.setTodoState(id, next, payload?.dueAt));
           return true;
         }
         if (id && !action && req.method === 'POST') {

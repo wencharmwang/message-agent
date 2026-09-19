@@ -54,7 +54,14 @@ class Mcp:
         page = self.call('observe_latest', {'provider': rule['provider'], 'conversation_id': rule['conversation'], 'limit': limit})
         return canonical_messages(page['messages'])
 
-    def scan(self, provider):
+    def scan(self, provider, scroll_to_top=False):
+        if scroll_to_top:
+            # WeChat moves a conversation that just received a message to the first row but does
+            # not bring the viewport with it, so a list that has been scrolled down hides exactly
+            # the rows this scan needs: the rule then reads as "not in the visible list" while the
+            # conversation sits right there above the viewport. Scrolling back is explicit, and
+            # the caller throttles it — doing it on every tick would fight the person for the list.
+            self.call('scroll_conversation_list_to_top', {'provider': provider})
         page = self.call('list_conversations', {'provider': provider})
         # This is a single read of the visible conversation list. It must not
         # open any chat; observe_latest below is the only operation that does.
@@ -71,8 +78,15 @@ class Mcp:
             if is_system_entry(title):
                 continue
             meta = item.get('metadata') or {}
+            # The trigger signal is the preview text, not the row's time column. The time label
+            # rewrites itself with no new message behind it (刚刚 -> 1分钟前 -> 11:29), and every
+            # rewrite used to read as "changed" — which opened the chat again on every polling
+            # cycle and is why the assistant looked like it was glued to one conversation.
+            # preview_hash hashes the preview alone, so it only moves when the last message really
+            # changes. Fall back to the time-bearing fingerprint only when there is no readable
+            # preview at all, so a row still cannot go permanently invisible.
             result[item['id']] = {
-                'fingerprint': meta.get('activity_fingerprint', ''),
+                'fingerprint': meta.get('preview_hash') or meta.get('activity_fingerprint', ''),
                 'preview_hash': meta.get('preview_hash', ''),
                 'name': title,
             }
@@ -295,6 +309,9 @@ class Worker:
         # Rate limit for the opt-in window restore, so a user who deliberately keeps
         # WeChat in the tray is not fighting the assistant every polling cycle.
         self._last_restore = 0.0
+        # Rate limit for the opt-in list scroll-back, so a list the person scrolled down is
+        # not yanked to the top on every polling cycle.
+        self._last_top_scroll = 0.0
         # When a read yields because the user is in WeChat, this records since when.
         self._deferred_since = 0.0
         # Jobs whose post-generation read was deferred; see process().
@@ -321,13 +338,13 @@ class Worker:
         raw = str(self.store.setting('observe_providers', 'wechat-main') or '')
         return [part.strip() for part in raw.split(',') if part.strip()]
 
-    def read_list(self, provider):
+    def read_list(self, provider, scroll_to_top=False):
         """One visible-list read with the existing recovery ladder.
 
         Returns (table, None) on success, or (None, ('busy'|'error', error)).
         """
         try:
-            return self.mcp.scan(provider), None
+            return self.mcp.scan(provider, scroll_to_top), None
         except RuntimeToolError as error:
             if error.code == 'provider_busy':
                 return None, ('busy', error)
@@ -340,6 +357,36 @@ class Worker:
             if restored is not None:
                 return restored, None
             return None, ('error', error)
+
+    def scroll_list_to_top_due(self, rules, scans):
+        """True when a rule that is not mid-send cannot be found in the visible list.
+
+        WeChat moves a conversation that just received a message to the first row but does not
+        bring the viewport with it, so a list that has been scrolled down hides exactly the rows
+        this poller needs — and the rule reads as missing while its conversation sits right above
+        the viewport. One re-read from the top finds it.
+
+        Throttled, and only asked for when a rule that is otherwise healthy has gone missing:
+        scrolling the person's own list on every tick would be a fight, not a recovery.
+        """
+        # Idle quiet matters more than speed here: scrolling the person's list is visible on
+        # screen, and a rule that is simply not in the visible window (a group they left, a
+        # contact they renamed) would otherwise keep this firing forever. Three minutes is
+        # still fast enough to recover a conversation WeChat pushed to the top.
+        if time.time() - self._last_top_scroll < self.config.get('top_scroll_interval_seconds', 180):
+            return False
+        for rule in rules:
+            table = scans.get(rule['provider'])
+            if table is None:
+                continue
+            if rule['status'] in ('queued', 'generating', 'ready', 'sending'):
+                continue
+            if rule['conversation'] in table:
+                continue
+            if any(names_match(rule['title'], row['name']) for row in table.values()):
+                continue
+            return True
+        return False
 
     def discover(self, force=False):
         """Read the visible list only for an explicit user-initiated refresh.
@@ -415,8 +462,12 @@ class Worker:
             return None
         if self.store.setting('auto_restore_window', '1') != '1':
             return None
+        # Same reasoning as the list scroll: a restore shows on screen, and the codes that reach
+        # here (layout_unverified / capture_failed) also fire on a single unlucky capture while
+        # the window is perfectly fine. At 60s a flaky OCR pass meant a visible recovery action
+        # every minute; three minutes keeps the real recovery and drops the noise.
         now = time.time()
-        if now - self._last_restore < 60:
+        if now - self._last_restore < self.config.get('window_restore_interval_seconds', 180):
             return None
         self._last_restore = now
         try:
@@ -628,6 +679,14 @@ class Worker:
                 busy = True
             else:
                 self.report_connection(rules, provider, problem[1])
+        # 微信把收到消息的会话挪到列表第一位，但不把视口带上去。列表被滚下去过，那条会话就在
+        # 视口上方，"读可见列表"看不到它，规则会被误判成 waiting_visible。回顶重扫一次就能找到。
+        if self.scroll_list_to_top_due(rules, scans):
+            self._last_top_scroll = time.time()
+            for provider in list(scans):
+                table, problem = self.read_list(provider, scroll_to_top=True)
+                if table is not None:
+                    scans[provider] = table
         for rule in rules:
             if self.stop.is_set():
                 return
@@ -638,7 +697,12 @@ class Worker:
             if fingerprint is None:
                 fingerprint = self.recover_identity(rule, scans[rule['provider']])
             if fingerprint is None:
-                self.store.status(rule['id'], rule['revision'], 'waiting_visible', '当前微信可见会话列表中未找到；第一版不会翻页或搜索')
+                # A rule with a reply in flight must not have its status rewritten by this scan.
+                # A momentarily missing visible row used to flip it to waiting_visible, so the
+                # person was told "找不到联系人" about a reply that had just gone out. The
+                # in-flight status is the truth until the job finishes.
+                if rule['status'] not in ('queued', 'generating', 'ready', 'sending'):
+                    self.store.status(rule['id'], rule['revision'], 'waiting_visible', '当前微信可见会话列表中未找到；已把聊天列表滚回顶部重扫过，仍未找到这个会话')
                 continue
             if rule['status'] in ('queued', 'generating', 'ready', 'sending'):
                 continue

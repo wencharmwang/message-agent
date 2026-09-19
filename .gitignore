@@ -22,3 +22,6 @@ node_modules/
 dist/
 plugin/dist/
 artifacts/
+
+# Local client backups
+plugin/backups-*.js

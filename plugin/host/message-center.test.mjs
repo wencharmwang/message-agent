@@ -100,14 +100,15 @@ test('markSeen closes the batch but keeps the conversation in history', () => {
   assert.equal(attention.items.some(item => item.key === KEY), false);
 });
 
-test('deferred conversations surface for 今天要做的', () => {
+// 「稍后处理」整个机制被删掉了。它把**会话**挂进「今天要做的」，界面上出现的是
+//「稍后再处理：某某群」这种没有动作的行 —— 用户点完才发现和自己没关系（原话：
+// "我都不知道是什么"）。现在要做的事只有一条路：记成待办。这条守住那个决定不再回来。
+test('conversations can no longer be pushed into 今天要做的', () => {
   const {center} = makeCenter();
   center.sync({providers: LIST('fp-A')});
   center.sync({providers: LIST('fp-B')});
-  center.defer(KEY);
-  const deferred = center.deferred();
-  assert.equal(deferred.length, 1);
-  assert.equal(deferred[0].identity.title, '小璐璐');
+  assert.equal(typeof center.defer, 'undefined');
+  assert.equal(typeof center.deferred, 'undefined');
 });
 
 test('a reply classification enters 待我处理, fyi does not', () => {
@@ -399,42 +400,26 @@ test('background body reads need the user to opt in', () => {
   assert.deepEqual(center.pendingBackgroundRead(3), []);
 });
 
-test('handling a conversation in 消息 takes it off 「今天要做的」', () => {
+// 「标为已看」必须留下痕迹，而且**服务端说了算**。
+//
+// 用户问过「标记为已看到底有什么用，下次进入还是有这个按钮」：那时它只把组件里的本地状态
+// 翻了一下，页面一刷新、重进一次就回到原样。现在这条消息的批次被置为 reviewed，行状态由
+// 服务端算成 done，客户端据此把按钮换成一行「你已标为已看」。
+test('marking a conversation seen is reported by the server, not remembered by the browser', () => {
   let t = 1000;
   const {center} = makeCenter({now: () => t});
   center.sync({providers: LIST('fp-A')});
   center.sync({providers: LIST('fp-B')});
   center.attachSnapshot(KEY, [{direction: 'incoming', content: '在吗'}]);
-  center.defer(KEY, {}, (t = 1010));
-  assert.equal(center.deferred().length, 1);
-
-  // 回到「消息」把它标为已看 = 用户表示已经处理过了。它必须离开「今天要做的」，
-  // 否则这里会一直挂着一条已经处理完的事（用户实际报的就是这个）。
-  center.markSeen(KEY, (t = 1020));
-  assert.equal(center.deferred().length, 0);
-
-  // 之后再点「稍后处理」还能放回去。
-  center.defer(KEY, {}, (t = 1030));
-  assert.equal(center.deferred().length, 1);
-
-  // 「处理完成」同样是收起来。
-  center.complete(KEY, {}, (t = 1040));
-  assert.equal(center.deferred().length, 0);
-});
-
-test('the queue row and 「今天要做的」agree on whether a conversation is deferred', () => {
-  let t = 1000;
-  const {center} = makeCenter({now: () => t});
-  center.sync({providers: LIST('fp-A')});
-  center.sync({providers: LIST('fp-B')});
-  center.attachSnapshot(KEY, [{direction: 'incoming', content: '在吗'}]);
-  center.defer(KEY, {}, (t = 1010));
-  assert.equal(center.list({scope: 'all'}).items[0].actionState, 'deferred');
+  assert.equal(center.list({scope: 'all'}).items[0].actionState, 'none');
 
   center.markSeen(KEY, (t = 1020));
-  // 两边走同一个 latestAction：行里不再说「已稍后处理」，今天要做的里也没有它。
-  assert.notEqual(center.list({scope: 'all'}).items[0].actionState, 'deferred');
-  assert.equal(center.deferred().length, 0);
+  assert.equal(center.list({scope: 'all'}).items[0].actionState, 'done');
+  assert.equal(center.list({scope: 'all'}).items[0].batchState, 'reviewed');
+
+  // 新消息进来会开一个新批次，于是重新回到「有新动态」。
+  center.sync({providers: LIST('fp-C')});
+  assert.notEqual(center.list({scope: 'all'}).items[0].actionState, 'done');
 });
 
 test('two actions in the same second still resolve in the order they happened', () => {
@@ -443,12 +428,12 @@ test('two actions in the same second still resolve in the order they happened', 
   center.sync({providers: LIST('fp-B')});
   center.attachSnapshot(KEY, [{direction: 'incoming', content: '在吗'}]);
   // 同一个时钟值：靠 `rowid` 兜底决定谁在后面，而不是碰运气。
-  center.defer(KEY, {}, 1000);
-  assert.equal(center.deferred().length, 1);
   center.complete(KEY, {}, 1000);
-  assert.equal(center.deferred().length, 0);
-  center.defer(KEY, {}, 1000);
-  assert.equal(center.deferred().length, 1);
+  assert.equal(center.latestAction(KEY).action_type, 'complete');
+  center.markSeen(KEY, 1000);
+  assert.equal(center.latestAction(KEY).action_type, 'mark_seen');
+  center.complete(KEY, {}, 1000);
+  assert.equal(center.latestAction(KEY).action_type, 'complete');
 });
 
 // A row that never got a label used to say nothing about why. The caller's catch is silent

@@ -38,7 +38,7 @@ class FailingReadMcp:
         raise RuntimeToolError('layout_unverified', 'Runtime: layout_unverified',
                                'The conversation-list boundary could not be identified.')
 
-    def scan(self, provider):
+    def scan(self, provider, scroll_to_top=False):
         return {}
 
 
@@ -59,6 +59,34 @@ def make_worker():
     return Worker(config, mcp=FailingReadMcp(), harness=NoHarness())
 
 
+class DirectReadMcp(FailingReadMcp):
+    """The visible-row id works even though its OCR label need not be searchable."""
+
+    def call(self, name, arguments):
+        if name == 'list_conversations':
+            return {'conversations': [{'id': 'wechat:target', 'title': '小璐路璐路ONR',
+                                       'metadata': {}}]}
+        return super().call(name, arguments)
+
+    def observe(self, rule, limit=30):
+        self.observed.append(rule)
+        if rule['conversation'] == 'wechat:target':
+            return [{'id': 'm1', 'text': '你好', 'direction': 'outgoing'}]
+        raise AssertionError('OCR title must not be used when the visible id succeeds')
+
+
+class RetryByTitleMcp(FailingReadMcp):
+    """An old/stale visible id can still fall back to the guarded title route."""
+
+    def observe(self, rule, limit=30):
+        self.observed.append(rule)
+        if rule['conversation'].startswith('wechat:'):
+            raise RuntimeToolError('conversation_unverified', 'Runtime: conversation_unverified',
+                                   'The clicked row could not be verified.')
+        raise RuntimeToolError('layout_unverified', 'Runtime: layout_unverified',
+                               'The conversation-list boundary could not be identified.')
+
+
 class DevDiagnosticsTest(unittest.TestCase):
     def setUp(self):
         self.worker = make_worker()
@@ -75,10 +103,12 @@ class DevDiagnosticsTest(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         self.thread.start()
 
-    def read(self, conversation_id='wechat:target', conversation_title=None):
+    def read(self, conversation_id='wechat:target', conversation_title=None, background_only=False):
         payload = {'provider': 'wechat-main', 'conversation_id': conversation_id}
         if conversation_title is not None:
             payload['conversation_title'] = conversation_title
+        if background_only:
+            payload['background_only'] = True
         request = urllib.request.Request(
             'http://127.0.0.1:%d/api/read' % self.port,
             json.dumps(payload).encode('utf-8'),
@@ -108,17 +138,29 @@ class DevDiagnosticsTest(unittest.TestCase):
         self.assertIn('RuntimeToolError', body['dev']['trace'])
         self.assertIn('observe', body['dev']['trace'])
 
-    def test_manual_read_resolves_the_row_id_to_a_user_commanded_title(self):
-        self.worker.store.set_setting('dev_diagnostics', True)
-        self.read()
-        self.assertEqual(self.worker.mcp.observed[-1],
-                         {'provider': 'wechat-main', 'conversation': '树袋熊'})
+    def test_manual_read_keeps_the_visible_row_id(self):
+        self.worker.mcp = DirectReadMcp()
+        status, body = self.read()
+        self.assertEqual(status, 200)
+        self.assertEqual(body['messages'][0]['text'], '你好')
+        self.assertEqual(self.worker.mcp.observed,
+                         [{'provider': 'wechat-main', 'conversation': 'wechat:target'}])
 
     def test_manual_read_recovers_a_stale_ocr_id_from_the_server_side_title(self):
+        self.worker.mcp = RetryByTitleMcp()
         self.worker.store.set_setting('dev_diagnostics', True)
         self.read('wechat:stale-id', '树袋熊…')
-        self.assertEqual(self.worker.mcp.observed[-1],
-                         {'provider': 'wechat-main', 'conversation': '树袋熊'})
+        self.assertEqual(self.worker.mcp.observed,
+                         [{'provider': 'wechat-main', 'conversation': 'wechat:target'},
+                          {'provider': 'wechat-main', 'conversation': '树袋熊'}])
+
+    def test_background_only_read_never_falls_back_to_name_search(self):
+        self.worker.mcp = RetryByTitleMcp()
+        status, body = self.read(background_only=True)
+        self.assertEqual(status, 409)
+        self.assertEqual(body['code'], 'conversation_unverified')
+        self.assertEqual(self.worker.mcp.observed,
+                         [{'provider': 'wechat-main', 'conversation': 'wechat:target'}])
 
     def test_switching_the_developer_view_off_attaches_nothing(self):
         self.worker.store.set_setting('dev_diagnostics', False)

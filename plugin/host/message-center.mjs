@@ -22,7 +22,7 @@ import { createHash, randomUUID } from 'node:crypto';
 export const SCOPES = ['attention', 'new', 'all'];
 export const ORDERS = ['priority', 'recent'];
 export const CLASSIFICATIONS = ['reply', 'action', 'fyi', 'unknown'];
-export const ACTIONS = ['reply', 'draft', 'todo', 'followup', 'defer', 'mark_seen', 'ignore', 'complete'];
+export const ACTIONS = ['reply', 'draft', 'todo', 'followup', 'mark_seen', 'complete'];
 /** Classes that mean "a human still has to decide something". */
 const ATTENTION_CLASSES = new Set(['reply', 'action', 'unknown']);
 /** Sort ranks: the assistant's "needs a decision" classes come first. */
@@ -598,10 +598,8 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
     let actionState = 'none';
     if (drafts > 0) actionState = 'draft_pending';
     else if (todos > 0) actionState = 'todo_open';
-    // Same lookup 「今天要做的」 uses. Scanning the batch's actions instead kept saying
-    // "deferred" after the user had already marked it seen, so the row and the today list
-    // disagreed about the same conversation.
-    else if (this.latestAction(row.conversation_key)?.action_type === 'defer') actionState = 'deferred';
+    // 「已看」由服务端判定，客户端不再自己记 —— 否则刷新页面后那个按钮又回来了
+    // （用户原话：标记为已看到底有什么用，下次进入还是有这个按钮）。
     else if (batch && batch.state === 'reviewed') actionState = 'done';
     const automationProblem = automationState === 'problem';
     // The queue group a row is displayed under. Computed here (not in the browser) so it is
@@ -758,13 +756,13 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
     return true;
   },
 
-  defer(key, {note = ''} = {}, at = clock()) {
-    const batch = this.openBatch(key);
-    if (batch) db.prepare("UPDATE message_batch SET state = 'reviewed' WHERE id = ?").run(batch.id);
-    db.prepare("UPDATE conversation_activity SET observation_state = 'seen' WHERE conversation_key = ?").run(key);
-    this.recordAction(key, 'defer', {batchId: batch?.id, note}, at);
-    return true;
-  },
+  /**
+   * 「稍后处理」已经删掉了。
+   *
+   * 它原来把**整个会话**挂到「今天要做的」上，界面上出现的是「稍后再处理：某某群」这种
+   * 没有动作的行 —— 用户点完才发现和自己没关系（实测原话：「我都不知道是什么」）。
+   * 要做的事现在只有一条路：记成待办。会话本身不再进那个列表。
+   */
 
   complete(key, {note = ''} = {}, at = clock()) {
     const batch = this.openBatch(key);
@@ -958,33 +956,6 @@ export function createMessageCenter({databasePath, identityKey, clock = () => Da
   setFollowing(key, following) {
     db.prepare('UPDATE conversation_activity SET following = ? WHERE conversation_key = ?').run(following ? 1 : 0, key);
     return activity(key);
-  },
-
-  /**
-   * Conversations the user pushed to "later". A deferred item leaves the queue but must
-   * not vanish: 「今天要做的」 picks these up, and the conversation keeps its place in
-   * the message history (doc §5.1).
-   */
-  deferred() {
-    // "I'll deal with it later" only holds until the user does something else with it. Marking
-    // it seen or finishing it is them saying they are done — otherwise a conversation they
-    // already handled in 「消息」 sits on this list forever, which is exactly what the person
-    // using it reported. One shared lookup (`latestAction`), so the queue's row state and this
-    // list can never disagree about the same conversation.
-    const out = [];
-    for (const row of db.prepare('SELECT * FROM conversation_activity ORDER BY observed_at DESC').all()) {
-      if (this.latestAction(row.conversation_key)?.action_type !== 'defer') continue;
-      const batch = this.latestBatch(row.conversation_key);
-      out.push({
-        key: row.conversation_key,
-        identity: {provider: row.provider, conversation: row.conversation, title: row.display_name, kind: row.kind},
-        since: batch?.first_message_at ?? row.last_activity_at,
-        updatedAt: row.last_activity_at ?? row.observed_at,
-        classification: batch?.classification ?? 'unknown',
-        summary: parseSummary(batch?.summary)
-      });
-    }
-    return out;
   },
 
   /** Give up on a conversation entirely: drop what we recorded about it. */

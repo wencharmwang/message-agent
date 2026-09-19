@@ -26,7 +26,7 @@ class StubMcp:
     def call(self, name, arguments):
         raise AssertionError('unexpected tool ' + name)
 
-    def scan(self, provider):
+    def scan(self, provider, scroll_to_top=False):
         self.scans += 1
         return {'wechat:alice': {'fingerprint': 'fp-A', 'name': '小璐璐'},
                 'wechat:bob': {'fingerprint': 'fp-B', 'name': '供应商群'}}
@@ -122,7 +122,7 @@ class BlankWindowMcp:
             self.broken = False
         return {'restored': self.recoverable}
 
-    def scan(self, provider):
+    def scan(self, provider, scroll_to_top=False):
         self.scans += 1
         if self.broken:
             raise RuntimeToolError('layout_unverified', 'Runtime: layout_unverified',

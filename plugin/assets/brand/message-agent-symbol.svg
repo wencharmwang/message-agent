@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <title>Message Agent</title>
+  <path fill="#07C160" d="M12 9h40a7 7 0 0 1 7 7v25a7 7 0 0 1-7 7H27L15.2 56.5A2 2 0 0 1 12 54.9V48a7 7 0 0 1-7-7V16a7 7 0 0 1 7-7Z"/>
+  <circle cx="22" cy="29" r="3.2" fill="#fff"/>
+  <circle cx="32" cy="29" r="3.2" fill="#fff"/>
+  <circle cx="42" cy="29" r="3.2" fill="#fff"/>
+</svg>

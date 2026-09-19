@@ -29,7 +29,7 @@ class StubMcp:
     def call(self, name, arguments):
         raise AssertionError('unexpected tool ' + name)
 
-    def scan(self, provider):
+    def scan(self, provider, scroll_to_top=False):
         return {'wechat:target': {'fingerprint': self.fingerprint, 'name': '新疆羊肉串'}}
 
     def observe(self, rule):

@@ -33,7 +33,7 @@ process.on('unhandledRejection', reason => {
 export const inject = ['webServer', 'agents', 'sessions', 'sessionQuery', 'sessionPersistence', 'agentPresets', 'workspaceRegistry', 'permissionPresets', 'sessionTitle', 'llm'];
 const config = JSON.parse(readFileSync(process.env.MESSAGE_AGENT_CONFIG, 'utf8').replace(/^\uFEFF/, ''));
 const token = readFileSync(config.control_token_file, 'utf8').trim();
-const brandSymbol = readFileSync(new URL('./assets/brand/message-agent-symbol.png', import.meta.url));
+const brandSymbol = readFileSync(new URL('./assets/brand/message-agent-symbol.svg', import.meta.url));
 const { SessionId } = await import(pathToFileURL(join(config.harness_root, 'packages/core/session/src/index.ts')));
 const { createUserMessage, BlockAssembler } = await import(pathToFileURL(join(config.harness_root, 'packages/llm/llm/src/index.ts')));
 const { defineTool } = await import(pathToFileURL(join(config.harness_root, 'packages/core/tools/src/index.ts')));
@@ -287,9 +287,9 @@ export function apply(ctx) {
       respond(res, 403, {error:'Origin rejected'}); return;
     }
     const path = new URL(req.url, `http://${authority}`).pathname;
-    if (path === '/message-agent/assets/brand/message-agent-symbol.png') {
+    if (path === '/message-agent/assets/brand/message-agent-symbol.svg') {
       if (req.method !== 'GET') { respond(res, 405, {error:'Method not allowed'}); return; }
-      res.writeHead(200, {'Content-Type':'image/png', 'Content-Length':brandSymbol.length, 'Cache-Control':'public, max-age=86400'});
+      res.writeHead(200, {'Content-Type':'image/svg+xml; charset=utf-8', 'Content-Length':brandSymbol.length, 'Cache-Control':'public, max-age=86400'});
       res.end(brandSymbol);
       return;
     }

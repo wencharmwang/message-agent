@@ -186,32 +186,47 @@ test('the developer view is on until config.json turns it off', () => {
   assert.equal(DEV_LOG_FILE, 'dev-errors.log');
 });
 
-// 客户端的按钮那一行现在只放按钮：联系人名字曾经渲染在按钮前面，名字长短不一，于是每一行的
-// 按钮被推到不同位置。名字因此必须由标题带出来，否则 pending 行（标题原本只有"为什么等你"）
-// 就再也看不到是谁了。这条钉住的就是那个前提。
-test('every 「今天要做的」 row names the contact in its title', () => {
-  const longName = '长江证券孙盛（投资投顾编号：S0490621050022)';
-  const items = projectInbox({
-    rules: [rule('nu', {status: 'needs_user', detail: '需要本人确认报价'})],
-    jobs: [],
-    bindings: {},
-    drafts: []
-  });
+// 「今天要做的」= 待办清单本身。
+//
+// 这一页曾经有三块，其中「需要你决定」是拿模型给消息打的分类（需要回复 / 只需了解…）
+// 拼出来的任务区。用户实测被它误导过：一条跟自己无关的群聊被列进今天要做的事，原话是
+//「我都不知道是什么」「为什么会提示我今天要做」。现在它只剩待办、等你确认发送、已完成。
+test('「今天要做的」只有待办、等你确认的发送和已完成', () => {
+  const items = projectInbox({rules: [rule('nu', {status: 'needs_user', detail: '需要本人确认报价'})], jobs: [], bindings: {}, drafts: []});
   const page = projectToday({
     items,
-    deferred: [{
-      key: 'deferred-key', identity: {provider: 'wechat-main', conversation: 'conv-def', title: longName, kind: 'direct'},
-      summary: ['问我文件收到没有'], since: 1, updatedAt: 2, classification: 'reply'
-    }]
+    drafts: [{
+      id: 'd1', revision: 1, state: 'awaiting_confirmation', text: '好的，明天给你答复',
+      target: {provider: 'wechat-main', conversation: 'conv-a', title: '长江证券孙盛（投资投顾编号：S0490621050022)', kind: 'direct'},
+      expiresAt: 1900000000, updatedAt: 1789000000
+    }],
+    todoBuckets: {overdue: [], today: [], later: [], someday: []},
+    doneTodos: []
   });
-  const rows = page.groups.find(group => group.key === 'decide').items;
-  assert.equal(rows.length, 2, '一条 pending 会话 + 一条稍后处理');
-  for (const row of rows) {
-    assert.ok(row.identity?.title, '仍要保留 identity，跳转和按钮都要用它');
-    const escaped = row.identity.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    assert.match(row.title, new RegExp(escaped), '标题里必须出现联系人名字：按钮那一行已经不渲染它了');
-  }
-  // deferred 行与 pending 行都叫 kind:'conversation'，用 attentionKind 区分。
-  assert.equal(rows.find(row => row.attentionKind === 'manual').title, 'Fixture nu：需要本人确认报价');
-  assert.equal(rows.find(row => row.attentionKind === 'deferred').title, '稍后再处理：' + longName);
+  assert.deepEqual(page.groups.map(group => group.key), ['confirm', 'todos', 'handled']);
+  // 模型对消息的判断不再变成任务，只留一个计数给界面指路。
+  assert.equal(page.counts.automation, 1);
+  assert.equal(page.counts.attention, 1, '红点只数待办 + 等你确认的发送');
+  // 草稿这一行的标题仍要带联系人名字：按钮那一行已经不渲染它了。
+  const draftRow = page.groups.find(group => group.key === 'confirm').items[0];
+  assert.match(draftRow.title, /长江证券孙盛/);
+});
+
+test('在做的待办排在最前面，做完的留在同一张单子上', () => {
+  const todo = (id, state, dueAt = null) => ({id, title: id, state, dueAt, source: 'manual', conversationKey: null});
+  const page = projectToday({
+    todoBuckets: {overdue: [todo('已逾期', 'open', 1)], today: [], later: [], someday: [todo('没日期', 'open')]},
+    doneTodos: [todo('做完了', 'done')]
+  });
+  const rows = page.groups.find(group => group.key === 'todos').items;
+  assert.deepEqual(rows.map(row => row.title), ['已逾期', '没日期', '做完了'], '没做完的按到期排在前，做完的收在后面');
+  assert.equal(page.counts.todos, 2);
+  assert.equal(page.counts.done, 1);
+  assert.equal(page.counts.overdue, 1);
+
+  const withDoing = projectToday({
+    todoBuckets: {overdue: [todo('已逾期', 'open', 1)], today: [], later: [], someday: [todo('要做', 'open'), todo('在做', 'doing')]},
+    doneTodos: []
+  });
+  assert.deepEqual(withDoing.groups.find(group => group.key === 'todos').items.map(row => row.title), ['在做', '已逾期', '要做']);
 });

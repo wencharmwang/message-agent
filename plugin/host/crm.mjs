@@ -47,7 +47,13 @@ CREATE INDEX IF NOT EXISTS idx_todos_conversation ON todos(conversation_key, sta
 CREATE INDEX IF NOT EXISTS idx_followups_conversation ON followups(conversation_key, created_at);
 `;
 
-export const TODO_STATES = ['open', 'done'];
+/**
+ * 一条待办的三种状态，对应用户在界面上看到的三件事：要做 / 在做 / 做完。
+ *
+ * 原来只有 open/done，「在做」只能靠人心记着。加了 doing 之后它仍然算**未完成**
+ * （列表里继续出现），只是排在最前面 —— 真正在推进的那件比还没开始的更该在视线里。
+ */
+export const TODO_STATES = ['open', 'doing', 'done'];
 
 function now() {
   return Date.now() / 1000;
@@ -103,8 +109,8 @@ export class Crm {
 
   #decorate(row) {
     if (!row) return null;
-    const stats = this.db.prepare(`SELECT
-        (SELECT COUNT(*) FROM todos WHERE conversation_key = ? AND state = 'open') AS open_todos,
+    const       stats = this.db.prepare(`SELECT
+        (SELECT COUNT(*) FROM todos WHERE conversation_key = ? AND state <> 'done') AS open_todos,
         (SELECT COUNT(*) FROM followups WHERE conversation_key = ?) AS followup_count,
         (SELECT MAX(created_at) FROM followups WHERE conversation_key = ?) AS last_followup_at`)
       .get(row.conversation_key, row.conversation_key, row.conversation_key);
@@ -213,7 +219,7 @@ export class Crm {
    * 同一件事不该被记两次：整理结果是可以反复点「加入待办」的（刷新之后界面记不住哪几条已经加过），
    * 而这里原来是无条件 INSERT —— 一次请求卡住后重试就会留下两份一模一样的待办。
    * 所以对「同来源 + 同标题 + 同一会话 + 还没完成 + 24 小时内」的重复，直接返回已经存在的那条。
-   * 只挡**未完成**的：同名的那条如果已经做完，这是一件新的事，应该能再记一次。
+   * 只挡**未完成**的（含「在做」）：同名的那条如果已经做完，这是一件新的事，应该能再记一次。
    */
   createTodo({conversationKey, title, detail, evidence, source, dueAt} = {}) {
     const key = conversationKey ? String(conversationKey) : null;
@@ -222,7 +228,7 @@ export class Crm {
     const wanted = text(title, 200, {required: true});
     const from = text(source, 20) || 'manual';
     const duplicate = this.db.prepare(`SELECT id FROM todos
-      WHERE state = 'open' AND title = ? AND source = ?
+      WHERE state <> 'done' AND title = ? AND source = ?
         AND COALESCE(conversation_key, '') = COALESCE(?, '') AND created_at > ?
       ORDER BY created_at DESC LIMIT 1`).get(wanted, from, key, at - 24 * 3600);
     if (duplicate) return {...this.#todo(duplicate.id), deduped: true};
@@ -279,6 +285,17 @@ export class Crm {
       .all(...params).map(row => this.#todo(row.id)).filter(Boolean);
   }
 
+  /** 未完成的待办（要做 + 在做），按到期时间排：逾期的在最前，没有日期的在最后。 */
+  listActiveTodos({conversationKey, limit = 200} = {}) {
+    const clauses = ["state <> 'done'"];
+    const params = [];
+    if (conversationKey) { clauses.push('conversation_key = ?'); params.push(conversationKey); }
+    params.push(Math.min(Math.max(limit, 1), 500));
+    return this.db.prepare(`SELECT id FROM todos WHERE ${clauses.join(' AND ')}
+      ORDER BY (due_at IS NULL), due_at, created_at DESC LIMIT ?`)
+      .all(...params).map(row => this.#todo(row.id)).filter(Boolean);
+  }
+
   updateTodo(id, patch = {}) {
     const row = this.getTodo(id);
     const at = now();
@@ -290,14 +307,23 @@ export class Crm {
     return this.getTodo(id);
   }
 
+  /**
+   * 改状态。三种：open（要做）、doing（在做）、done（做完）。
+   * `done_at` 只在 done 时有值；从 done 回到 open/doing 一律清掉，否则「什么时候做完的」
+   * 会留着上一次的时间，回看时会误导。
+   */
   setTodoState(id, state, dueAt) {
+    if (!TODO_STATES.includes(state)) throw Object.assign(new Error('未知的待办状态'), {code: 'CRM_INVALID'});
     const row = this.getTodo(id);
     const at = now();
-    if (state === 'open') {
+    if (state === 'done') {
+      this.db.prepare('UPDATE todos SET state = ?, done_at = ?, updated_at = ? WHERE id = ?').run('done', at, at, id);
+    } else if (state === 'doing') {
+      this.db.prepare('UPDATE todos SET state = ?, done_at = NULL, due_at = ?, updated_at = ? WHERE id = ?')
+        .run('doing', dueAt === undefined ? row.dueAt : optionalTime(dueAt), at, id);
+    } else {
       this.db.prepare('UPDATE todos SET state = ?, done_at = NULL, due_at = ?, updated_at = ? WHERE id = ?')
         .run('open', dueAt === undefined ? row.dueAt : optionalTime(dueAt), at, id);
-    } else {
-      this.db.prepare('UPDATE todos SET state = ?, done_at = ?, updated_at = ? WHERE id = ?').run('done', at, at, id);
     }
     return this.getTodo(id);
   }
@@ -307,11 +333,11 @@ export class Crm {
     return {deleted: true};
   }
 
-  /** Open to-dos bucketed for the "今天要做的" page: overdue first, then dated, then undated. */
+  /** Unfinished to-dos bucketed for the 「待办」 page: overdue first, then dated, then undated. */
   todoBuckets(at = now()) {
     const dayEnd = new Date(at * 1000);
     dayEnd.setHours(23, 59, 59, 999);
-    const open = this.listTodos({state: 'open'});
+    const open = this.listActiveTodos();
     const buckets = {overdue: [], today: [], later: [], someday: []};
     for (const todo of open) {
       if (todo.dueAt === null) buckets.someday.push(todo);
