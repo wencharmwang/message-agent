@@ -228,6 +228,7 @@ class Worker:
         self.last_error = ''
         self.started_at = time.time()
         self.watcher = None          # WatcherSource，懒加载
+        self._watcher_lock = threading.Lock()
         self._history = {}           # username -> [canonical message]
         self._history_seq = {}       # username -> 最新 incoming 的 sort_seq（int）
         self._observation = {'scanned_at': 0.0, 'providers': {}}  # 整理器手动发现缓存
@@ -306,17 +307,24 @@ class Worker:
 
     # ---- watcher 子进程 ----
     def _watcher(self):
-        if self.watcher is None:
-            from .watcher_source import WatcherSource
-            self.watcher = WatcherSource(
-                self.config['watcher_python'],
-                self.config['watcher_src'],
-                workspace=self.config.get('watcher_workspace'),
-                account=self.config.get('watcher_account'),
-                interval=self.config.get('watcher_interval_seconds', 3.0),
-                overlap=self.config.get('watcher_overlap_seconds', 10),
-            )
-        return self.watcher
+        # 自愈 + 线程安全：watcher 子进程崩溃后（进程退出），下次 tick 重新拉起；
+        # 加锁防止 tick 线程与 HTTP 请求线程（db_sessions）并发 spawn 出两个 watcher
+        # （subprocess.Popen 会释放 GIL，不加锁会竞态重复实例化）。
+        with self._watcher_lock:
+            if self.watcher is not None and not self.watcher.alive():
+                self.watcher.close()
+                self.watcher = None
+            if self.watcher is None:
+                from .watcher_source import WatcherSource
+                self.watcher = WatcherSource(
+                    self.config['watcher_python'],
+                    self.config['watcher_src'],
+                    workspace=self.config.get('watcher_workspace'),
+                    account=self.config.get('watcher_account'),
+                    interval=self.config.get('watcher_interval_seconds', 3.0),
+                    overlap=self.config.get('watcher_overlap_seconds', 10),
+                )
+            return self.watcher
 
     def close(self):
         if self.watcher is not None:
