@@ -61,6 +61,8 @@ class WatcherSource:
             errors="replace",
             env=env,
             bufsize=1,
+            # Windows：不加这个会弹出一个 venv python.exe 的命令行窗口。
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         threading.Thread(target=self._read_stdout, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
