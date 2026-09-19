@@ -438,6 +438,12 @@ class Worker:
             # 发送定位用 display（rule.title = remark/nick_name），不是 username：
             # runtime 对非 wechat: 前缀的 id 走"可见列表行点击 + 全局搜索兜底"，
             # 而微信里显示的是备注，不是 wxid。
+            # 发送走 UI，需要微信窗口可用（DB 读不碰窗口）。窗口最小化/收到托盘时先恢复；
+            # 窗口本就可用的场景 restore 会快速返回，无副作用。
+            try:
+                self.mcp.call('restore_window', {'provider': job['provider']})
+            except Exception:
+                pass
             try:
                 outcome = self.mcp.call('send_message', {'provider': job['provider'],
                          'conversation_id': rule['title'], 'text': decision['text'],
