@@ -107,11 +107,8 @@ def handler(worker, token):
                 self.response(200, {'settings': current_settings()})
             elif self.path == '/api/conversations':
                 try:
-                    page = worker.mcp.call('list_conversations', {'provider': 'wechat-main'})
-                    # Keep the pickers clean too: 公众号/服务号/微信支付 are not contacts.
-                    page['conversations'] = [c for c in page.get('conversations', [])
-                                             if not is_system_entry(c.get('title') or '')]
-                    self.response(200, page)
+                    # 读 DB 会话列表（username + display），不再 OCR 读可见列表。
+                    self.response(200, {'conversations': worker.db_sessions()})
                 except Exception as error:
                     self.response(503, {'error': '无法读取会话列表，请检查微信和 Runtime',
                                         'dev': dev_block(error, 'worker:conversations')})
@@ -137,16 +134,13 @@ def handler(worker, token):
                     raise ValueError('Invalid request size')
                 data = json.loads(self.rfile.read(length))
                 if self.path == '/api/rules':
-                    # Resolve from current provider output; do not trust a client-supplied display name.
-                    choices = worker.mcp.call('list_conversations', {'provider': 'wechat-main'})['conversations']
-                    matches = [c for c in choices if c['id'] == data.get('conversation_id')]
+                    # 从 DB 会话列表解析，身份是 username；不再依赖 OCR 可见列表。
+                    sessions = worker.db_sessions()
+                    matches = [c for c in sessions if c['id'] == data.get('conversation_id')]
                     if not matches:
-                        raise ValueError('微信当前显示的聊天列表里没有这个会话。请把它滚动到可见位置，'
-                                         '点「重新读取微信」后再添加。')
-                    if len(matches) > 1 or (matches[0].get('metadata') or {}).get('ambiguous') == 'true':
-                        raise ValueError('微信里有多个同名会话，助手分不清是哪一个。请先给其中一个改名或加备注。')
-                    # The visible list cannot tell a group from a one-to-one chat yet, so the
-                    # client does not send a kind; default to direct instead of rejecting it.
+                        raise ValueError('会话列表里没有这个会话，请刷新后再添加。')
+                    # username 原生唯一，无同名歧义；群聊由会话 type 决定，客户端未传 kind
+                    # 时默认 direct（沿用旧行为）。
                     kind = data.get('kind') if data.get('kind') in ('direct', 'group') else 'direct'
                     rule_id = worker.store.add('wechat-main', matches[0]['id'], matches[0]['title'], kind,
                                                data.get('prompt', ''))
