@@ -1815,10 +1815,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const renderJob=({count,job})=>h('div',{key:job.id,style:{display:'flex',gap:10,alignItems:'baseline',padding:'10px 0',borderTop:'1px solid '+C.border,fontSize:13}},
       h('span',{style:{...pill(job.state==='failed'||job.state==='uncertain'?C.error:C.ok),fontSize:11,padding:'2px 8px'}},JOB[job.state]||'已处理'),
       h('span',{style:{color:C.text2,lineHeight:1.6}},firstLine(job.text||job.detail||'',80)+(count>1?'（同类 '+count+' 条）':'')));
-    const restore=settings.data?.settings?.auto_restore_window===true;
-    async function toggleRestore(){
+    const paused=settings.data?.settings?.auto_reply_paused===true;
+    async function togglePaused(){
       setSaving(true);setSettingError('');
-      try{await api('settings',{auto_restore_window:!restore});settings.refresh();}
+      try{await api('settings',{auto_reply_paused:!paused});settings.refresh();}
       catch(e){setSettingError(e.message);}finally{setSaving(false);}
     }
     return h('div',{style:{width:'100%',overflowY:'auto'}},
@@ -1870,9 +1870,9 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('section',{style:{...card,display:'flex',justifyContent:'space-between',alignItems:'center',gap:16,flexWrap:'wrap',marginTop:22,boxShadow:'none'}},
           h('div',{style:{display:'flex',gap:12,alignItems:'center',minWidth:240,flex:1}},
             h('span',{style:{width:38,height:38,borderRadius:12,display:'flex',alignItems:'center',justifyContent:'center',background:'var(--ma-warning-soft)',color:C.warn}},h(Icon,{name:'settings',size:18})),
-            h('div',null,h('strong',{style:{display:'block',fontSize:14,color:C.text}}, '微信最小化时自动拉回'),
-              h('span',{style:{fontSize:12,color:C.text3,lineHeight:1.65}},'开启后最多每分钟检查一次，不抢占键盘焦点。'))),
-          h(Toggle,{on:restore,onClick:toggleRestore,busy:saving,disabled:!settings.data,label:restore?'已开启':'未开启'})),
+            h('div',null,h('strong',{style:{display:'block',fontSize:14,color:C.text}}, '暂停自动回复'),
+              h('span',{style:{fontSize:12,color:C.text3,lineHeight:1.65}},'暂停后不再读取新消息、不生成也不发送回复，随时可恢复。'))),
+          h(Toggle,{on:paused,onClick:togglePaused,busy:saving,disabled:!settings.data,label:paused?'已暂停':'值守中'})),
         !!status.data?.jobs?.length&&h('details',{style:{...card,marginTop:14,boxShadow:'none'}},
           h('summary',{style:{cursor:'pointer',fontSize:14,fontWeight:650,color:C.text}},'最近处理记录'),
           h('div',{style:{marginTop:12}},
