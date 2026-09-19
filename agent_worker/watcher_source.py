@@ -43,6 +43,10 @@ class WatcherSource:
 
         env = dict(os.environ)
         env["PYTHONPATH"] = str(src) + os.pathsep + env.get("PYTHONPATH", "")
+        # 强制 watch 子进程用 UTF-8 输出：Windows 下默认 stdout 是 GBK(cp936)，
+        # 而这里用 encoding="utf-8" 读，不一致会把中文消息正文读成乱码。
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
 
         self._events: queue.Queue[dict] = queue.Queue()
         self._ready = threading.Event()

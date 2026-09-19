@@ -62,7 +62,7 @@ def handler(worker, token):
 
     def current_settings():
         return {
-            'auto_restore_window': worker.store.setting('auto_restore_window', '1') == '1',
+            'auto_reply_paused': worker.auto_reply_paused(),
             'auto_model': worker.store.setting('auto_model', worker.config['model']),
             'observe_enabled': worker.observe_enabled(),
             'dev_diagnostics': dev_diagnostics(),
@@ -265,10 +265,10 @@ def handler(worker, token):
                                         'detail': outcome.get('detail', '')})
                 elif self.path == '/api/settings':
                     changed = False
-                    if 'auto_restore_window' in data:
-                        if not isinstance(data['auto_restore_window'], bool):
-                            raise ValueError('Invalid auto_restore_window')
-                        worker.store.set_setting('auto_restore_window', data['auto_restore_window'])
+                    if 'auto_reply_paused' in data:
+                        if not isinstance(data['auto_reply_paused'], bool):
+                            raise ValueError('Invalid auto_reply_paused')
+                        worker.store.set_setting('auto_reply_paused', data['auto_reply_paused'])
                         changed = True
                     if 'auto_model' in data:
                         model = data['auto_model']

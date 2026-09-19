@@ -26,7 +26,7 @@ Stop-LocalListener 8766 @('dotnet')
 # time the launching shell closes. A stale supervisor is not harmless: it can win the
 # race for 8766 and host from a window station that cannot see user windows, so every
 # read fails with provider_unavailable while it holds the port. Retire them all first.
-& (Join-Path $RuntimeRoot 'runtime\python\python.exe') (Join-Path $AgentRoot 'reap-supervisors.py')
+& (Join-Path $RuntimeRoot 'runtime\pythonw.exe') (Join-Path $AgentRoot 'reap-supervisors.py')
 Start-Sleep -Seconds 2
 
 Write-Host '[2/4] starting messaging-runtime ...'

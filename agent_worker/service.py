@@ -475,7 +475,14 @@ class Worker:
                     self.store.status(rule['id'], rule['revision'], 'listening',
                                       '上一条回复的结果无法确认；不会自动重发，已继续监听新消息')
 
+    def auto_reply_paused(self):
+        """用户在网页上暂停了自动回复时返回 True。"""
+        return self.store.setting('auto_reply_paused', '0') == '1'
+
     def tick(self):
+        # 暂停时完全跳过事件处理与 job 生成：既不读新消息、也不生成/发送回复。
+        if self.auto_reply_paused():
+            return
         rules_by_username = self._rules_by_username()
         try:
             events = self._watcher().poll()
