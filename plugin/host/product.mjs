@@ -1055,6 +1055,23 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
         respond(res, 200, result);
         return true;
       }
+      // 保存云端模型的 API key。
+      //
+      // 为什么保存完就能用、不需要重启：harness 解析凭据时**进程环境变量优先**，而且是每次
+      // 调用现读（`credentials-local` 的注释就是这么写的）。Host 自己就是那个进程，所以在
+      // 这里设一次 process.env 立刻生效 —— 用户不用理解"重启"这件事。
+      // 落盘仍旧交给 Worker 走 Windows 密钥保护，磁盘上不留明文。
+      if (path === '/message-agent/api/model-key' && req.method === 'POST') {
+        const payload = await readBody(req);
+        const key = typeof payload?.key === 'string' ? payload.key.trim() : '';
+        if (key.length < 12 || /\s/.test(key)) {
+          throw Object.assign(new Error('这串 key 看起来不对（太短或含空格）'), {code: 'CONTEXT_INVALID'});
+        }
+        await runtime.setModelKey({key});
+        process.env.DEEPSEEK_API_KEY = key;
+        respond(res, 200, {ok: true, provider: 'deepseek-official'});
+        return true;
+      }
       // 拖拽/置顶之后的顺序。只存 id 顺序，不碰规则本身。
       if (path === '/message-agent/api/rules/order' && req.method === 'POST') {
         const payload = await readBody(req);

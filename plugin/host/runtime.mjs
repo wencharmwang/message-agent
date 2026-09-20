@@ -130,4 +130,11 @@ export class RuntimeAdapter {
   scanWechatKeys({force = false} = {}) {
     return this.#call('POST', '/api/wechat-keys/scan', {force}, 180000);
   }
+  /**
+   * 保存用户粘贴的云端模型 API key。写进 Windows 密钥保护（和安装程序同一个文件），
+   * 由 Worker 负责落盘 —— 保管逻辑只有一份。
+   */
+  setModelKey({key}) {
+    return this.#call('POST', '/api/model-key', {key});
+  }
 }

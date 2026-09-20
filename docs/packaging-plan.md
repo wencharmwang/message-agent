@@ -466,8 +466,45 @@ MessageAgent.exe / 计划任务
 
 用户拿到之后：解压 → 右键 `install.ps1` → 使用 PowerShell 运行。
 
-> 还差一步才算"双击就好"：真正的单文件安装器（Inno Setup 那种）。现在是"一个 zip + 一次右键安装"，
-> 已经是可交付状态；做成 exe 属于下一步。
+### 13.5 试过官方单文件 exe：跑不通，收益也没那么大（实测记录）
+
+用户要求"测一下引擎换成官方单文件 exe，看看收益"。结论：**这条路在这台机器上跑不完，而且收益是 2.4 倍级，不是数量级。**
+
+**它是什么**：`scripts/build-exe-for-python-sdk.ts` 用 `@yao-pkg/pkg --sea` 把
+`dsh-python-runtime-closure`（124 个直接依赖）和一个 node24 二进制打成一个
+`deepseek-harness-sdk-runtime.exe`。这是**给 Python SDK 用的分发形态**，入口就是同一个
+`@deepseek-ai/dsh/lib/bin.js`（所以参数理论上照样能传）。
+
+**为什么跑不完**（三步都卡过）：
+
+1. 它要求"由 pnpm 调起"：读 `process.env.npm_execpath` 拿 JavaScript 入口，Windows 上拿不到
+   就直接抛 `pnpm must expose a JavaScript entrypoint`。这台机器 pnpm 不在 PATH，只有 corepack
+   缓存的一份 —— 手动把 `npm_execpath` 指到
+   `%LOCALAPPDATA%\node\corepack\v1\pnpm\11.7.0\bin\pnpm.cjs` 才过了这一关。
+2. 接着它去装闭包（150 解析 / 107 下载 / 125 新增，实测跑通了）。
+3. 然后**停在交互提示**上：`Choose which packages to build (Press <space> to select…)` ——
+   pnpm 的构建脚本审批。无人值守的定时任务会永远卡在那里。要跑通得先在 CI 或人工环境里
+   `pnpm approve-builds`，或者把它写进 `pnpm-workspace.yaml` 的 `allowBuilds`。
+   **这不是缺陷，是"这个构建需要人工确认"，只是它不适合被自动化调用。**
+
+**收益（实测数字，不是估计）**：
+
+| | 现在（源码形态） | 换成 exe |
+| --- | --- | --- |
+| 引擎载荷 | `node_modules` **1,431 MB / 56,179 个文件**（含开发依赖） | 生产闭包 **125 MB**（跟随链接实测）+ 内置 node 约 90 MB ≈ **215 MB** |
+| 交付物 | 1,680 MB → zip **483 MB** | 估计 **~350 MB → zip ~200 MB** |
+| 文件数 | 5.6 万+ | 1（+ 仍需自带 Python 给 Worker 用） |
+
+也就是**大约 2.4 倍**，主要来自"砍掉开发依赖"，不是打包方式本身的魔法。
+真正的大头收益是**文件数从 5.6 万变成 1**（安装从解 5.6 万个文件变成复制 1 个）。
+
+**之前我在对话里说过"包能小一个量级"，那是没测之前的估计，实测不成立 —— 更正。**
+
+要继续做的话，前提是接受"每次构建需要人工确认一次"（或改 `allowBuilds`），
+并且还要验证那个 exe 接受我们的 `--profile web --patch … --port …`。
+
+> 另外还差一步才算"双击就好"：真正的单文件安装器（Inno Setup 那种）。现在是"一个 zip + 一次右键安装"，
+> 已经是可交付状态；做成 exe 属于下一步（和上面那个引擎 exe 是两件事）。
 
 ### 13.2.3 仍没有解决的
 
@@ -502,7 +539,7 @@ MessageAgent.exe / 计划任务
 | 2 | 微信密钥 DPAPI + 只在授权时扫内存 | ✅ **已完成并在真实实例验证** |
 | 3 | 打包实例的启动验证 | ⚠️ **仍未做**：本轮把"安装"验完了（0.8 分钟、文件齐备、配置正确），但"装完由计划任务拉起来能跑"这一幕没盯完 —— 真机安装时盯一次即可 |
 | 4 | 首次密钥扫描的界面按钮 | 没做。现在是「装完后右键运行 `读取微信密钥.ps1`」；界面侧还缺一个按钮（要求：必须用户点击、绝不自动） |
-| 5 | 引擎换成官方单文件 exe | 优化项：引擎仓库有 `scripts/build-exe-for-python-sdk.ts`（`@yao-pkg/pkg --sea`）可产出单个 exe，包能从 1.6 GB 掉一个量级。需先验证它接受 `--profile web --patch --port` |
+| 5 | 引擎换成官方单文件 exe | **测过了，看 §13.5**：需要 pnpm 环境 + 一个交互式确认，无人值守跑不完；收益约 2.4 倍（483 MB → 约 200 MB），不是数量级 |
 | 6 | `deploy-runtime.py` 迁往 runtime 仓库 | 已确认要做，未执行 |
 | 7 | 真机安装 | 装到 `%LOCALAPPDATA%\Programs\MessageAgent` 并迁移现有数据（保留旧目录做回退） |
 

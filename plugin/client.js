@@ -1146,87 +1146,109 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   }
 
   /** 首屏的一张卡：标题 + 一句说明 + 右上角操作。全页共用，保证节奏一致。 */
-  /**
-   * 微信数据库密钥。
-   *
-   * 为什么要有这张卡：助手要读消息，就必须先拿到微信数据库的密钥；而那个密钥只存在于
-   * 微信进程的内存里。**读内存是整套流程里唯一"碰微信"的敏感动作**，所以我们不自动做，
-   * 也不再要求用户去右键运行一个脚本 —— 就在这儿点。
-   *
-   * 点一次不够：按下去先出一段说明（会读一次内存、微信要在运行），再确认才真的读。
-   * 这是用户明确要求的行为：必须点，且必须知道自己在点什么。
-   */
-  function WeChatKeysCard({inline}){
-    const keys=usePoller(true,()=>api('wechat-keys'),30000);
+  function WeChatInitCard({inline}){
+    const keys=usePoller(true,()=>api('wechat-keys'),20000);
     const [stage,setStage]=useState('idle');   // idle | confirm | busy
-    const [error,setError]=useState('');
-    const [note,setNote]=useState('');
-    const data=keys.data?.keys;
-    const ready=!!data?.configured;
-    function readable(iso){
-      if(!iso)return '';
-      const at=new Date(iso);
-      if(isNaN(at))return '';
-      const pad=n=>String(n).padStart(2,'0');
-      return (at.getMonth()+1)+'月'+at.getDate()+'日 '+pad(at.getHours())+':'+pad(at.getMinutes());
-    }
+    const [error,setError]=useState(''),[note,setNote]=useState('');
+    const done=!!keys.data?.keys?.configured;
     async function run(){
       setStage('busy');setError('');setNote('');
       try{
-        const result=await api('wechat-keys',{action:'scan'});
-        setNote(result?.message||'已经读取并保存');
+        await api('wechat-keys',{action:'scan'});
+        setNote('完成');
         await keys.refresh();
       }catch(e){setError(e.message);}
       finally{setStage('idle');}
     }
-    const statusLine=ready
-      ? '已就绪：'+data.keyCount+' 条密钥'+(data.savedAt?('，上次读取 '+readable(data.savedAt)):'')
-      : (keys.loading?'正在检查…':'还没有读取密钥');
-    const body=[];
-    body.push(h('div',{key:'status',style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}},
-      h('span',{style:{...pill(ready?C.ok:C.warn),
-                       backgroundColor:ready?'var(--ma-success-soft)':'var(--ma-warning-soft)'}},
-        ready?'已就绪':'需要读取'),
-      h('span',{style:{fontSize:14,color:C.text2}},statusLine)));
-    if(ready&&!inline){
-      body.push(h('p',{key:'ok',style:{...hint,margin:'10px 0 0'}},
-        '以后启动直接用这份保存好的，不会再读微信内存。'));
-    }
-    if(!ready&&!inline){
-      body.push(h('p',{key:'why',style:{...hint,margin:'10px 0 0'}},
-        '读消息需要一把密钥，它只存在于微信运行时的内存里，所以必须由你点一次才能取到。'));
-    }
-    if(!ready&&inline){
-      body.push(h('p',{key:'why',style:{...hint,margin:'10px 0 0'}},
-        '如果已经读取过，确认微信已登录，稍等片刻这一页会自动出现内容。'));
-    }
-    if(data?.plainCount>0){
-      body.push(h('p',{key:'plain',style:{...hint,margin:'10px 0 0',color:C.warn}},
-        '检测到还有 '+data.plainCount+' 条密钥以明文留在磁盘上，读取完成后会自动清理。'));
-    }
+    // 已经初始化过：这张卡不出现（读不到状态时也不出现，避免闪一下又消失）
+    if(done||!keys.data)return null;
+    if(stage==='busy')return h('p',{style:{...hint,margin:0}},'正在初始化，可能要十几秒，不要关页面。');
     if(stage==='confirm'){
-      body.push(h('div',{key:'confirm',style:{marginTop:12,padding:14,borderRadius:10,
-          border:'1px solid var(--ma-warning)',backgroundColor:'var(--ma-warning-soft)'}},
-        h('strong',{style:{display:'block',fontSize:14,color:C.text,marginBottom:6}},'这一步会读一次微信的内存'),
+      return h('div',null,
         h('p',{style:{...hint,margin:'0 0 12px',color:C.text2}},
-          '微信需要在运行并且已经登录。取到的密钥会用 Windows 的密钥保护保存在这台电脑上（磁盘上不留明文），'
-          +'以后启动都直接用这份保存好的，不会再读内存。'),
+          '这一步会读一次微信的内存来取消息密钥。微信需要在运行并且已经登录。'
+          +'取到的密钥会用 Windows 的密钥保护保存在这台电脑上，以后不会再读内存。'),
         h('div',{style:{display:'flex',gap:10,flexWrap:'wrap'}},
-          h('button',{onClick:run,style:button(true)},'确认读取'),
-          h('button',{onClick:()=>setStage('idle'),style:button(false,false,true)},'取消'))));
-    }else if(!ready){
-      body.push(h('div',{key:'act',style:{marginTop:12,display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}},
-        h('button',{onClick:()=>setStage('confirm'),disabled:stage==='busy',style:button(true)},
-          stage==='busy'?'正在读取…':'读取微信密钥'),
-        stage==='busy'&&h('span',{style:hint},'这一步可能要十几秒，不要关页面。')));
-    }else{
-      body.push(h('div',{key:'act',style:{marginTop:12,display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}},
-        h('button',{onClick:()=>setStage('confirm'),disabled:stage==='busy',style:button(false,false,true)},
-          stage==='busy'?'正在读取…':'重新读取一次')));
+          h('button',{onClick:run,style:button(true)},'确认'),
+          h('button',{onClick:()=>setStage('idle'),style:button(false,false,true)},'取消')));
     }
-    body.push(h(Notice,{key:'err',error}));
-    body.push(h(Result,{key:'note',text:note}));
-    return h('div',null,body);
+    return h('div',null,
+      h('p',{style:{...hint,margin:'0 0 12px'}},'点一下完成初始化，之后这一页就会显示聊天。'),
+      inline?h('p',{style:{...hint,margin:'0 0 12px'}},'（如果已经初始化过，确认微信已登录，稍等片刻内容会自动出现。）'):null,
+      h('div',{style:{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}},
+        h('button',{onClick:()=>setStage('confirm'),style:button(true)},'初始化微信数据'),
+        note&&h('span',{style:hint},note)),
+      h(Notice,{error}));
+  }
+
+  /**
+   * 模型配置。
+   *
+   * 用户实测的问题：装完之后没人告诉他模型怎么配，不配就没法用。这里给两条路 ——
+   * 贴云端 key（主要路径，贴完立刻生效），或装本地模型（一条命令，不用联网）。
+   */
+  function ModelSetupCard(){
+    const status=usePoller(true,()=>api('status'),20000);
+    const catalog=usePoller(true,()=>api('models'),60000);
+    const [key,setKey]=useState(''),[busy,setBusy]=useState(false);
+    const [error,setError]=useState(''),[note,setNote]=useState('');
+    const models=catalog.data?.models||[];
+    async function save(){
+      setBusy(true);setError('');setNote('');
+      try{
+        await api('model-key',{key});
+        await catalog.refresh();
+        setKey('');
+        setNote(models.length?'已保存，模型列表已更新':'已保存');
+      }catch(e){setError(e.message);}
+      finally{setBusy(false);}
+    }
+    const current=status.data?.model||'';
+    const body=[
+      h('p',{key:'now',style:{...hint,margin:'0 0 12px'}},
+        models.length?('当前可用模型 '+models.length+' 个'+(current?('，默认 '+current):''))
+          :'还没有可用的模型。下面贴一串云端 API key 就能用；不想用云端就装本地模型。'),
+      h('div',{key:'form',style:{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}},
+        h('input',{type:'password',value:key,placeholder:'粘贴云端 API key','aria-label':'云端 API key',
+          onChange:event=>setKey(event.target.value),style:{...field,flex:'1 1 260px'}}),
+        h('button',{onClick:save,disabled:busy||key.trim().length<12,style:button(true)},
+          busy?'正在保存…':'保存并启用')),
+      h('p',{key:'safe',style:{...hint,margin:'10px 0 0'}},
+        'key 保存后用 Windows 的密钥保护加密，磁盘上不留明文，保存完立刻生效。'),
+      h('p',{key:'local',style:{...hint,margin:'6px 0 0'}},
+        '不想用云端：右键运行安装目录里的 install-local-model.ps1，它会装好本地模型并接进来（不需要联网）。'),
+      h(Notice,{key:'err',error}),
+      h(Result,{key:'note',text:note})];
+    return h('section',{style:card},
+      h('h2',{style:{...h2,margin:'0 0 6px'}},'模型'),
+      h('p',{style:{...hint,margin:'0 0 10px'}},
+        '写回复、整理消息都要用一个大模型。两种用法：云端（一串 key，开箱即用）或本地（在这台电脑上跑，不联网）。'),
+      h('div',null,body));
+  }
+
+  /**
+   * 首页「还没有读到会话」那张卡。内容随"初始化过没有"变：
+   * 没初始化 → 一个按钮；初始化过 → 一句提示（说明是微信没登录/还没同步）。
+   * 状态没回来时整张卡不出现，避免"闪一下又变"。
+   */
+  function WeChatEmptyCard(){
+    const keys=usePoller(true,()=>api('wechat-keys'),20000);
+    if(!keys.data)return null;
+    if(keys.data.keys?.configured){
+      return h(HomeCard,{title:'还没有读到会话'},
+        h('p',{style:{...hint,margin:0}},'确认微信已登录，稍等片刻这一页会自动出现内容。'));
+    }
+    return h(HomeCard,{title:'还没有读到会话'},h(WeChatInitCard,{}));
+  }
+
+  /** 设置页里的同一件事：初始化完成后整块消失（用户要求：读过就别再显示）。 */
+  function WeChatInitSection(){
+    const keys=usePoller(true,()=>api('wechat-keys'),20000);
+    if(!keys.data||keys.data.keys?.configured)return null;
+    return h('section',{style:card},
+      h('h2',{style:{...h2,margin:'0 0 6px'}},'微信数据'),
+      h('p',{style:{...hint,margin:'0 0 10px'}},'助手要读消息，先初始化一次。'),
+      h(WeChatInitCard,{}));
   }
 
   function HomeCard({title,meta,action,children}){
@@ -1481,7 +1503,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h(Notice,{error,dev:home.errorDev,code:home.errorCode}),
         h(Result,{text:note}),
         h(StatStrip,{totals}),
-        !totals.conversations&&h(HomeCard,{title:'还没有读到会话'},h(WeChatKeysCard,{inline:true})),
+        !totals.conversations&&h(WeChatEmptyCard,{}),
         result?h(OrganizeResult,{result,busy:busy||organizing,picked,added,
           onCheck:(index,on)=>setPicked(old=>({...old,[index]:on})),
           onAdd:addPicked,onOpen:openConversation}):null,
@@ -2619,11 +2641,9 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
               h('strong',{style:{display:'block',fontSize:16,color:C.text}},ok?'消息服务运行正常':'正在检查消息服务'),
               h('span',{style:{fontSize:13,color:C.text3}},data?('已接入 '+data.rules.length+' 个联系人'):'请稍等…'))),
            h('p',{style:{marginTop:16,color:C.text2,fontSize:14,lineHeight:1.8}},'自动回复规则和发送记录保存在这台电脑上。使用云端模型时，为了生成回复，相关聊天内容会发送给模型服务。')),
-        // 微信密钥放在这里，和"服务是否正常"挨着：用户遇到"读不到消息"时第一眼就该看到它。
-        h('section',{style:card},
-          h('h2',{style:{...h2,margin:'0 0 6px'}},'微信数据'),
-          h('p',{style:{...hint,margin:'0 0 6px'}},'助手读消息需要一把密钥，它只能由你点一次取到。取到的密钥用 Windows 的密钥保护加密保存在这台电脑上。'),
-          h(WeChatKeysCard,{})),
+        // 初始化完成后这块自己消失（用户要求：已经读过就别再显示，免得反复点触发风险）。
+        h(WeChatInitSection,{}),
+        h(ModelSetupCard,{}),
         h(TaskModelPicker,{title:'自动回复模型',
           description:'管的是后台自动回复由谁来写。选本地模型（如「本地 Qwen」）时，那一轮回复的内容不会离开这台电脑。修改后从下一条新消息开始生效。',
           catalog,provider:autoProvider,model:autoModel,saving:saving==='auto',

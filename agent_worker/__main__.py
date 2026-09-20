@@ -12,6 +12,7 @@ import uuid
 from .service import Worker, RuntimeToolError, is_system_entry, error_trace, names_match, name_key, strip_ocr_noise
 from .harness import Harness
 from . import wechat_keys
+from . import secrets_store
 
 
 # 同一时刻只允许一次"读取微信密钥"（会读进程内存）。连点两下只能跑一次。
@@ -184,6 +185,21 @@ def handler(worker, token):
                                                 'dev': dev_block(error, 'worker:wechat-keys/scan')})
                         finally:
                             scan_guard.release()
+                elif self.path == '/api/model-key':
+                    # 界面里粘贴的云端 API key。存进 Windows 密钥保护（和安装程序同一个文件），
+                    # 磁盘上不留明文。**合并写入**：不能把已经配好的本地模型 key 一起抹掉。
+                    key = data.get('key')
+                    if not isinstance(key, str) or len(key.strip()) < 12 or any(c.isspace() for c in key.strip()):
+                        raise ValueError('这串 key 看起来不对（太短或含空格）')
+                    store = Path(worker.config.get('credentials_dir')
+                                 or (Path(worker.config['control_token_file']).parent / 'credentials'))
+                    store.mkdir(parents=True, exist_ok=True)
+                    target = store / 'model-cloud.dat'
+                    current = secrets_store.read_secret(target) or {}
+                    current['DEEPSEEK_API_KEY'] = key.strip()
+                    current['saved_by'] = 'ui'
+                    secrets_store.write_secret(target, current)
+                    self.response(200, {'ok': True, 'provider': 'deepseek-official'})
                 elif self.path == '/api/db_messages':
                     # 读 DB 会话消息（username 定位），供「分析说话方式」等使用，不再 OCR 打开会话。
                     username = data.get('username')
