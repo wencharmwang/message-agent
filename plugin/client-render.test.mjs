@@ -185,6 +185,22 @@ test('自动回复页可以拖动重排、也能一键置顶', () => {
   assert.match(page, /alignItems:'stretch'/);
 });
 
+test('拖动时卡片要有实底，不能靠淡化表示"正在拖"', () => {
+  const page = source.slice(source.indexOf('function AutomationPage('), source.indexOf('function ProfileForm('));
+  // 卡片是玻璃底（半透明），一淡化文字就糊在页面上 —— 用户实测「拖动时卡片没有背景，
+  // 看不清文字」。所以被拖的那张垫实底、不淡化。
+  assert.doesNotMatch(page, /opacity:\.4/, '不要用淡化表示被拖动');
+  assert.match(page, /dragIndex===index\?\{backgroundColor:'var\(--ma-surface\)'/);
+  // 落点用实线 + 品牌色，和被拖的虚线分开。
+  assert.match(page, /outline:'2px dashed '\+C\.brand/);
+  assert.match(page, /outline:'2px solid '\+C\.brand/);
+  // 跟着光标走的影像也要不透明：浏览器默认给的是拖动前快照（玻璃底，糊）。
+  assert.match(page, /function dragGhost\(event\)/);
+  assert.match(page, /setDragImage\(ghost,24,20\)/);
+  assert.match(page, /ghost\.style\.backgroundColor='var\(--ma-surface\)'/);
+  assert.ok(page.indexOf('document.body.appendChild(ghost)') < page.indexOf('setDragImage(ghost'));
+});
+
 test('两个任务各配各的模型（自动回复 / 整理消息），都支持本地模型', () => {
   const picker = source.slice(source.indexOf('function TaskModelPicker('), source.indexOf('function SettingsPage('));
   const settings = source.slice(source.indexOf('function SettingsPage('), source.indexOf('function parseBlock('));

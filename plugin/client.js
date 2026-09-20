@@ -1896,6 +1896,27 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       if(!first||rules[0]?.id===id)return;
       saveOrder([first,...rules.filter(rule=>rule.id!==id)]);
     }
+    /**
+     * 自己造一块不透明的拖动影像。
+     *
+     * 浏览器默认的影像是"按下那一刻的快照"，而卡片是**玻璃底**（半透明的
+     * `--lg-card-bg`），跟着光标走的那一块几乎透光，字糊在页面上看不清（用户实测：
+     * 「拖动时卡片没有背景，看不清文字」）。这里复制一份、垫上实底再交给 setDragImage。
+     */
+    function dragGhost(event){
+      try{
+        const node=event.currentTarget,rect=node.getBoundingClientRect();
+        const ghost=node.cloneNode(true);
+        ghost.style.position='fixed';ghost.style.top='-10000px';ghost.style.left='-10000px';
+        ghost.style.width=rect.width+'px';ghost.style.height=rect.height+'px';ghost.style.margin='0';
+        ghost.style.backgroundColor='var(--ma-surface)';
+        ghost.style.borderRadius='var(--lg-r-lg)';
+        ghost.style.boxShadow='var(--ma-shadow)';
+        document.body.appendChild(ghost);
+        event.dataTransfer.setDragImage(ghost,24,20);
+        setTimeout(()=>ghost.remove(),0);
+      }catch{/* 自定义影像失败不影响拖动本身 */}
+    }
     // 「我知道了」：把这条规则上没确认的记录标成已看过，提醒就不再出现。
     // 首页那张「自动回复需要你看一眼」的卡片点进来之后，这里也得能处理 —— 否则跳过来
     // 什么都点不了，等于把提醒永久挂着（用户实测报的就是这个）。
@@ -1963,13 +1984,19 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           rules.map((rule,index)=>h('div',{
             key:rule.id,draggable:true,
             onDragStart:event=>{setDragIndex(index);event.dataTransfer.effectAllowed='move';
-              try{event.dataTransfer.setData('text/plain',rule.id);}catch{/* 老浏览器不支持就算了 */}},
+              try{event.dataTransfer.setData('text/plain',rule.id);}catch{/* 老浏览器不支持就算了 */}
+              dragGhost(event);},
             onDragOver:event=>{if(dragIndex===null)return;event.preventDefault();if(dropIndex!==index)setDropIndex(index);},
             onDragLeave:()=>{if(dropIndex===index)setDropIndex(null);},
             onDrop:event=>{event.preventDefault();dropOn(index);},
             onDragEnd:()=>{setDragIndex(null);setDropIndex(null);},
-            style:{...(dragIndex===index?{opacity:.4}:null),
-              ...(dropIndex===index&&dragIndex!==null?{outline:'2px dashed '+C.brand,outlineOffset:3,borderRadius:'var(--lg-r-lg)'}:null)}},
+            // 被拖的那张：**垫实底、不淡化**。卡片自己是玻璃底，一淡化就糊在页面上读不了。
+            // 落点用实线 + 品牌色，和"被拖的虚线"分开，两者不会看错。
+            style:{
+              ...(dragIndex===index?{backgroundColor:'var(--ma-surface)',
+                outline:'2px dashed '+C.brand,outlineOffset:3,borderRadius:'var(--lg-r-lg)'}:null),
+              ...(dropIndex===index&&dragIndex!==null?{backgroundColor:'var(--ma-surface)',
+                outline:'2px solid '+C.brand,outlineOffset:3,borderRadius:'var(--lg-r-lg)'}:null)}},
             h(RuleCard,{rule,onAction:action,onTop:()=>moveToTop(rule.id)})))),
         h('section',{style:{...card,display:'flex',justifyContent:'space-between',alignItems:'center',gap:16,flexWrap:'wrap',marginTop:22,boxShadow:'none'}},
           h('div',{style:{display:'flex',gap:12,alignItems:'center',minWidth:240,flex:1}},
