@@ -1038,6 +1038,23 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
         });
         return true;
       }
+      // 微信数据库密钥：状态查询 + **用户授权后**读一次。
+      // 这套密钥只能从微信进程内存里取，所以"读一次"必须由人点按钮触发；这里只做转发，
+      // 真正的读取在 Worker 里（同一份实现，安装程序也用它）。
+      if (path === '/message-agent/api/wechat-keys' && req.method === 'GET') {
+        const {keys} = await runtime.wechatKeys();
+        respond(res, 200, {keys: keys ?? null});
+        return true;
+      }
+      if (path === '/message-agent/api/wechat-keys' && req.method === 'POST') {
+        const payload = await readBody(req);
+        if (payload?.action && payload.action !== 'scan') {
+          throw Object.assign(new Error('不支持的操作'), {code: 'CONTEXT_INVALID'});
+        }
+        const result = await runtime.scanWechatKeys({force: !!payload?.force});
+        respond(res, 200, result);
+        return true;
+      }
       // 拖拽/置顶之后的顺序。只存 id 顺序，不碰规则本身。
       if (path === '/message-agent/api/rules/order' && req.method === 'POST') {
         const payload = await readBody(req);

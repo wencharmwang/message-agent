@@ -1146,6 +1146,89 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   }
 
   /** 首屏的一张卡：标题 + 一句说明 + 右上角操作。全页共用，保证节奏一致。 */
+  /**
+   * 微信数据库密钥。
+   *
+   * 为什么要有这张卡：助手要读消息，就必须先拿到微信数据库的密钥；而那个密钥只存在于
+   * 微信进程的内存里。**读内存是整套流程里唯一"碰微信"的敏感动作**，所以我们不自动做，
+   * 也不再要求用户去右键运行一个脚本 —— 就在这儿点。
+   *
+   * 点一次不够：按下去先出一段说明（会读一次内存、微信要在运行），再确认才真的读。
+   * 这是用户明确要求的行为：必须点，且必须知道自己在点什么。
+   */
+  function WeChatKeysCard({inline}){
+    const keys=usePoller(true,()=>api('wechat-keys'),30000);
+    const [stage,setStage]=useState('idle');   // idle | confirm | busy
+    const [error,setError]=useState('');
+    const [note,setNote]=useState('');
+    const data=keys.data?.keys;
+    const ready=!!data?.configured;
+    function readable(iso){
+      if(!iso)return '';
+      const at=new Date(iso);
+      if(isNaN(at))return '';
+      const pad=n=>String(n).padStart(2,'0');
+      return (at.getMonth()+1)+'月'+at.getDate()+'日 '+pad(at.getHours())+':'+pad(at.getMinutes());
+    }
+    async function run(){
+      setStage('busy');setError('');setNote('');
+      try{
+        const result=await api('wechat-keys',{action:'scan'});
+        setNote(result?.message||'已经读取并保存');
+        await keys.refresh();
+      }catch(e){setError(e.message);}
+      finally{setStage('idle');}
+    }
+    const statusLine=ready
+      ? '已就绪：'+data.keyCount+' 条密钥'+(data.savedAt?('，上次读取 '+readable(data.savedAt)):'')
+      : (keys.loading?'正在检查…':'还没有读取密钥');
+    const body=[];
+    body.push(h('div',{key:'status',style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}},
+      h('span',{style:{...pill(ready?C.ok:C.warn),
+                       backgroundColor:ready?'var(--ma-success-soft)':'var(--ma-warning-soft)'}},
+        ready?'已就绪':'需要读取'),
+      h('span',{style:{fontSize:14,color:C.text2}},statusLine)));
+    if(ready&&!inline){
+      body.push(h('p',{key:'ok',style:{...hint,margin:'10px 0 0'}},
+        '以后启动直接用这份保存好的，不会再读微信内存。'));
+    }
+    if(!ready&&!inline){
+      body.push(h('p',{key:'why',style:{...hint,margin:'10px 0 0'}},
+        '读消息需要一把密钥，它只存在于微信运行时的内存里，所以必须由你点一次才能取到。'));
+    }
+    if(!ready&&inline){
+      body.push(h('p',{key:'why',style:{...hint,margin:'10px 0 0'}},
+        '如果已经读取过，确认微信已登录，稍等片刻这一页会自动出现内容。'));
+    }
+    if(data?.plainCount>0){
+      body.push(h('p',{key:'plain',style:{...hint,margin:'10px 0 0',color:C.warn}},
+        '检测到还有 '+data.plainCount+' 条密钥以明文留在磁盘上，读取完成后会自动清理。'));
+    }
+    if(stage==='confirm'){
+      body.push(h('div',{key:'confirm',style:{marginTop:12,padding:14,borderRadius:10,
+          border:'1px solid var(--ma-warning)',backgroundColor:'var(--ma-warning-soft)'}},
+        h('strong',{style:{display:'block',fontSize:14,color:C.text,marginBottom:6}},'这一步会读一次微信的内存'),
+        h('p',{style:{...hint,margin:'0 0 12px',color:C.text2}},
+          '微信需要在运行并且已经登录。取到的密钥会用 Windows 的密钥保护保存在这台电脑上（磁盘上不留明文），'
+          +'以后启动都直接用这份保存好的，不会再读内存。'),
+        h('div',{style:{display:'flex',gap:10,flexWrap:'wrap'}},
+          h('button',{onClick:run,style:button(true)},'确认读取'),
+          h('button',{onClick:()=>setStage('idle'),style:button(false,false,true)},'取消'))));
+    }else if(!ready){
+      body.push(h('div',{key:'act',style:{marginTop:12,display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}},
+        h('button',{onClick:()=>setStage('confirm'),disabled:stage==='busy',style:button(true)},
+          stage==='busy'?'正在读取…':'读取微信密钥'),
+        stage==='busy'&&h('span',{style:hint},'这一步可能要十几秒，不要关页面。')));
+    }else{
+      body.push(h('div',{key:'act',style:{marginTop:12,display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}},
+        h('button',{onClick:()=>setStage('confirm'),disabled:stage==='busy',style:button(false,false,true)},
+          stage==='busy'?'正在读取…':'重新读取一次')));
+    }
+    body.push(h(Notice,{key:'err',error}));
+    body.push(h(Result,{key:'note',text:note}));
+    return h('div',null,body);
+  }
+
   function HomeCard({title,meta,action,children}){
     return h('section',{style:card},
       h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,marginBottom:children?12:0}},
@@ -1398,8 +1481,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h(Notice,{error,dev:home.errorDev,code:home.errorCode}),
         h(Result,{text:note}),
         h(StatStrip,{totals}),
-        !totals.conversations&&h(HomeCard,{title:'还没有读到会话'},
-          h('p',{style:{...hint,margin:0}},'现在没有读到聊天。确认微信已登录，稍等片刻这一页会自动出现内容。')),
+        !totals.conversations&&h(HomeCard,{title:'还没有读到会话'},h(WeChatKeysCard,{inline:true})),
         result?h(OrganizeResult,{result,busy:busy||organizing,picked,added,
           onCheck:(index,on)=>setPicked(old=>({...old,[index]:on})),
           onAdd:addPicked,onOpen:openConversation}):null,
@@ -2537,6 +2619,11 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
               h('strong',{style:{display:'block',fontSize:16,color:C.text}},ok?'消息服务运行正常':'正在检查消息服务'),
               h('span',{style:{fontSize:13,color:C.text3}},data?('已接入 '+data.rules.length+' 个联系人'):'请稍等…'))),
            h('p',{style:{marginTop:16,color:C.text2,fontSize:14,lineHeight:1.8}},'自动回复规则和发送记录保存在这台电脑上。使用云端模型时，为了生成回复，相关聊天内容会发送给模型服务。')),
+        // 微信密钥放在这里，和"服务是否正常"挨着：用户遇到"读不到消息"时第一眼就该看到它。
+        h('section',{style:card},
+          h('h2',{style:{...h2,margin:'0 0 6px'}},'微信数据'),
+          h('p',{style:{...hint,margin:'0 0 6px'}},'助手读消息需要一把密钥，它只能由你点一次取到。取到的密钥用 Windows 的密钥保护加密保存在这台电脑上。'),
+          h(WeChatKeysCard,{})),
         h(TaskModelPicker,{title:'自动回复模型',
           description:'管的是后台自动回复由谁来写。选本地模型（如「本地 Qwen」）时，那一轮回复的内容不会离开这台电脑。修改后从下一条新消息开始生效。',
           catalog,provider:autoProvider,model:autoModel,saving:saving==='auto',

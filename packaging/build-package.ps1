@@ -219,7 +219,7 @@ if ($SkipEngine) {
 # -- 5. 脚本与说明 ----------------------------------------------------------
 Step '复制安装脚本与说明'
 # **按类型整体复制，不列白名单**。之前是手写清单，结果 install.ps1 里加了
-# wechat_keys.py / 读取微信密钥.ps1，这里忘加 —— 装完第 7 步报"脚本不存在"。
+# wechat_keys.py / read-wechat-keys.ps1，这里忘加 —— 装完第 7 步报"脚本不存在"。
 # 这类清单漂移只能靠"不列清单"根治。
 $copied = 0
 foreach ($file in (Get-ChildItem -LiteralPath $PSScriptRoot -File |

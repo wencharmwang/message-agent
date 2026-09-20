@@ -20,7 +20,12 @@ import ctypes
 import json
 import os
 from ctypes import wintypes
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
 # UI 交互禁止：服务是后台进程，弹不出也不该弹任何窗口。
 CRYPTPROTECT_UI_FORBIDDEN = 0x1
@@ -118,14 +123,18 @@ def store_wechat_keys(path: str | Path, keys: dict, *, account: str, source: str
     """保存微信数据库密钥。
 
     只多存一个**账号名**（wechat-db-lab 的密钥缓存是按账号分文件的，运行时要把文件写成
-    `<账号>.json`）。密钥内容原样保存，不改上游组件的格式。
+    `<账号>.json`）和一个**保存时间**（界面要显示"上次读取：几号几点"）。
+    密钥内容原样保存，不改上游组件的格式。
     """
-    write_secret(path, {'version': 1, 'account': account, 'source': source, 'keys': keys})
+    write_secret(path, {'version': 1, 'account': account, 'source': source,
+                        'saved_at': _now(), 'keys': keys})
 
 
-def load_wechat_keys(path: str | Path) -> tuple[str, dict] | None:
-    """返回 (账号名, 密钥表)。读不到或格式不对返回 None。"""
+def load_wechat_keys(path: str | Path) -> tuple[str, dict, str] | None:
+    """返回 (账号名, 密钥表, 保存时间)。读不到或格式不对返回 None。"""
     payload = read_secret(path)
     if not payload or not isinstance(payload.get('keys'), dict) or not payload['keys']:
         return None
-    return str(payload.get('account') or 'account'), payload['keys']
+    return (str(payload.get('account') or 'account'), payload['keys'],
+            str(payload.get('saved_at') or ''))
+

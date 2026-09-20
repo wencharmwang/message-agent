@@ -10,14 +10,14 @@ export class RuntimeAdapter {
     this.token = token;
     this.timeoutMs = timeoutMs;
   }
-  async #call(method, path, data) {
+  async #call(method, path, data, timeoutMs = this.timeoutMs) {
     let upstream;
     try {
       upstream = await fetch(`http://127.0.0.1:${this.controlPort}${path}`, {
         method,
         headers: {Authorization: 'Bearer ' + this.token, 'Content-Type': 'application/json'},
         body: data === undefined ? undefined : JSON.stringify(data),
-        signal: AbortSignal.timeout(this.timeoutMs)
+        signal: AbortSignal.timeout(timeoutMs)
       });
     } catch (cause) {
       // A refused connection is not the same as a slow one, and the caller used to lose
@@ -35,7 +35,11 @@ export class RuntimeAdapter {
       // wechat_in_use, …) to a plain sentence. Flattening it to WORKER_ERROR lost that and
       // showed the user a raw code instead. `dev` carries the worker's own diagnostics
       // block through untouched — the developer view is the only consumer.
-      throw Object.assign(new Error(result.error || '消息服务请求失败'),
+      //
+      // `result.message` also counts as an upstream explanation: 有些接口（例如读取微信密钥）
+      // 用的是 {ok:false, message} 这种形状，只认 `error` 会把它换成一句"消息服务请求失败"，
+      // 用户就看不到"为什么没读到"。实测踩到。
+      throw Object.assign(new Error(result.error || result.message || '消息服务请求失败'),
         {code: result.code || 'WORKER_ERROR', status: upstream.status,
          detail: result.detail ?? '', dev: result.dev ?? null});
     }
@@ -111,5 +115,19 @@ export class RuntimeAdapter {
    */
   sendMessage({provider, conversation, text, requestId}) {
     return this.#call('POST', '/api/send', {provider, conversation_id: conversation, text, request_id: requestId});
+  }
+  /**
+   * 微信数据库密钥的状态：有没有、上次什么时候读的、明文残留清没清。
+   * 纯本地状态读取，不碰微信进程，也不返回密钥内容。
+   */
+  wechatKeys() {
+    return this.#call('GET', '/api/wechat-keys');
+  }
+  /**
+   * **用户点了授权按钮**才会调这里：读一次微信进程内存取出数据库密钥。
+   * 这是整套流程里唯一读进程内存的入口，所以超时给得比别的调用长（要跑一次解锁）。
+   */
+  scanWechatKeys({force = false} = {}) {
+    return this.#call('POST', '/api/wechat-keys/scan', {force}, 180000);
   }
 }

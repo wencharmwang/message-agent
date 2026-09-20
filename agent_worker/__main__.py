@@ -11,6 +11,31 @@ import time
 import uuid
 from .service import Worker, RuntimeToolError, is_system_entry, error_trace, names_match, name_key, strip_ocr_noise
 from .harness import Harness
+from . import wechat_keys
+
+
+# 同一时刻只允许一次"读取微信密钥"（会读进程内存）。连点两下只能跑一次。
+scan_guard = threading.Lock()
+
+
+def keys_context(worker):
+    """把 Worker 的配置翻成密钥模块需要的路径。
+
+    credentials_dir 是密钥的落脚点（DPAPI 存储）。老配置里没有这个键时，
+    退回到"数据目录下的 credentials"，与安装器生成的布局一致。
+    """
+    config = worker.config
+    data_dir = Path(config['control_token_file']).parent
+    credentials = Path(config.get('credentials_dir') or (data_dir / 'credentials'))
+    src = config.get('watcher_src')
+    workspace = config.get('watcher_workspace')
+    run_dir = config.get('run_dir')
+    return wechat_keys.Context(
+        credentials_dir=credentials,
+        db_lab_src=Path(src) if isinstance(src, str) and src else None,
+        workspace=Path(workspace) if isinstance(workspace, str) and workspace else None,
+        run_dir=Path(run_dir) if isinstance(run_dir, str) and run_dir else (data_dir / 'run'),
+    )
 
 
 def load_config(path):
@@ -119,6 +144,10 @@ def handler(worker, token):
                 except Exception as error:
                     self.response(503, {'error': '无法读取会话列表，请检查微信和 Runtime',
                                         'dev': dev_block(error, 'worker:conversations')})
+            elif self.path == '/api/wechat-keys':
+                # 只读状态：有没有可用密钥、上次什么时候读的、明文残留清没清。
+                # 永不返回密钥内容。
+                self.response(200, {'keys': wechat_keys.status(keys_context(worker))})
             elif self.path == '/api/observe':
                 # Cached discovery result: the product polls this often, and each call
                 # here must not turn into another WeChat read.
@@ -140,7 +169,22 @@ def handler(worker, token):
                 if not 0 < length <= 20000:
                     raise ValueError('Invalid request size')
                 data = json.loads(self.rfile.read(length))
-                if self.path == '/api/db_messages':
+                if self.path == '/api/wechat-keys/scan':
+                    # **用户点过授权**才会走到这里。这是整套流程里唯一会去读微信进程内存的
+                    # 入口：日常启动只看 DPAPI 里存好的密钥（launch.py 那条路）。
+                    # 加锁：连点两下不该同时跑两次内存扫描。
+                    if not scan_guard.acquire(blocking=False):
+                        self.response(409, {'error': '正在读取中，请稍等'})
+                    else:
+                        try:
+                            result = wechat_keys.scan(keys_context(worker), force=bool(data.get('force')))
+                            self.response(200 if result.get('ok') else 503, result)
+                        except Exception as error:
+                            self.response(500, {'error': '读取密钥失败',
+                                                'dev': dev_block(error, 'worker:wechat-keys/scan')})
+                        finally:
+                            scan_guard.release()
+                elif self.path == '/api/db_messages':
                     # 读 DB 会话消息（username 定位），供「分析说话方式」等使用，不再 OCR 打开会话。
                     username = data.get('username')
                     if not isinstance(username, str) or not username:

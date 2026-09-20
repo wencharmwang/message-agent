@@ -117,7 +117,7 @@ def main():
     # （那一次走 packaging/读取微信密钥.ps1，会显式开放扫描）。
     stored = secrets_store.load_wechat_keys(credentials / secrets_store.WECHAT_KEYS_FILE)
     if stored:
-        account, stored_keys = stored
+        account, stored_keys, _saved_at = stored
         write_wechat_key_cache(Path(config.get('run_dir') or (credentials / 'run')), account, stored_keys)
         worker_env['WECHAT_DB_LAB_KEYS_DIR'] = str(Path(config.get('run_dir') or (credentials / 'run')) / 'keys')
     else:

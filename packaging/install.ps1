@@ -167,10 +167,12 @@ Copy-Component (Join-Path $Source 'runtimes\python') (Join-Path $InstallDir 'run
 $dblabSrc = Join-Path $InstallDir 'components\wechat-db-lab\src'
 Copy-Component (Join-Path $Source 'components\wechat-db-lab\src') (Join-Path $InstallDir 'components\wechat-db-lab') 'wechat_db_lab\__init__.py' '取密钥/解密组件' | Out-Null
 
-# 脚本与说明
-foreach ($s in 'start.ps1', 'stop.ps1', 'restart.ps1', 'uninstall.ps1', 'MessageAgent.cmd', '安装说明.md', 'make_config.py', 'config.template.json', 'wechat_keys.py', '读取微信密钥.ps1') {
-  $from = Join-Path $Source $s
-  if (Test-Path -LiteralPath $from) { Copy-Item -LiteralPath $from -Destination $InstallDir -Force }
+# 脚本与说明：**按类型整体复制，不列白名单**。
+# 原来这里和 build-package.ps1 各写一份清单，加 wechat_keys.py 时只改了这里 ——
+# 打包端没带上，装到第 7 步才报"脚本不存在"。清单一定会漂，索性不列。
+foreach ($file in (Get-ChildItem -LiteralPath $Source -File |
+    Where-Object { $_.Extension -in '.ps1', '.py', '.cmd', '.md', '.json' -and $_.Name -ne 'manifest.json' })) {
+  Copy-Item -LiteralPath $file.FullName -Destination $InstallDir -Force
 }
 Ok '程序文件就位'
 
@@ -353,9 +355,9 @@ if ($hasKeys) {
     $scanOutput = & $pythonConsole $keysScript 'scan' 2>&1
     $scanOutput | ForEach-Object { Say ("    " + $_) 'DarkGray' }
     if (Test-Path -LiteralPath $keyStore) { Ok '密钥已加密保存' }
-    else { Warn '没有读到密钥。装好后可以右键运行安装目录里的「读取微信密钥.ps1」再试。' }
+    else { Warn '没有读到密钥。装好后可以右键运行安装目录里的「read-wechat-keys.ps1」再试。' }
   } else {
-    Warn '先跳过。装好后右键运行安装目录里的「读取微信密钥.ps1」即可（也只有那一次会读内存）。'
+    Warn '先跳过。装好后右键运行安装目录里的「read-wechat-keys.ps1」即可（也只有那一次会读内存）。'
   }
 }
 
