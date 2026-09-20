@@ -137,4 +137,15 @@ export class RuntimeAdapter {
   setModelKey({key}) {
     return this.#call('POST', '/api/model-key', {key});
   }
+  /** 可选的模型供应商目录 + 哪些已经配过（只读，不含密钥）。 */
+  modelProviders() {
+    return this.#call('GET', '/api/model-providers');
+  }
+  /**
+   * 配一家模型供应商：写进引擎配置 + 保存 key（Windows 密钥保护）。
+   * 返回值里带 keyEnv —— Host 要用它设 process.env 才能立刻生效。
+   */
+  setModelProvider({provider, key, baseUrl, model}) {
+    return this.#call('POST', '/api/model-provider', {provider, key, baseUrl, model}, 120000);
+  }
 }

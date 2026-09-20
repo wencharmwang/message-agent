@@ -1184,46 +1184,83 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   /**
    * 模型配置。
    *
-   * 用户实测的问题：装完之后没人告诉他模型怎么配，不配就没法用。这里给两条路 ——
-   * 贴云端 key（主要路径，贴完立刻生效），或装本地模型（一条命令，不用联网）。
+   * 用户实测的两个问题：① 装完没人告诉他模型怎么配，不配就没法用；
+   * ② 只给一个 key 输入框不够 —— 得能选供应商（OpenAI / Claude / 通义 / 智谱 / Kimi / 本地…）。
+   *
+   * 所以做成"选一家 + 贴 key"：预设由后端给（供应商目录），用户不用知道协议、地址这些。
+   * 「其它」那一项留了地址和模型名，任何 OpenAI 兼容的服务都能接。
    */
   function ModelSetupCard(){
     const status=usePoller(true,()=>api('status'),20000);
     const catalog=usePoller(true,()=>api('models'),60000);
-    const [key,setKey]=useState(''),[busy,setBusy]=useState(false);
-    const [error,setError]=useState(''),[note,setNote]=useState('');
+    const providers=usePoller(true,()=>api('model-providers'),60000);
+    const [picked,setPicked]=useState(''),[key,setKey]=useState('');
+    const [baseUrl,setBaseUrl]=useState(''),[model,setModel]=useState('');
+    const [busy,setBusy]=useState(false),[error,setError]=useState(''),[note,setNote]=useState('');
+    const list=providers.data?.providers||[];
+    const configured=providers.data?.configured||[];
     const models=catalog.data?.models||[];
+    // 默认选中"还没配过的第一家"：新用户打开就能直接贴 key，不用先想选谁。
+    const current=list.find(p=>p.id===picked)||list.find(p=>!configured.includes(p.id))||list[0];
     async function save(){
+      if(!current)return;
       setBusy(true);setError('');setNote('');
       try{
-        await api('model-key',{key});
-        await catalog.refresh();
+        const result=await api('model-provider',{provider:current.id,key,baseUrl,model});
+        await Promise.all([catalog.refresh(),providers.refresh()]);
+        setNote(result?.message||'已保存');
         setKey('');
-        setNote(models.length?'已保存，模型列表已更新':'已保存');
+        if(current.id!=='custom'){setBaseUrl('');setModel('');}
       }catch(e){setError(e.message);}
       finally{setBusy(false);}
     }
-    const current=status.data?.model||'';
-    const body=[
-      h('p',{key:'now',style:{...hint,margin:'0 0 12px'}},
-        models.length?('当前可用模型 '+models.length+' 个'+(current?('，默认 '+current):''))
-          :'还没有可用的模型。下面贴一串云端 API key 就能用；不想用云端就装本地模型。'),
-      h('div',{key:'form',style:{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}},
-        h('input',{type:'password',value:key,placeholder:'粘贴云端 API key','aria-label':'云端 API key',
+    const needKey=!!current?.needsKey&&!current?.builtin;
+    const canSave=!!current&&(!needKey||key.trim().length>=8)&&(current.id!=='custom'||baseUrl.trim().length>0);
+    const rows=[
+      h('p',{key:'state',style:{...hint,margin:'0 0 12px'}},
+        models.length?('当前可用模型 '+models.length+' 个'+(status.data?.model?('，默认 '+status.data.model):''))
+          :'还没有可用的模型 —— 选一家供应商、贴上它的 API key 就能用。'),
+      h('div',{key:'pick',style:{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}},
+        h(Select,{value:current?.id||'',
+          groups:[{items:list.map(p=>({value:p.id,label:p.name+(configured.includes(p.id)?'（已配置）':''),hint:p.builtin?'内置':''}))}],
+          onChange:value=>{setPicked(value);setNote('');setError('');},
+          ariaLabel:'模型供应商',minWidth:260}),
+        current?.keyUrl?h('a',{key:'k',href:current.keyUrl,target:'_blank',rel:'noreferrer',
+            style:{fontSize:13,color:C.brand,whiteSpace:'nowrap'}},'去哪拿 key →'):null)];
+
+    if(current?.note&&current.id!=='custom'){
+      rows.push(h('p',{key:'note',style:{...hint,margin:'10px 0 0'}},current.note));
+    }
+    if(current?.id==='custom'){
+      rows.push(h('div',{key:'custom',style:{display:'flex',gap:10,flexWrap:'wrap',marginTop:10}},
+        h('input',{value:baseUrl,placeholder:'服务地址，例如 https://api.example.com/v1','aria-label':'服务地址',
+          onChange:event=>setBaseUrl(event.target.value),style:{...field,flex:'1 1 260px'}}),
+        h('input',{value:model,placeholder:'模型名，例如 gpt-4o','aria-label':'模型名',
+          onChange:event=>setModel(event.target.value),style:{...field,flex:'0 1 200px'}})));
+    }
+    if(needKey){
+      rows.push(h('div',{key:'key',style:{display:'flex',gap:10,flexWrap:'wrap',marginTop:10}},
+        h('input',{type:'password',value:key,placeholder:current.name+' 的 API key','aria-label':'API key',
           onChange:event=>setKey(event.target.value),style:{...field,flex:'1 1 260px'}}),
-        h('button',{onClick:save,disabled:busy||key.trim().length<12,style:button(true)},
-          busy?'正在保存…':'保存并启用')),
-      h('p',{key:'safe',style:{...hint,margin:'10px 0 0'}},
-        'key 保存后用 Windows 的密钥保护加密，磁盘上不留明文，保存完立刻生效。'),
-      h('p',{key:'local',style:{...hint,margin:'6px 0 0'}},
-        '不想用云端：右键运行安装目录里的 install-local-model.ps1，它会装好本地模型并接进来（不需要联网）。'),
-      h(Notice,{key:'err',error}),
-      h(Result,{key:'note',text:note})];
+        h('button',{onClick:save,disabled:busy||!canSave,style:button(true)},busy?'正在保存…':'保存并启用')));
+    }else if(current&&!current.needsKey){
+      rows.push(h('div',{key:'nokey',style:{marginTop:10,display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}},
+        h('button',{onClick:save,disabled:busy,style:button(true)},busy?'正在保存…':'启用这家')));
+    }
+    if(current?.id!=='ollama-local'){
+      rows.push(h('p',{key:'safe',style:{...hint,margin:'10px 0 0'}},
+        'key 用 Windows 的密钥保护加密保存在这台电脑上（磁盘上不留明文），保存后立刻生效。'
+        +(current?.id==='custom'?'':'同一家可以随时回来换 key。')));
+    }
+    rows.push(h('p',{key:'local',style:{...hint,margin:'6px 0 0'}},
+      '不想用云端：选「本地模型（Ollama）」，或右键运行安装目录里的 install-local-model.ps1。'));
+    rows.push(h(Notice,{key:'err',error}));
+    rows.push(h(Result,{key:'ok',text:note}));
     return h('section',{style:card},
       h('h2',{style:{...h2,margin:'0 0 6px'}},'模型'),
       h('p',{style:{...hint,margin:'0 0 10px'}},
-        '写回复、整理消息都要用一个大模型。两种用法：云端（一串 key，开箱即用）或本地（在这台电脑上跑，不联网）。'),
-      h('div',null,body));
+        '写回复、整理消息都要用一个大模型。选一家供应商、贴上它的 key 就能用；也可以在这台电脑上跑本地模型。'),
+      h('div',null,rows));
   }
 
   /**

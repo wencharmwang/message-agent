@@ -60,9 +60,12 @@ def main():
     credentials = Path(config.get('credentials_dir') or (ROOT / 'credentials'))
     stored = secrets_store.read_secret(credentials / 'model-cloud.dat')
     if stored:
-        for name in ('DEEPSEEK_API_KEY', 'OLLAMA_LOCAL_API_KEY'):
-            if stored.get(name):
-                env[name] = stored[name]
+        # 注进来的是**所有** `<供应商>_API_KEY` —— 用户可以在界面里换供应商
+        # （OpenAI / Claude / 通义 / 智谱 / Kimi…），换一家就往这个文件里加一个键，
+        # 不该每加一家都要回来改这里。
+        for name, value in stored.items():
+            if name.endswith('_API_KEY') and isinstance(value, str) and value:
+                env[name] = value
     env['MESSAGE_AGENT_CONFIG'] = str(config_path)
     env['MESSAGE_AGENT_ROOT'] = str(ROOT)
     env['MESSAGE_AGENT_CREDENTIALS'] = str(credentials)

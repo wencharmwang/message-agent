@@ -13,6 +13,20 @@ from .service import Worker, RuntimeToolError, is_system_entry, error_trace, nam
 from .harness import Harness
 from . import wechat_keys
 from . import secrets_store
+from . import model_providers
+
+
+def credentials_dir(worker) -> Path:
+    """密钥的落脚点（数据目录下的 credentials）。"""
+    config = worker.config
+    data_dir = Path(config['control_token_file']).parent
+    return Path(config.get('credentials_dir') or (data_dir / 'credentials'))
+
+
+def settings_path(worker) -> Path:
+    """引擎的 settings.yaml —— 供应商就写在这里。"""
+    home = worker.config.get('harness_home')
+    return Path(home or '.harness') / 'settings.yaml'
 
 
 # 同一时刻只允许一次"读取微信密钥"（会读进程内存）。连点两下只能跑一次。
@@ -27,7 +41,7 @@ def keys_context(worker):
     """
     config = worker.config
     data_dir = Path(config['control_token_file']).parent
-    credentials = Path(config.get('credentials_dir') or (data_dir / 'credentials'))
+    credentials = credentials_dir(worker)
     src = config.get('watcher_src')
     workspace = config.get('watcher_workspace')
     run_dir = config.get('run_dir')
@@ -149,6 +163,10 @@ def handler(worker, token):
                 # 只读状态：有没有可用密钥、上次什么时候读的、明文残留清没清。
                 # 永不返回密钥内容。
                 self.response(200, {'keys': wechat_keys.status(keys_context(worker))})
+            elif self.path == '/api/model-providers':
+                # 可选的模型供应商目录 + 哪些已经配过。只读，不含任何密钥。
+                self.response(200, {'providers': model_providers.describe(),
+                                    'configured': sorted(model_providers.configured_providers(settings_path(worker)))})
             elif self.path == '/api/observe':
                 # Cached discovery result: the product polls this often, and each call
                 # here must not turn into another WeChat read.
@@ -185,6 +203,38 @@ def handler(worker, token):
                                                 'dev': dev_block(error, 'worker:wechat-keys/scan')})
                         finally:
                             scan_guard.release()
+                elif self.path == '/api/model-provider':
+                    # 用户从下拉里选一家供应商、贴上 key（用户要求：不能只支持一家，
+                    # 要给选择的机会）。这里做两件事：把 provider 写进引擎配置（只增不删），
+                    # 把 key 交给 Windows 密钥保护。生效由 Host 那边设 process.env 完成。
+                    provider = model_providers.resolve(str(data.get('provider') or ''))
+                    if provider is None:
+                        raise ValueError('不认识这个供应商')
+                    key = data.get('key')
+                    key = key.strip() if isinstance(key, str) else ''
+                    base_url = data.get('baseUrl') if isinstance(data.get('baseUrl'), str) else ''
+                    model = data.get('model') if isinstance(data.get('model'), str) else ''
+                    if provider.id == 'custom' and not base_url.strip():
+                        raise ValueError('选「其它」时要填服务地址')
+                    if provider.needs_key and not provider.builtin and len(key) < 8:
+                        raise ValueError('请把 API key 贴进来（太短了）')
+
+                    message = '引擎内置这家，只需要 key'
+                    if not provider.builtin:
+                        message = model_providers.apply_provider(
+                            settings_path(worker), provider, base_url=base_url.strip(), model=model.strip())
+
+                    if key:
+                        store = credentials_dir(worker) / 'model-cloud.dat'
+                        store.parent.mkdir(parents=True, exist_ok=True)
+                        current = secrets_store.read_secret(store) or {}
+                        current[provider.key_env] = key
+                        current['saved_by'] = 'ui'
+                        secrets_store.write_secret(store, current)
+
+                    # keyEnv 告诉 Host 该设哪个环境变量 —— 只有它能让配置立刻生效
+                    self.response(200, {'ok': True, 'provider': provider.id, 'name': provider.name,
+                                        'keyEnv': provider.key_env, 'key': key, 'message': message})
                 elif self.path == '/api/model-key':
                     # 界面里粘贴的云端 API key。存进 Windows 密钥保护（和安装程序同一个文件），
                     # 磁盘上不留明文。**合并写入**：不能把已经配好的本地模型 key 一起抹掉。

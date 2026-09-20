@@ -1055,6 +1055,28 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
         respond(res, 200, result);
         return true;
       }
+      // 模型供应商：目录（GET）+ 配置一家（POST）。
+      //
+      // 用户的要求：不能只有一个 key 的输入框，得能选供应商、支持主流模型。
+      // 目录放在 Worker 那边（那里能读到引擎的 settings.yaml），Host 只负责转发 +
+      // 把 key 设进自己的 process.env —— harness 解析凭据时进程环境变量优先、且每次现读，
+      // 所以设完立刻生效，不用重启。
+      if (path === '/message-agent/api/model-providers' && req.method === 'GET') {
+        const {providers, configured} = await runtime.modelProviders();
+        respond(res, 200, {providers: providers ?? [], configured: configured ?? []});
+        return true;
+      }
+      if (path === '/message-agent/api/model-provider' && req.method === 'POST') {
+        const payload = await readBody(req);
+        const result = await runtime.setModelProvider({
+          provider: payload?.provider, key: typeof payload?.key === 'string' ? payload.key.trim() : '',
+          baseUrl: typeof payload?.baseUrl === 'string' ? payload.baseUrl.trim() : '',
+          model: typeof payload?.model === 'string' ? payload.model.trim() : ''
+        });
+        if (result?.keyEnv && result?.key) process.env[result.keyEnv] = result.key;
+        respond(res, 200, {ok: true, provider: result?.provider, name: result?.name, message: result?.message});
+        return true;
+      }
       // 保存云端模型的 API key。
       //
       // 为什么保存完就能用、不需要重启：harness 解析凭据时**进程环境变量优先**，而且是每次
