@@ -11,7 +11,8 @@
     manifest.json        版本与文件哈希清单
 
   用法：
-    powershell -ExecutionPolicy Bypass -File build-package.ps1
+    powershell -ExecutionPolicy Bypass -File build-package.ps1 -MakeZip
+    （-MakeZip 额外产出一个可直接交付的单文件：out\MessageAgent-<版本>-win64.zip）
     powershell -ExecutionPolicy Bypass -File build-package.ps1 -EngineRoot C:\...\deepseek-harness
     powershell -ExecutionPolicy Bypass -File build-package.ps1 -NodeRuntime <node目录> -PythonRuntime <python目录>
 
@@ -36,6 +37,10 @@ param(
   [switch]$SkipEngine,
   [switch]$SkipHashes,
   [switch]$ForceEngine,
+  # 注意：**不能**把这个开关叫 -Zip —— PowerShell 的变量名不区分大小写，
+  # 它会和下面下载 node/python 用的 $zip（压缩包路径）变成同一个变量，
+  # 于是"把字符串赋给 switch 参数"直接抛类型转换错（实测踩到）。
+  [switch]$MakeZip,
   [string]$LogTo = ''
 )
 
@@ -117,12 +122,12 @@ if ($NodeRuntime) {
   Copy-Item -Path (Join-Path $NodeRuntime '*') -Destination $nodeOut -Recurse -Force
   Say "    node 来自本地：$NodeRuntime" 'Green'
 } else {
-  $zip = Join-Path $env:TEMP "node-$NodeVersion-win-x64.zip"
-  if (-not (Test-Path -LiteralPath $zip)) {
+  $nodeZip = Join-Path $env:TEMP "node-$NodeVersion-win-x64.zip"
+  if (-not (Test-Path -LiteralPath $nodeZip)) {
     Say "    下载官方 Node $NodeVersion …" 'DarkGray'
-    Invoke-WebRequest -Uri "https://nodejs.org/dist/$NodeVersion/node-$NodeVersion-win-x64.zip" -OutFile $zip -UseBasicParsing
+    Invoke-WebRequest -Uri "https://nodejs.org/dist/$NodeVersion/node-$NodeVersion-win-x64.zip" -OutFile $nodeZip -UseBasicParsing
   }
-  Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:TEMP 'ma-node-extract') -Force
+  Expand-Archive -LiteralPath $nodeZip -DestinationPath (Join-Path $env:TEMP 'ma-node-extract') -Force
   Copy-Item -Path (Join-Path $env:TEMP "ma-node-extract\node-$NodeVersion-win-x64\*") -Destination $nodeOut -Recurse -Force
   Say '    node 来自官方发行包' 'Green'
 }
@@ -133,12 +138,12 @@ if ($PythonRuntime) {
   Copy-Item -Path (Join-Path $PythonRuntime '*') -Destination $pythonOut -Recurse -Force
   Say "    python 来自本地：$PythonRuntime" 'Green'
 } else {
-  $zip = Join-Path $env:TEMP "python-$PythonVersion-embed-amd64.zip"
-  if (-not (Test-Path -LiteralPath $zip)) {
+  $pythonZip = Join-Path $env:TEMP "python-$PythonVersion-embed-amd64.zip"
+  if (-not (Test-Path -LiteralPath $pythonZip)) {
     Say "    下载官方 Python $PythonVersion（embeddable）…" 'DarkGray'
-    Invoke-WebRequest -Uri "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-embed-amd64.zip" -OutFile $zip -UseBasicParsing
+    Invoke-WebRequest -Uri "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-embed-amd64.zip" -OutFile $pythonZip -UseBasicParsing
   }
-  Expand-Archive -LiteralPath $zip -DestinationPath $pythonOut -Force
+  Expand-Archive -LiteralPath $pythonZip -DestinationPath $pythonOut -Force
   Say '    python 来自官方 embeddable 包' 'Green'
 }
 if (-not (Test-Path -LiteralPath (Join-Path $pythonOut 'pythonw.exe'))) { throw "python 运行时里没有 pythonw.exe（$pythonOut）" }
@@ -296,5 +301,28 @@ Say ''
 Say '下一步：' 'White'
 Say ("  powershell -ExecutionPolicy Bypass -File `"$package\install.ps1`"") 'White'
 Say '（引擎已随包提供，安装时不需要再指定 -EngineRoot）' 'DarkGray'
+
+# -- 7. 打成单个交付文件（可选） ---------------------------------------------
+if ($MakeZip) {
+  Step '打成单个交付文件'
+  # 交付物不能是一个文件夹：用户拿到的东西必须是一个文件。
+  # 用 bsdtar 的 zip 写出（Windows 自带），实测 1.6 GB -> 483 MB、不到 1 分钟。
+  # 先把目录改成产品名再压（zip 里就是 MessageAgent-0.1.0-win64/… 而不是 package/…），
+  # 压完改回来，这样下次构建还能复用引擎归档。
+  $zipName = "MessageAgent-$version-win64"
+  $named = Join-Path $OutDir $zipName
+  if (Test-Path -LiteralPath $named) { Remove-Item -LiteralPath $named -Recurse -Force -ErrorAction SilentlyContinue }
+  Move-Item -LiteralPath $package -Destination $named -Force
+  $zipPath = Join-Path $OutDir ($zipName + '.zip')
+  if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+  & tar -a -cf $zipPath -C $OutDir $zipName
+  $code = $LASTEXITCODE
+  Move-Item -LiteralPath $named -Destination $package -Force
+  if ($code -ne 0) { throw "打成 zip 失败（tar 退出码 $code）" }
+  $zipMB = (Get-Item -LiteralPath $zipPath).Length / 1MB
+  Say '' 
+  Say ("交付文件：{0}（{1:N0} MB）" -f $zipPath, $zipMB) 'Green'
+  Say '  用户拿到这一个文件：解压 → 右键 install.ps1 → 使用 PowerShell 运行' 'White'
+}
 
 if ($LogTo) { try { Stop-Transcript | Out-Null } catch { } }
