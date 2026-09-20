@@ -61,7 +61,7 @@ function build() {
   assert.ok(source.includes(marker), 'client.js 的模块导出点变了，这个冒烟测试需要跟着改');
   const patched = source.replace(marker,
     '  globalThis.__MA_COMPONENTS__={SessionRow,HomeCard,StatStrip,OrganizeResult,ChatBubble,'
-    + 'HomeChat,HomePage,ConversationView,ConversationTodos,MessageBubble,MessageDay,TaskModelPicker,'
+    + 'HomeChat,HomePage,ConversationView,ConversationTodos,MessageBubble,MessageDay,TaskModelPicker,Select,ContactPicker,'
     + 'RailFoot,Cover,TodayPage,AutomationPage,ContextPage,SettingsPage,TodoRow,Row};\n' + marker);
 
   let factory = null;
@@ -115,6 +115,13 @@ test('界面组件都能渲染出内容（白屏体检）', {skip: available ? f
     MessageDay: h(C.MessageDay, {message: {at: now}, previous: {at: now - 86400 * 3}}),
     'TaskModelPicker 空目录': h(C.TaskModelPicker, {title: '自动回复模型', description: 'x',
       catalog: {loading: true, data: null}, provider: 'deepseek-official', model: 'deepseek-v4-flash', onPick() {}}),
+    'Select 分组下拉': h(C.Select, {value: 'ollama-local::qwen-dsh-16k:latest', ariaLabel: '模型',
+      groups: [
+        {label: 'DeepSeek', items: [{value: 'deepseek-official::deepseek-v4-flash', label: 'DeepSeek-V4-Flash'}]},
+        {label: '本地 Qwen', items: [{value: 'ollama-local::qwen-dsh-16k:latest', label: 'qwen-dsh-16k'}]}
+      ], onChange() {}}),
+    'Select 空目录': h(C.Select, {value: '', groups: [], ariaLabel: '模型', onChange() {}}),
+    ContactPicker: h(C.ContactPicker, {value: '', onChange() {}, disabled: false}),
     'TaskModelPicker 有本地模型': h(C.TaskModelPicker, {title: '整理消息模型', description: 'y', saving: true,
       catalog: {loading: false, data: {models: [
         {provider: 'deepseek-official', providerName: 'DeepSeek', id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash'},
@@ -222,8 +229,7 @@ test('已完成条目带长文案时，删除入口仍然渲染出来', {skip: a
   }
 });
 
-test('未完成的待办渲染出「修改」入口，做完的没有', {skip: available ? false : '找不到宿主的 react，跳过渲染体检'}, () => {
-  const {React, ReactDOMServer, C} = ctx;
+test('未完成的待办渲染出「修改」入口，做完的没有', {skip: available ? false : '找不到宿主的 react，跳过渲染体检'}, () => {  const {React, ReactDOMServer, C} = ctx;
   const h = React.createElement;
   const open = ReactDOMServer.renderToStaticMarkup(h(C.TodoRow,
     {todo: {id: 'o', title: '还没做', state: 'open', source: 'manual'}, onAction() {}}));
@@ -233,4 +239,30 @@ test('未完成的待办渲染出「修改」入口，做完的没有', {skip: a
   const done = ReactDOMServer.renderToStaticMarkup(h(C.TodoRow,
     {todo: {id: 'd', title: '做完了', state: 'done', source: 'manual'}, onAction() {}}));
   assert.doesNotMatch(done, /双击修改/, '做完的不该能编辑');
+});
+
+test('自绘下拉渲染出当前选项，收起时不渲染面板', {skip: available ? false : '找不到宿主的 react，跳过渲染体检'}, () => {
+  const {React, ReactDOMServer, C} = ctx;
+  const h = React.createElement;
+  const html = ReactDOMServer.renderToStaticMarkup(h(C.Select, {value: 'b', ariaLabel: '测试',
+    groups: [{label: '组一', items: [{value: 'a', label: '选项甲'}, {value: 'b', label: '选项乙'}]}],
+    onChange() {}}));
+  // 触发器要显示当前选中的那一项，而不是"请选择"。
+  assert.match(html, /选项乙/);
+  assert.doesNotMatch(html, /选项甲/, '收起时不该把整份列表渲染出来');
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /role="listbox"|aria-haspopup="listbox"/);
+
+  // 空目录：显示占位文案，且触发器禁用（点开一个空面板比禁用好不到哪去）。
+  const empty = ReactDOMServer.renderToStaticMarkup(h(C.Select, {value: '', groups: [], ariaLabel: '空', onChange() {}}));
+  assert.match(empty, /请选择/);
+  assert.match(empty, /disabled=""/);
+});
+
+test('选联系人：搜索框 + 本地列表都渲染出来', {skip: available ? false : '找不到宿主的 react，跳过渲染体检'}, () => {
+  const {React, ReactDOMServer, C} = ctx;
+  const html = ReactDOMServer.renderToStaticMarkup(React.createElement(C.ContactPicker,
+    {value: '', onChange() {}, disabled: false}));
+  assert.match(html, /搜索联系人/);
+  assert.match(html, /搜备注 \/ 昵称 \/ 微信号/);
 });

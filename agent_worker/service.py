@@ -84,6 +84,16 @@ def is_system_entry(name):
     return name_key(name) in SYSTEM_ENTRY_NAMES
 
 
+def session_kind(username):
+    """这个会话是群聊还是单聊。
+
+    微信的 username 编码了这个事实：群聊一律以 `@chatroom` 结尾。它就在本地会话表里，
+    所以"是不是群"不用再问用户一遍（客户端原来摆一个「这是一个群聊」勾选框，是在问
+    数据已经回答的问题）。真遇到不符合约定的情况，客户端仍可显式指定 kind 覆盖。
+    """
+    return 'group' if str(username or '').endswith('@chatroom') else 'direct'
+
+
 def strip_ocr_noise(name):
     text = str(name or '').strip()
     if not text:
@@ -447,7 +457,7 @@ class Worker:
                         title = display.get(username, username)
                         if not username or is_system_entry(title) or is_system_entry(username):
                             continue
-                        sessions.append({'id': username, 'title': title})
+                        sessions.append({'id': username, 'title': title, 'kind': session_kind(username)})
                 finally:
                     conn.close()
             except Exception:
@@ -580,6 +590,9 @@ class Worker:
         """本地搜索联系人（remark / nick_name / username 模糊匹配），供说话方式分析等使用。
 
         联系人数据就在本地 DB，无需 OCR、无需微信前台，直接 LIKE 检索。
+
+        搜完联系人表**再搜一遍会话表**：群聊、公众号这些不在 contact 表里，只搜联系人
+        会漏掉它们 —— 而"给某个群自动回复"正是最需要搜索的场景之一。
         """
         keyword = (keyword or '').strip()
         if not keyword:
@@ -588,27 +601,38 @@ class Worker:
         if plain is None:
             return []
         contact_db = plain / 'contact' / 'contact.db'
-        if not contact_db.exists():
-            return []
         results = []
-        try:
-            conn = self._open_ro(contact_db)
+        seen = set()
+        if contact_db.exists():
             try:
-                like = f'%{keyword}%'
-                rows = conn.execute(
-                    'SELECT username, remark, nick_name FROM contact '
-                    'WHERE (remark LIKE ? OR nick_name LIKE ? OR username LIKE ?) LIMIT ?',
-                    (like, like, like, limit)).fetchall()
-                for row in rows:
-                    username = row[0]
-                    title = row[1] or row[2] or row[0]
-                    if not username or is_system_entry(title) or is_system_entry(username):
-                        continue
-                    results.append({'id': username, 'title': title})
-            finally:
-                conn.close()
-        except Exception:
-            pass
+                conn = self._open_ro(contact_db)
+                try:
+                    like = f'%{keyword}%'
+                    rows = conn.execute(
+                        'SELECT username, remark, nick_name FROM contact '
+                        'WHERE (remark LIKE ? OR nick_name LIKE ? OR username LIKE ?) LIMIT ?',
+                        (like, like, like, limit)).fetchall()
+                    for row in rows:
+                        username = row[0]
+                        title = row[1] or row[2] or row[0]
+                        if not username or is_system_entry(title) or is_system_entry(username):
+                            continue
+                        results.append({'id': username, 'title': title, 'kind': session_kind(username)})
+                        seen.add(username)
+                finally:
+                    conn.close()
+            except Exception:
+                pass
+        # 会话表里的匹配（群聊、公众号…）。去重：同一个人可能在两处都命中。
+        lowered = keyword.lower()
+        for session in self.db_sessions(limit=2000):
+            if session['id'] in seen:
+                continue
+            if lowered in session['title'].lower() or lowered in session['id'].lower():
+                results.append(session)
+                seen.add(session['id'])
+            if len(results) >= limit:
+                break
         return results
 
     # ---- watcher 子进程 ----

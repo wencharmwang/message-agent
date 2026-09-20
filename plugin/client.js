@@ -637,11 +637,6 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   // 到期控件用 datetime-local：日期+几点。min-width 要留够，否则原生控件里的时间部分
   // 会被压成省略号（用户填的小时就看不见了）。
   const dateField={...field,minHeight:44,minWidth:186,fontSize:14};
-  // 下拉：原生箭头每个平台长得都不一样，是这套界面里最显眼的「没设计」信号。
-  // 关掉原生外观，自己画一个和图标同粗细的箭头。灰色取两档主题都成立的中性值。
-  const selectField={...field,cursor:'pointer',paddingRight:36,appearance:'none',WebkitAppearance:'none',
-    backgroundImage:'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'12\' height=\'8\' viewBox=\'0 0 12 8\'%3E%3Cpath d=\'M1 1.5 6 6.5 11 1.5\' fill=\'none\' stroke=\'%237b8a81\' stroke-width=\'2\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E")',
-    backgroundRepeat:'no-repeat',backgroundPosition:'right 13px center',backgroundSize:'12px 8px'};
   // 表单标签：统一走这里，别各写各的字号与字重
   const fieldLabel={display:'block',fontSize:13,color:C.text2,marginBottom:7,fontWeight:600};
   const pill=(color)=>({display:'inline-flex',alignItems:'center',padding:'3px 11px',borderRadius:99,border:'1px solid '+(color||C.border),color:color||C.text2,fontSize:13,whiteSpace:'nowrap',lineHeight:1.5});
@@ -813,8 +808,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     spark:'M10 3.4l1.55 4.05L15.6 9l-4.05 1.55L10 14.6 8.45 10.55 4.4 9l4.05-1.55L10 3.4Z',
     person:'M10 9.3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 6.2c0-2.2 2.7-3.7 6-3.7s6 1.5 6 3.7',
     trash:'M4.6 5.8h10.8M8 5.8V4.5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.3M6.3 5.8l.6 8.7a1 1 0 0 0 1 .95h4.2a1 1 0 0 0 1-.95l.6-8.7',
-    // 「回到最新消息」的箭头。
+    // 「回到最新消息」的箭头，兼作下拉的展开指示（展开时翻转）。
     down:'M10 4.6v10.4M5.8 10.8 10 15l4.2-4.2',
+    // 下拉里标记当前选中项。
+    check:'M4.8 10.7 8.4 14.3 15.4 7.1',
     contacts:'M10 9.3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 6.2c0-2.2 2.7-3.7 6-3.7s6 1.5 6 3.7',
     automation:'M11.2 3 5.2 11h3.9l-1.1 6 6-8h-3.9l1.1-6Z',
     settings:'M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm0-9.2v1.9m0 9.6v1.9M17.2 10h-1.9M4.7 10H2.8M15.1 4.9l-1.3 1.3M6.2 13.8l-1.3 1.3M15.1 15.1l-1.3-1.3M6.2 6.2 4.9 4.9',
@@ -898,6 +895,124 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline'}},h('strong',{style:{fontSize:15,fontWeight:600,minWidth:0,wordBreak:'break-word'}},title),right&&h('span',{style:{fontSize:13,color:C.text3,flexShrink:0}},right)),
       meta&&h('div',{style:{margin:'5px 0 0',fontSize:13,color:C.text3,lineHeight:1.6}},meta),
       children);
+  }
+
+  /**
+   * 自绘下拉。
+   *
+   * 原生 `<select>` 展开的那一层是**操作系统画的**，CSS 一点也碰不到：面板是系统灰、行高
+   * 与字号都是默认值，放进这套玻璃界面里像另一个程序（用户实测："看起来很原始，和现有
+   * 项目风格不符"）。所以自己画 —— 触发器沿用输入框外观，面板套同一套卡片玻璃。
+   *
+   * 三个不能省的细节，否则只是"好看一点的坏控件"：
+   *  1. 键盘：↑↓ 移动、Enter 选中、Esc 关闭（且**拦住冒泡**，否则会把整个面板收起来）；
+   *  2. 点空白处、窗口尺寸变化都要收起来；
+   *  3. 面板用 `position:fixed` + 触发器坐标 —— 卡片里有 `overflow:hidden`，absolute 面板
+   *     会被裁掉；空间不够时向上翻。
+   */
+  function Select({value,groups=[],onChange,disabled,placeholder,ariaLabel,minWidth=200,maxHeight=300}){
+    const [open,setOpen]=useState(false),[active,setActive]=useState(-1),[box,setBox]=useState(null),ref=useRef(null);
+    const items=groups.reduce((all,group)=>all.concat(group.items||[]),[]);
+    const current=items.find(item=>item.value===value);
+    useEffect(()=>{
+      if(!open)return;
+      const onDoc=event=>{if(ref.current&&!ref.current.contains(event.target))setOpen(false);};
+      const onResize=()=>setOpen(false);
+      document.addEventListener('mousedown',onDoc);
+      window.addEventListener('resize',onResize);
+      window.addEventListener('scroll',onResize,true);
+      return()=>{document.removeEventListener('mousedown',onDoc);window.removeEventListener('resize',onResize);window.removeEventListener('scroll',onResize,true);};
+    },[open]);
+    function openPanel(){
+      if(disabled||!items.length)return;
+      const rect=ref.current.getBoundingClientRect();
+      const height=Math.min(maxHeight,items.length*38+groups.length*24+14);
+      const below=window.innerHeight-rect.bottom;
+      const up=below<height+12&&rect.top>below;
+      setBox({left:rect.left,width:Math.max(rect.width,minWidth),height,
+        ...(up?{bottom:window.innerHeight-rect.top+6}:{top:rect.bottom+6})});
+      setActive(items.findIndex(item=>item.value===value));
+      setOpen(true);
+    }
+    function pick(item){
+      setOpen(false);
+      if(item&&item.value!==value)onChange(item.value);
+    }
+    function onKeyDown(event){
+      if(event.key==='Escape'){if(open){event.stopPropagation();setOpen(false);}return;}
+      if(!open){
+        if(event.key==='Enter'||event.key===' '||event.key==='ArrowDown'){event.preventDefault();openPanel();}
+        return;
+      }
+      if(event.key==='ArrowDown'){event.preventDefault();setActive(index=>Math.min(index+1,items.length-1));}
+      else if(event.key==='ArrowUp'){event.preventDefault();setActive(index=>Math.max(index-1,0));}
+      else if(event.key==='Enter'){event.preventDefault();pick(items[active]);}
+      else if(event.key==='Tab')setOpen(false);
+    }
+    return h('div',{ref,style:{position:'relative',minWidth:0,flex:'1 1 auto'}},
+      h('button',{type:'button',onClick:()=>open?setOpen(false):openPanel(),onKeyDown,disabled:disabled||!items.length,
+        'aria-haspopup':'listbox','aria-expanded':open,'aria-label':ariaLabel,
+        style:{...field,display:'flex',alignItems:'center',gap:10,cursor:disabled||!items.length?'default':'pointer',textAlign:'left',minHeight:44}},
+        h('span',{style:{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',
+          color:current?C.text:C.text3}},current?current.label:(placeholder||'请选择')),
+        h('span',{style:{flexShrink:0,color:C.text3,lineHeight:0,transition:'transform var(--lg-dur-1) var(--lg-ease-smooth)',
+          transform:open?'rotate(180deg)':'none'}},h(Icon,{name:'down',size:16}))),
+      open&&box&&h('div',{role:'listbox','aria-label':ariaLabel,
+        style:{position:'fixed',left:box.left,width:box.width,...(box.top!==undefined?{top:box.top}:{bottom:box.bottom}),
+          maxHeight:box.height,overflowY:'auto',zIndex:80,padding:6,borderRadius:'var(--lg-r-lg)',
+          border:'1px solid var(--lg-card-line)',backgroundColor:'var(--ma-surface)',boxShadow:'var(--ma-shadow)'}},
+        groups.map((group,groupIndex)=>h('div',{key:group.label||groupIndex},
+          group.label&&h('div',{style:{fontSize:11,color:C.text3,fontWeight:650,letterSpacing:'.04em',padding:'8px 10px 4px'}},group.label),
+          (group.items||[]).map(item=>{
+            const index=items.indexOf(item),selected=item.value===value;
+            return h('button',{key:item.value,type:'button',role:'option','aria-selected':selected,
+              onClick:()=>pick(item),onMouseEnter:()=>setActive(index),
+              style:{display:'flex',alignItems:'center',gap:10,width:'100%',minHeight:38,padding:'8px 10px',
+                borderRadius:'var(--lg-r-sm)',border:'none',cursor:'pointer',textAlign:'left',fontSize:14,
+                background:index===active?'var(--lg-tint)':'transparent',
+                color:selected?C.brand:C.text,fontWeight:selected?650:400}},
+              h('span',{style:{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},item.label),
+              selected&&h(Icon,{name:'check',size:16}));
+          })))));
+  }
+
+  /**
+   * 选一个微信联系人 / 群聊。
+   *
+   * 「添加自动回复」和「回复配置 → 从聊天分析说话方式」用的是**同一个组件** —— 两处需求
+   * 完全一样（在本地联系人里找到那个人），各写一套只会慢慢长歪：之前「添加自动回复」
+   * 还在提示"正在读取微信"、而且连搜索都没有，其实数据早就是本地明文副本了。
+   *
+   * 留空 = 最近联系的会话；输入关键词 = 本地检索（备注 / 昵称 / 微信号，含群聊）。
+   */
+  function ContactPicker({value,onChange,onLoaded,disabled}){
+    const [choices,setChoices]=useState([]),[query,setQuery]=useState('');
+    const [busy,setBusy]=useState(false),[error,setError]=useState('');
+    async function load(keyword){
+      setBusy(true);setError('');
+      try{
+        const result=keyword?await api('search_contacts',{keyword}):await api('conversations');
+        const list=result.conversations||[];
+        setChoices(list);
+        if(onLoaded)onLoaded(list);
+        // 没选过、或原来选的那个人已经不在结果里：替用户选第一个，少一次点击。
+        if(list.length&&!list.some(item=>item.id===value))onChange(list[0].id);
+      }catch(e){setError(e.message);}
+      finally{setBusy(false);}
+    }
+    useEffect(()=>{load('');},[]);
+    return h('div',null,
+      h('div',{style:{display:'flex',gap:10,marginBottom:10,flexWrap:'wrap'}},
+        h('input',{value:query,onInput:event=>setQuery(event.target.value),
+          onKeyDown:event=>{if(event.key==='Enter'){event.stopPropagation();load(query.trim());}},
+          'aria-label':'搜索联系人',placeholder:'搜备注 / 昵称 / 微信号；留空显示最近联系',
+          style:{...field,flex:'1 1 220px'}}),
+        h('button',{onClick:()=>load(query.trim()),disabled:disabled||busy,style:button(false)},busy?'读取中…':'搜索')),
+      h(Select,{value,onChange,disabled:disabled||busy,ariaLabel:'选择联系人或群聊',
+        placeholder:busy?'正在读取本地联系人…':(choices.length?'请选择':'没找到，换个关键词试试'),
+        groups:[{items:choices.map(item=>({value:item.id,
+          label:item.kind==='group'?item.title+'（群聊）':item.title}))}]}),
+      error&&h('p',{style:{...hint,margin:'8px 0 0',color:C.error}},error));
   }
 
   // ---- shared composer: 记跟进 or 加待办 --------------------------------------
@@ -1573,20 +1688,27 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
    * 改成受控模式：open 由页面给，表单永远长在内容区，标题在上、字段在下。
    */
   function AddContactTrigger({purpose,onOpen}){
-    return h('button',{onClick:onOpen,style:button(true)},purpose==='crm'?'＋ 添加要跟进的联系人':'＋ 添加自动回复');
+    return h('button',{onClick:onOpen,style:button(true)},purpose==='crm'?'＋ 添加要跟进的联系人':'＋ 自动回复');
   }
   function AddContact({onAdded,purpose,open:openProp,onClose}){
     const controlled=openProp!==undefined;
     const [uncontrolled,setUncontrolled]=useState(false);
     const open=controlled?openProp:uncontrolled;
     const setOpen=value=>{if(controlled){if(!value&&onClose)onClose();}else setUncontrolled(value);};
-    const [choices,setChoices]=useState([]),[conversation,setConversation]=useState(''),[prompt,setPrompt]=useState('用自然、友好、简短的中文回复日常聊天；不确定的事情交给我处理。'),[busy,setBusy]=useState(false),[error,setError]=useState(''),[isGroup,setIsGroup]=useState(false);
-    async function scan(){setBusy(true);setError('');try{const result=await api('conversations');setChoices(result.conversations||[]);if(result.conversations?.length)setConversation(result.conversations[0].id);}catch(e){setError(e.message);}finally{setBusy(false);}}
-    // 打开就自动读一次微信。以前要用户再点一下「读取」才知道有哪些人，等于两步并成一步也没并成。
-    useEffect(()=>{if(open&&!choices.length&&!busy)scan();},[open]);
-    // The visible WeChat list cannot tell a group from a one-to-one chat (the runtime reports
-    // "unknown" for every row), so the person adding it says which it is instead.
-    async function add(){const selected=choices.find(choice=>choice.id===conversation);if(!selected){setError('请先选择一个联系人或群聊');return;}setBusy(true);setError('');try{await api('rules',{conversation_id:selected.id,prompt,kind:isGroup?'group':'direct'});setChoices([]);setConversation('');setIsGroup(false);onAdded();setOpen(false);}catch(e){setError(e.message);}finally{setBusy(false);}}
+    const [choices,setChoices]=useState([]),[conversation,setConversation]=useState(''),[prompt,setPrompt]=useState('用自然、友好、简短的中文回复日常聊天；不确定的事情交给我处理。'),[busy,setBusy]=useState(false),[error,setError]=useState(''),[kind,setKind]=useState('direct');
+    // 群聊由本地会话的类型自动判定（微信里群聊的 username 一律以 @chatroom 结尾），
+    // 换人选时自动跟着变。原来摆一个勾选框让用户自己声明类型，等于问一个数据已经回答了
+    // 的问题；留一个「按群聊处理 / 按单聊处理」的纠正入口就够了。
+    useEffect(()=>{
+      const picked=choices.find(choice=>choice.id===conversation);
+      if(picked)setKind(picked.kind==='group'?'group':'direct');
+    },[conversation,choices]);
+    async function add(){
+      if(!conversation){setError('请先选择一个联系人或群聊');return;}
+      setBusy(true);setError('');
+      try{await api('rules',{conversation_id:conversation,prompt,kind});setConversation('');onAdded();setOpen(false);}
+      catch(e){setError(e.message);}finally{setBusy(false);}
+    }
     const crm=purpose==='crm';
     if(!open)return h(AddContactTrigger,{purpose,onOpen:()=>setOpen(true)});
     return h('section',{className:'ma-form','aria-label':crm?'添加要跟进的联系人':'添加自动回复'},
@@ -1594,29 +1716,25 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('div',null,
           h('h3',{style:{...h3,marginBottom:5}},crm?'添加要跟进的联系人':'添加自动回复'),
           h('p',{style:{...hint,margin:0}},crm
-            ?'先用「从微信读取」把聊天列表读进来，再挑出要跟进的人。加进来只是让它出现在工作台，自动回复保持关闭。'
+            ?'在本地联系人里挑出要跟进的人。加进来只是让它出现在工作台，自动回复保持关闭。'
             :'两步：先选人，再写回复规则。添加后默认关闭，确认无误再开启。')),
         h('button',{onClick:()=>setOpen(false),disabled:busy,style:small(false,false,true)},'关闭')),
       h(Notice,{error}),
       h('div',{className:'ma-form-grid'},
         h('div',null,
           h('label',{style:fieldLabel},'1. 选择联系人或群聊'),
-          h('div',{style:{display:'flex',gap:10,flexWrap:'wrap'}},
-            h('select',{value:conversation,onChange:event=>setConversation(event.target.value),style:{...selectField,flex:'1 1 200px'},'aria-label':'选择联系人或群聊'},
-              !choices.length&&h('option',{value:''},busy?'正在读取微信…':'没有读到聊天，点右边重新读取'),
-              choices.map(choice=>h('option',{key:choice.id,value:choice.id},choice.title))),
-            h('button',{onClick:scan,disabled:busy,style:button(false)},busy?'正在读取…':'重新读取微信')),
-          // 微信列表分不出群聊和单聊，所以由添加的人指明；默认按联系人处理。
-          h('label',{style:{display:'flex',alignItems:'center',gap:10,marginTop:12,cursor:'pointer',minHeight:32}},
-            h('input',{type:'checkbox',checked:isGroup,onChange:event=>setIsGroup(event.target.checked),style:{width:18,height:18,accentColor:'var(--ma-primary)',cursor:'pointer',margin:0}}),
-            h('span',{style:{fontSize:13,color:C.text}},'这是一个群聊'),
-            h('span',{style:{fontSize:12,color:C.text3}},'（不勾选按单聊处理）'))),
+          h(ContactPicker,{value:conversation,onChange:setConversation,onLoaded:setChoices,disabled:busy}),
+          !crm&&h('div',{style:{display:'flex',alignItems:'center',gap:10,marginTop:12,flexWrap:'wrap'}},
+            h('span',{style:pill(kind==='group'?C.brand:C.text3)},kind==='group'?'群聊':'单聊'),
+            h('button',{onClick:()=>setKind(kind==='group'?'direct':'group'),disabled:busy,style:small(false)},
+              kind==='group'?'按单聊处理':'按群聊处理'),
+            h('span',{style:{fontSize:12,color:C.text3}},'类型从本地会话自动识别，判断错了可以改'))),
         h('div',null,
           h('label',{style:fieldLabel},'2. 要自动回复的话，告诉助手怎么回'),
           h('textarea',{value:prompt,onChange:event=>setPrompt(event.target.value),rows:5,style:{...field,resize:'vertical',lineHeight:1.7}}),
           h('p',{style:{...hint,marginTop:8}},crm?'不想让它自动回复也可以，保持关闭就行。':'添加后默认关闭，检查无误再开启。'))),
       h('div',{style:{display:'flex',gap:10,marginTop:18,paddingTop:16,borderTop:'1px solid var(--lg-card-line)'}},
-        h('button',{onClick:add,disabled:busy,style:button(true)},busy?'请稍等…':'确定添加'),
+        h('button',{onClick:add,disabled:busy,style:button(true)},busy?'请稍等…':'确认'),
         h('button',{onClick:()=>setOpen(false),disabled:busy,style:button(false)},'取消')));
   }
 
@@ -2104,21 +2222,11 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   }
 
   function AnalyzeStylePanel({onDone}){
+    // 选人交给 ContactPicker（和「添加自动回复」同一个组件）：加载本地联系人、搜索都归它，
+    // 这里不再自己读一遍会话列表 —— 同一件事写两遍就会长歪（原来这里的"搜索"和那边的
+    // "重新读取微信"就是各写各的）。
     const [choices,setChoices]=useState([]),[conversation,setConversation]=useState('');
-    const [query,setQuery]=useState('');
     const [busy,setBusy]=useState(false),[error,setError]=useState(''),[errorCode,setErrorCode]=useState(''),[result,setResult]=useState(null);
-    // 打开即读「最近联系」会话（本地 DB 会话列表，无需 OCR、无需微信前台）
-    useEffect(()=>{let stopped=false;(async()=>{setBusy(true);setError('');setErrorCode('');try{const r=await api('conversations');if(stopped)return;setChoices(r.conversations||[]);if(r.conversations?.length)setConversation(r.conversations[0].id);}catch(e){if(!stopped){setError(e.message);setErrorCode(e.code||'');}}finally{if(!stopped)setBusy(false);}})();return()=>{stopped=true;};},[]);
-    async function search(){
-      const kw=query.trim();
-      setBusy(true);setError('');setErrorCode('');
-      try{
-        const r=kw?await api('search_contacts',{keyword:kw}):await api('conversations');
-        setChoices(r.conversations||[]);
-        if(r.conversations?.length)setConversation(r.conversations[0].id);
-      }catch(e){setError(e.message);setErrorCode(e.code||'');}
-      finally{setBusy(false);}
-    }
     async function analyze(){
       const selected=choices.find(c=>c.id===conversation);
       if(!selected){setError('请先选一个会话');return;}
@@ -2137,12 +2245,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       h('p',{style:{...hint,margin:'0 0 18px',maxWidth:720}},'助手只学习你发出去的消息，生成一份可编辑的语气草稿；你确认并启用后，才会用于自动回复。'),
       h(Notice,{error,code:errorCode}),
       h('label',{style:fieldLabel},'选择一个会话'),
-      h('div',{style:{display:'flex',gap:10,marginBottom:10}},
-        h('input',{value:query,onInput:event=>setQuery(event.target.value),onKeyDown:event=>{if(event.key==='Enter')search();},placeholder:'搜索联系人（备注/昵称/微信号），留空显示最近联系',style:{...field,flex:1}}),
-        h('button',{onClick:search,disabled:busy,style:button(false)},'搜索')),
-      h('select',{value:conversation,onChange:event=>setConversation(event.target.value),disabled:busy,style:selectField},
-        !choices.length&&h('option',{value:''},busy?'正在读取本地联系人…':'暂无最近联系人，请用上方搜索框搜索'),
-        choices.map(c=>h('option',{key:c.id,value:c.id},c.title))),
+      h(ContactPicker,{value:conversation,onChange:setConversation,onLoaded:setChoices,disabled:busy}),
       busy&&h('div',{role:'status',style:{display:'flex',alignItems:'center',gap:12,marginTop:12,padding:'13px 15px',borderRadius:12,background:'var(--ma-primary-soft)',color:C.brand}},
         h('strong',{style:{fontSize:20,minWidth:24,textAlign:'center'}},'…'),
         h('div',null,h('strong',{style:{display:'block',fontSize:13}},'正在后台读取聊天'),
@@ -2263,8 +2366,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           style:{...field,resize:'vertical',lineHeight:1.7}}),
         fileNote&&h('p',{style:{...hint,marginTop:8}},fileNote)),
       h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginTop:12}},
-        h('div',null,h('label',{style:fieldLabel},'这些条目统一归到'),h('select',{value:kind,onChange:event=>setKind(event.target.value),style:selectField},KNOWLEDGE_KINDS.map(([value,text])=>h('option',{key:value,value:value},text)))),
-        h('div',null,h('label',{style:fieldLabel},'统一风险等级'),h('select',{value:risk,onChange:event=>setRisk(event.target.value),style:selectField},KNOWLEDGE_RISK.map(([value,text])=>h('option',{key:value,value:value},text))))),
+        h('div',null,h('label',{style:fieldLabel},'这些条目统一归到'),h(Select,{value:kind,onChange:setKind,ariaLabel:'统一归类',groups:[{items:KNOWLEDGE_KINDS.map(([value,text])=>({value,label:text}))}]})),
+        h('div',null,h('label',{style:fieldLabel},'统一风险等级'),h(Select,{value:risk,onChange:setRisk,ariaLabel:'统一风险等级',groups:[{items:KNOWLEDGE_RISK.map(([value,text])=>({value,label:text}))}]}))),
       // 切分粒度没有唯一正解，与其替他决定，不如让他点一下就看结果。
       h('div',{style:{marginTop:12}},
         h('label',{style:fieldLabel},'怎么切'),
@@ -2299,8 +2402,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const label=fieldLabel;   // 统一走控件基线里的标签，别再各写一套字号
     return h('div',{style:{...card,padding:16}},
       h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}},
-        h('div',null,h('label',{style:fieldLabel},'分类'),h('select',{value:kind,onChange:event=>setKind(event.target.value),style:selectField},KNOWLEDGE_KINDS.map(([value,text])=>h('option',{key:value,value:value},text)))),
-        h('div',null,h('label',{style:fieldLabel},'风险等级'),h('select',{value:risk,onChange:event=>setRisk(event.target.value),style:selectField},KNOWLEDGE_RISK.map(([value,text])=>h('option',{key:value,value:value},text))))),
+        h('div',null,h('label',{style:fieldLabel},'分类'),h(Select,{value:kind,onChange:setKind,ariaLabel:'分类',groups:[{items:KNOWLEDGE_KINDS.map(([value,text])=>({value,label:text}))}]})),
+        h('div',null,h('label',{style:fieldLabel},'风险等级'),h(Select,{value:risk,onChange:setRisk,ariaLabel:'风险等级',groups:[{items:KNOWLEDGE_RISK.map(([value,text])=>({value,label:text}))}]}))),
       h('div',{style:{marginTop:12}},h('label',{style:label},'标题'),h('input',{value:title,onChange:event=>setTitle(event.target.value),placeholder:'例如：营业时间、退货政策',style:field})),
       h('div',{style:{marginTop:12}},h('label',{style:label},'内容'),h('textarea',{value:content,onChange:event=>setContent(event.target.value),rows:4,placeholder:'助手能引用的事实。写清楚、不含糊，避免金额/时间这类会变的信息（那些要人工确认）。',style:{...field,resize:'vertical',lineHeight:1.7}})),
       h(Notice,{error}),
@@ -2382,23 +2485,19 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const matched=listed.some(entry=>entry.provider===provider&&entry.id===model);
     const groups=[];
     for(const entry of listed){
-      let group=groups.find(item=>item.provider===entry.provider);
-      if(!group){group={provider:entry.provider,name:entry.providerName||entry.provider,models:[]};groups.push(group);}
-      group.models.push(entry);
+      let group=groups.find(item=>item.label===entry.provider);
+      if(!group){group={label:entry.providerName||entry.provider,items:[]};groups.push(group);}
+      group.items.push({value:here(entry),label:entry.name===entry.id?entry.id:(entry.name+' · '+entry.id)});
     }
+    // 选中的组合不在目录里时（比如那个本地模型被删了），也要能在下拉里看到自己选的是什么 ——
+    // 否则触发器只会显示"请选择"，用户以为自己的设置被改掉了。
+    if(!matched&&model)groups.unshift({label:'当前',items:[{value:provider+'::'+model,label:provider+' · '+model}]});
     return h('section',{style:{...card,marginTop:16}},
       h('h3',h3,title),
       h('p',{style:{...hint,margin:'0 0 12px'}},description),
       clashHint&&clashHint,
-      h('select',{value:matched?provider+'::'+model:'',onChange:event=>onPick(event.target.value),
-        disabled:saving||!listed.length,'aria-label':title,style:selectField},
-        !listed.length&&h('option',{value:''},catalog.loading?'正在读取模型…':'暂无可用模型'),
-        // 选中的组合不在目录里时（比如那个本地模型被删了），也要列出来 ——
-        // 否则下拉会跳回第一项，用户以为自己的设置被改掉了。
-        !matched&&model&&h('option',{value:provider+'::'+model},provider+' · '+model+'（当前）'),
-        groups.map(group=>h('optgroup',{key:group.provider,label:group.name},
-          group.models.map(entry=>h('option',{key:here(entry),value:here(entry)},
-            entry.name===entry.id?entry.id:(entry.name+' · '+entry.id)))))),
+      h(Select,{value:matched?provider+'::'+model:'',onChange:onPick,disabled:saving||!listed.length,
+        ariaLabel:title,placeholder:catalog.loading?'正在读取模型…':'暂无可用模型',minWidth:280,groups}),
       saving&&h('p',{style:{...hint,margin:'8px 0 0'}},'正在保存…'));
   }
 

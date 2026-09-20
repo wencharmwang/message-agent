@@ -245,9 +245,10 @@ test('两个任务各配各的模型（自动回复 / 整理消息），都支�
   const settings = source.slice(source.indexOf('function SettingsPage('), source.indexOf('function parseBlock('));
   // 下拉：按提供方分组，选中值用 provider::model 编码（不同提供方可能有同名模型）。
   assert.match(picker, /entry\.provider\+'::'\+entry\.id/);
-  assert.match(picker, /h\('optgroup',\{key:group\.provider,label:group\.name\}/);
-  // 当前组合不在目录里时也要显示，不然下拉会跳回第一项，用户以为设置被改了。
-  assert.match(picker, /（当前）/);
+  assert.match(picker, /h\(Select,\{value:matched\?provider\+'::'\+model:'',onChange:onPick/);
+  assert.match(picker, /groups\.unshift\(\{label:'当前',items:\[\{value:provider\+'::'\+model/);
+  // 当前组合不在目录里时也要显示得出来，不然触发器会说"请选择"，用户以为设置被改了。
+  assert.match(picker, /groups\.unshift\(\{label:'当前'/);
   // 两个任务两行，各存各的字段 —— 只存一个总开关等于逼用户二选一。
   assert.match(settings, /title:'自动回复模型'/);
   assert.match(settings, /title:'整理消息模型'/);
@@ -340,12 +341,50 @@ test('自动回复布局给导航和规则卡片稳定边界', () => {
   assert.match(source, /WebkitLineClamp:5/);
 });
 
+test('下拉全部自绘：原生 select 一个都不留', () => {
+  // 原生 <select> 展开的那层是系统画的，放进玻璃界面像另一个程序（用户实测）。
+  assert.doesNotMatch(source, /h\('select'/, '不该再有原生 select');
+  assert.doesNotMatch(source, /const selectField=/, '为原生 select 做的那套样式也该删掉');
+  const select = source.slice(source.indexOf('function Select('), source.indexOf('function ContactPicker('));
+  // 键盘：↑↓ 移动、Enter 选中、Esc 关闭并**拦住冒泡**（否则会把整个面板收起来）。
+  assert.match(select, /if\(event\.key==='Escape'\)\{if\(open\)\{event\.stopPropagation\(\);setOpen\(false\);\}/);
+  assert.match(select, /event\.key==='ArrowDown'/);
+  assert.match(select, /event\.key==='ArrowUp'/);
+  assert.match(select, /else if\(event\.key==='Enter'\)\{event\.preventDefault\(\);pick\(items\[active\]\);\}/);
+  // 点空白处关闭。
+  assert.match(select, /const onDoc=event=>\{if\(ref\.current&&!ref\.current\.contains\(event\.target\)\)setOpen\(false\);\}/);
+  // 面板用 fixed + 触发器坐标：卡片里有 overflow:hidden，absolute 会被裁掉；空间不够就向上翻。
+  assert.match(select, /position:'fixed',left:box\.left,width:box\.width/);
+  assert.match(select, /const up=below<height\+12&&rect\.top>below;/);
+  assert.match(select, /'aria-haspopup':'listbox','aria-expanded':open/);
+  assert.equal([...source.matchAll(/h\(Select,\{/g)].length >= 4, true, '知识库、模型、联系人都该用它');
+});
+
+test('添加自动回复：文案精简，选人逻辑和「从聊天分析」共用一套', () => {
+  assert.match(source, /purpose==='crm'\?'＋ 添加要跟进的联系人':'＋ 自动回复'/);
+  // 「确定添加」→「确认」。
+  assert.match(source, /busy\?'请稍等…':'确认'/);
+  assert.doesNotMatch(source, /'确定添加'|'＋ 添加自动回复'/);
+  // 选人不再问"是不是群聊"：类型从本地会话自动识别，只留一个纠正入口。
+  const add = source.slice(source.indexOf('function AddContact('), source.indexOf('function TodoRow('));
+  assert.match(add, /h\(ContactPicker,\{value:conversation,onChange:setConversation,onLoaded:setChoices/);
+  assert.match(add, /h\('span',\{style:pill\(kind==='group'\?C\.brand:C\.text3\)\},kind==='group'\?'群聊':'单聊'\)/);
+  assert.match(add, /kind==='group'\?'按单聊处理':'按群聊处理'/);
+  assert.doesNotMatch(add, /这是一个群聊/, '不该再问用户数据已经回答的问题');
+  // 也不该再出现"正在读取微信"这种和事实不符的文案（早就是读本地明文副本了）。
+  assert.doesNotMatch(add, /正在读取微信|重新读取微信|从微信读取/);
+});
+
 test('从聊天分析使用本地数据库读取，并说明只读不发送', () => {
   assert.doesNotMatch(source, /for\(let seconds=3;seconds>0;seconds--\)/);
   assert.match(source, /后台只读 · 不发消息/);
-  // 会话选择走本地 DB（conversations/search_contacts），不再依赖 OCR 读出的可见列表。
-  assert.match(source, /api\('conversations'\)/);
-  assert.match(source, /api\('search_contacts',\{keyword:kw\}\)/);
+  // 会话选择走本地 DB（conversations / search_contacts），不再依赖 OCR 读出的可见列表。
+  // 而且「添加自动回复」和「从聊天分析」共用同一个 ContactPicker —— 同一件事写两遍会走歪。
+  assert.match(source, /function ContactPicker\(\{value,onChange,onLoaded,disabled\}\)/);
+  assert.match(source, /keyword\?await api\('search_contacts',\{keyword\}\):await api\('conversations'\)/);
+  assert.match(source, /h\(ContactPicker,\{value:conversation,onChange:setConversation/);
+  // 两处都在用（添加自动回复 + 从聊天分析）。
+  assert.equal([...source.matchAll(/h\(ContactPicker,\{/g)].length >= 2, true, 'ContactPicker 应该被两处复用');
   assert.doesNotMatch(source, /phase==='idle'/);
   assert.match(source, /context\\\/profiles\\\/analyze\$/);
 });

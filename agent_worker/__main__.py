@@ -165,9 +165,10 @@ def handler(worker, token):
                     matches = [c for c in sessions if c['id'] == data.get('conversation_id')]
                     if not matches:
                         raise ValueError('会话列表里没有这个会话，请刷新后再添加。')
-                    # username 原生唯一，无同名歧义；群聊由会话 type 决定，客户端未传 kind
-                    # 时默认 direct（沿用旧行为）。
-                    kind = data.get('kind') if data.get('kind') in ('direct', 'group') else 'direct'
+                    # username 原生唯一，无同名歧义；群聊由会话 type 决定，客户端显式给了
+                    # kind 就以客户端为准（那是人改过的判断），没给才用 DB 里的类型 ——
+                    # 原来没给就一律当直接聊天，群聊会被静默注册成单聊。
+                    kind = data.get('kind') if data.get('kind') in ('direct', 'group') else matches[0].get('kind', 'direct')
                     rule_id = worker.store.add('wechat-main', matches[0]['id'], matches[0]['title'], kind,
                                                data.get('prompt', ''))
                     self.response(201, {'id': rule_id})
