@@ -447,6 +447,46 @@ class Worker:
         messages = messages[-limit:]
         return {'username': username, 'display': display, 'messages': messages}
 
+    def db_search_contacts(self, keyword, limit=50):
+        """本地搜索联系人（remark / nick_name / username 模糊匹配），供说话方式分析等使用。
+
+        联系人数据就在本地 DB，无需 OCR、无需微信前台，直接 LIKE 检索。
+        """
+        import sqlite3
+        keyword = (keyword or '').strip()
+        if not keyword:
+            return []
+        watcher = self._watcher()
+        if not watcher.ready(timeout=30):
+            return []
+        workspace = watcher.workspace()
+        if not workspace:
+            return []
+        plain = Path(workspace) / 'plain'
+        contact_db = plain / 'contact' / 'contact.db'
+        if not contact_db.exists():
+            return []
+        results = []
+        try:
+            conn = sqlite3.connect(f'file:{contact_db.as_posix()}?mode=ro&immutable=1', uri=True)
+            try:
+                like = f'%{keyword}%'
+                rows = conn.execute(
+                    'SELECT username, remark, nick_name FROM contact '
+                    'WHERE (remark LIKE ? OR nick_name LIKE ? OR username LIKE ?) LIMIT ?',
+                    (like, like, like, limit)).fetchall()
+                for row in rows:
+                    username = row[0]
+                    title = row[1] or row[2] or username
+                    if not username or is_system_entry(title) or is_system_entry(username):
+                        continue
+                    results.append({'id': username, 'title': title})
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            pass
+        return results
+
     # ---- watcher 子进程 ----
     def _watcher(self):
         # 自愈 + 线程安全：watcher 子进程崩溃后（进程退出），下次 tick 重新拉起；

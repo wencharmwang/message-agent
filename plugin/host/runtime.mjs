@@ -78,6 +78,10 @@ export class RuntimeAdapter {
   readConversationFromDb({username, limit}) {
     return this.#call('POST', '/api/db_messages', {username, limit});
   }
+  /** Local-DB contact search (remark/nick_name/username). No OCR, no WeChat foreground. */
+  searchContacts(keyword) {
+    return this.#call('POST', '/api/search_contacts', {keyword});
+  }
   /** Compatibility shim: continuous inbox discovery no longer exists. */
   setObserving(enabled) {
     return this.#call('POST', '/api/settings', {observe_enabled: !!enabled});

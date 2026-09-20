@@ -1939,8 +1939,20 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
 
   function AnalyzeStylePanel({onDone}){
     const [choices,setChoices]=useState([]),[conversation,setConversation]=useState('');
+    const [query,setQuery]=useState('');
     const [busy,setBusy]=useState(false),[error,setError]=useState(''),[errorCode,setErrorCode]=useState(''),[result,setResult]=useState(null);
-    async function scan(){setBusy(true);setError('');setErrorCode('');try{const r=await api('conversations');setChoices(r.conversations||[]);if(r.conversations?.length)setConversation(r.conversations[0].id);}catch(e){setError(e.message);setErrorCode(e.code||'');}finally{setBusy(false);}}
+    // 打开即读「最近联系」会话（本地 DB 会话列表，无需 OCR、无需微信前台）
+    useEffect(()=>{let stopped=false;(async()=>{setBusy(true);setError('');setErrorCode('');try{const r=await api('conversations');if(stopped)return;setChoices(r.conversations||[]);if(r.conversations?.length)setConversation(r.conversations[0].id);}catch(e){if(!stopped){setError(e.message);setErrorCode(e.code||'');}}finally{if(!stopped)setBusy(false);}})();return()=>{stopped=true;};},[]);
+    async function search(){
+      const kw=query.trim();
+      setBusy(true);setError('');setErrorCode('');
+      try{
+        const r=kw?await api('search_contacts',{keyword:kw}):await api('conversations');
+        setChoices(r.conversations||[]);
+        if(r.conversations?.length)setConversation(r.conversations[0].id);
+      }catch(e){setError(e.message);setErrorCode(e.code||'');}
+      finally{setBusy(false);}
+    }
     async function analyze(){
       const selected=choices.find(c=>c.id===conversation);
       if(!selected){setError('请先选一个会话');return;}
@@ -1948,14 +1960,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       try{
         const r=await api('context/profiles/analyze',{provider:'wechat-main',conversation:selected.id});
         setResult(r);
-      }catch(e){
-        setErrorCode(e.code||'');
-        setError(e.code==='conversation_unverified'
-          ?'后台已经定位到这条会话，但暂时无法确认打开的是不是它。请让这条会话保持在微信左侧当前可见列表中，刷新列表后再试。'
-          :e.code==='conversation_not_found'||e.code==='conversation_not_visible'
-          ?'这个会话已不在微信当前可见列表中。请滚动到它所在的位置，刷新列表后再试。'
-          :e.message);
-      }finally{setBusy(false);}
+      }catch(e){setErrorCode(e.code||'');setError(e.message);}
+      finally{setBusy(false);}
     }
     const selected=choices.find(c=>c.id===conversation);
     return h('div',{style:{...card,padding:20,boxShadow:'var(--lg-card-shadow)',borderColor:'rgba(7,193,96,.26)'}},
@@ -1965,13 +1971,12 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       h('p',{style:{...hint,margin:'0 0 18px',maxWidth:720}},'助手只学习你发出去的消息，生成一份可编辑的语气草稿；你确认并启用后，才会用于自动回复。'),
       h(Notice,{error,code:errorCode}),
       h('label',{style:fieldLabel},'选择一个会话'),
-      h('div',{style:{display:'grid',gridTemplateColumns:'minmax(0,1fr) auto',gap:10,alignItems:'center'}},
-        h('select',{value:conversation,onChange:event=>setConversation(event.target.value),disabled:busy,style:selectField},
-          !choices.length&&h('option',{value:''},busy?'正在读取微信…':'先读取微信当前可见会话'),
-          choices.map(c=>h('option',{key:c.id,value:c.id},c.title))),
-        h('button',{onClick:scan,disabled:busy,style:button(false)},choices.length?'刷新列表':'读取会话')),
-      !result&&selected&&h('div',{style:{marginTop:12,padding:'11px 13px',borderRadius:'var(--lg-r-sm)',backgroundColor:FIELD_BG,border:'1px solid var(--lg-card-line)',fontSize:12,color:C.text2,lineHeight:1.7}},
-        '助手会按当前列表中的会话 ID 在后台读取，不依赖 OCR 识别出的人名，也不需要把微信切到前台。'),
+      h('div',{style:{display:'flex',gap:10,marginBottom:10}},
+        h('input',{value:query,onInput:event=>setQuery(event.target.value),onKeyDown:event=>{if(event.key==='Enter')search();},placeholder:'搜索联系人（备注/昵称/微信号），留空显示最近联系',style:{...field,flex:1}}),
+        h('button',{onClick:search,disabled:busy,style:button(false)},'搜索')),
+      h('select',{value:conversation,onChange:event=>setConversation(event.target.value),disabled:busy,style:selectField},
+        !choices.length&&h('option',{value:''},busy?'正在读取本地联系人…':'暂无最近联系人，请用上方搜索框搜索'),
+        choices.map(c=>h('option',{key:c.id,value:c.id},c.title))),
       busy&&h('div',{role:'status',style:{display:'flex',alignItems:'center',gap:12,marginTop:12,padding:'13px 15px',borderRadius:12,background:'var(--ma-primary-soft)',color:C.brand}},
         h('strong',{style:{fontSize:20,minWidth:24,textAlign:'center'}},'…'),
         h('div',null,h('strong',{style:{display:'block',fontSize:13}},'正在后台读取聊天'),

@@ -141,6 +141,9 @@ def handler(worker, token):
                     limit = data.get('limit')
                     limit = max(5, min(limit, 300)) if isinstance(limit, int) and not isinstance(limit, bool) else 200
                     self.response(200, worker.db_messages(username, limit))
+                elif self.path == '/api/search_contacts':
+                    # 本地搜索联系人（remark/nick_name/username），无需 OCR 也无需微信前台。
+                    self.response(200, {'conversations': worker.db_search_contacts(data.get('keyword'))})
                 elif self.path == '/api/rules':
                     # 从 DB 会话列表解析，身份是 username；不再依赖 OCR 可见列表。
                     sessions = worker.db_sessions()
