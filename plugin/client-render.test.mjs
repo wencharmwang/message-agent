@@ -42,31 +42,58 @@ function renderSites(component) {
 }
 
 test('每次渲染选择项组件都按 key 渲染，实例状态不会带到下一个联系人', () => {
-  const sites = [...renderSites('CenterDetail'), ...renderSites('CrmSections')];
-  assert.ok(sites.length >= 3, '渲染点数量不对，检查这个测试是否跟得上代码');
+  const sites = [...renderSites('CrmSections'), ...renderSites('ConversationView')];
+  assert.ok(sites.length >= 2, '渲染点数量不对，检查这个测试是否跟得上代码');
   const unkeyed = sites.filter(props => !/(^|[,{])\s*key:/.test(props));
   assert.deepEqual(unkeyed, [],
-    '这些渲染点没有给 key：选择另一个联系人时，组件里的「已看 / 输入框 / 错误」会留在界面上');
+    '这些渲染点没有给 key：选择另一个联系人时，组件里的「输入框 / 错误」会留在界面上');
 });
 
-test('详情组件把「已读」状态当成本会话的本地状态，而不是全局状态', () => {
-  // 这条注释是给下一个改这段代码的人的：去掉调用处的 key 就会重现「所有联系人都变已看」。
+test('会话视图的本地状态按会话隔离', () => {
+  // 这条注释是给下一个改这段代码的人的：去掉调用处的 key 就会重现「上一个人的状态跟着走」。
   assert.match(source, /This state belongs to ONE conversation/);
   // 刻意**不**断言 `key={item.key}` 出现：列表里的 map 到处都是这个写法，那种断言会在缺 key
   // 的情况下照样通过（已经踩到过）。真正管用的判定在上面那条渲染点检查里。
 });
 
-test('产品首屏只呈现自动回复，主动查询回到原生对话框', () => {
-  assert.match(source, /const NAV=\[\['automation','自动回复'\],\['context','回复配置'\]\]/);
-  assert.match(source, /tab:allowedTabs\.includes\(saved\.tab\)\?saved\.tab:'automation'/);
-  assert.match(source, /回到对话框/);
-  assert.match(source, /主动查消息继续走原生对话框里的 MCP/);
-  // 这条锁的是「首屏英雄区还在」这件事（产品不是一堆裸组件）。
-  // 英雄区从品牌渐变板改成了玻璃板，所以断言从渐变字面量换成材质类 + 主标题 ——
-  // 断言的是「它在」，不是「它必须是某个色值」。
-  assert.match(source, /className:'lg-hero'/);
-  assert.match(source, /把重复消息交给助手/);
+test('首屏是消息页：关键信息 + 关键操作 + 对话', () => {
+  assert.match(source, /const NAV=\[\['home','消息'\],\['todos','待办'\],\['automation','自动回复'\],\['context','回复配置'\]\]/);
+  assert.match(source, /allowedTabs\.includes\(saved\.tab\)\?saved\.tab:'home'/);
+  assert.match(source, /function HomePage\(\{store,narrow\}\)/);
+  assert.match(source, /function HomeChat\(\{narrow\}\)/);
+  assert.match(source, /function ConversationView\(\{store,username,title,kind,narrow\}\)/);
+  // 主操作只有一条：整理消息。
+  assert.match(source, /'正在整理…':'整理消息'/);
+  // 对话区明确告诉用户数据来自数据库，不是"去开微信窗口读"。
+  assert.match(source, /读本机数据库，不打开微信窗口/);
 });
+
+test('「回到对话框」退化到开发者模式，不再占日常路径', () => {
+  // 它还是存在的（开发者要用），但必须挂在开发者开关后面，而不是摆在导航底部。
+  assert.match(source, /function RailFoot\(\{store,narrow,tab,closeRef\}\)/);
+  assert.match(source, /const dev=useDevMode\(\);/);
+  assert.match(source, /dev&&h\('button',\{ref:closeRef/);
+  assert.match(source, /回到原生对话框（开发用）/);
+  // 收起来的封面上也不再直接给出口。
+  assert.match(source, /'打开消息助手'/);
+  assert.doesNotMatch(source, /narrow\?'返回':'← 回到对话框'/);
+  assert.doesNotMatch(source, /'管理自动回复'/);
+  // **默认关闭**才是这条需求的关键：开关默认打开的话，出口照样天天挂着。
+  assert.match(source, /const raw=localStorage\.getItem\(DEV_KEY\);return raw==='1';/);
+  assert.doesNotMatch(source, /raw===null\?true:/);
+});
+
+test('消息整理走本地数据库，不再有 OCR 版整理页', () => {
+  // 旧整理页的整套组件必须彻底消失：它们每读一次都要打开微信会话。
+  for (const dead of ['OrganizerHome', 'CenterList', 'CenterDetail', 'MessagesPage', 'AskDock', 'OrganizerProgress']) {
+    assert.doesNotMatch(source, new RegExp(`function ${dead}\\(`), `${dead} 是 OCR 版整理页的组件，不该再存在`);
+  }
+  assert.doesNotMatch(source, /message-center\/organize/, '整理接口换成 /api/home/organize');
+  assert.match(source, /api\('home\/organize',\{\}\)/);
+  // 首页与整理的数据底座是同一次 DB 读取。
+  assert.match(source, /api\('home'\)/);
+});
+
 
 test('品牌图标使用单色绿色聊天气泡', () => {
   assert.match(source, /message-agent-symbol\.svg/);
@@ -87,21 +114,18 @@ test('自动回复布局给导航和规则卡片稳定边界', () => {
   assert.match(source, /WebkitLineClamp:5/);
 });
 
-test('从聊天分析使用后台会话 ID 读取，并说明只读不发送', () => {
+test('从聊天分析使用本地数据库读取，并说明只读不发送', () => {
   assert.doesNotMatch(source, /for\(let seconds=3;seconds>0;seconds--\)/);
   assert.match(source, /后台只读 · 不发消息/);
-  assert.match(source, /不依赖 OCR 识别出的人名/);
-  assert.match(source, /不需要把微信切到前台/);
-  assert.match(source, /后台已经定位到这条会话/);
+  // 会话选择走本地 DB（conversations/search_contacts），不再依赖 OCR 读出的可见列表。
+  assert.match(source, /api\('conversations'\)/);
+  assert.match(source, /api\('search_contacts',\{keyword:kw\}\)/);
   assert.doesNotMatch(source, /phase==='idle'/);
   assert.match(source, /context\\\/profiles\\\/analyze\$/);
 });
 
-test('身份不确定时界面会明确提示并提供人工确认', () => {
-  assert.match(source, /item\.identityStatus==='ambiguous'/);
-  assert.match(source, /confirm-identity/);
-  assert.match(source, /确认当前联系人/);
-});
+// 身份不确定提示（OCR 时代：同名会话认不出是哪一个）随 OCR 整理页一起去掉了：
+// 现在的会话身份是本地数据库里的原生 username，「认错人」这个失败模式不复存在。
 
 // 用户逐条提过的界面约定，钉在源码上，避免下一次改动又漂回去：
 //   1) 勾选框只有一种；回执/提示后面不挂对勾符号

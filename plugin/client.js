@@ -9,6 +9,7 @@ window.__ModuleLoader__.load({id:'messaging-agent-ui',factory:(require)=>{
   // 给每个请求一个上限：超时就会走到 catch/finally，页面自己恢复。
   function apiTimeout(path){
     if(/organize$/.test(path))return 180000;              // 一次整理要读几个会话，服务端上限 120s
+    if(/\/chat$/.test(path))return 180000;                // 一次对话要调模型，还要带上库快照
     if(/\/ask$/.test(path))return 180000;                 // 一次提问要调模型
     if(/context\/profiles\/analyze$/.test(path))return 180000; // 读取微信后还要归纳说话方式
     if(/\/read$/.test(path))return 120000;                // 读一条会话要真的打开聊天
@@ -672,19 +673,24 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
 
   function readSaved(){try{return JSON.parse(sessionStorage.getItem('message-agent-workbench')||'{}');}catch{return{};}}
   function createStore(initial){let state=initial;const listeners=new Set();return{get:()=>state,set(patch){state={...state,...patch};try{sessionStorage.setItem('message-agent-workbench',JSON.stringify({open:state.open,cover:state.cover,tab:state.tab,contactKey:state.contactKey,customerKey:state.customerKey,filter:state.filter,scope:state.scope,order:state.order}));}catch{}listeners.forEach(listener=>listener());},subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);}};}
-  function useStore(store){return useSyncExternalStore(store.subscribe,store.get);}
+  // 第三个参数（getServerSnapshot）是给渲染冒烟测试用的：没有它，SSR 下这一句会抛
+  // "Missing getServerSnapshot"，整页渲染不出来 —— 那个测试正是用来抓白屏的，不能先被它自己挡住。
+  function useStore(store){return useSyncExternalStore(store.subscribe,store.get,store.get);}
 
   // ---- 开发者模式 -----------------------------------------------------------
   // 排查阶段「读不到消息」只看到一句「操作没有完成」就没法往下查：原因在 Runtime 的
   // 错误码、它自己的原文，以及调用栈里，而这三样在面向用户的文案里都被换掉了。打开这个
-  // 开关，界面上会多出一块折叠的原始报错（可复制）。**上线前关掉即可全部隐藏**：开关
-  // 状态存在本机，服务端也有 dev_diagnostics 配置兜底，关掉后原始内容根本不会下发。
+  // 开关，界面上会多出一块折叠的原始报错（可复制），导航底部也会多一个回到原生界面的入口。
+  //
+  // **默认关闭**。以前默认打开是因为产品本身还在搭、处理引擎就是原生的；现在首屏能看消息、
+  // 能整理、能对话，原生界面（工作区/模型选择器/工具 JSON）只剩开发用途，不该占日常路径。
+  // 真要看原始报错时到设置页打开即可，一次点击，不需要改代码。
   const DEV_KEY='ma-dev-mode';
-  function readDevMode(){try{const raw=localStorage.getItem(DEV_KEY);return raw===null?true:raw==='1';}catch{return true;}}
+  function readDevMode(){try{const raw=localStorage.getItem(DEV_KEY);return raw==='1';}catch{return false;}}
   let devMode=readDevMode();
   const devListeners=new Set();
   function setDevMode(on){devMode=!!on;try{localStorage.setItem(DEV_KEY,devMode?'1':'0');}catch{}devListeners.forEach(listener=>listener());}
-  function useDevMode(){return useSyncExternalStore(listener=>{devListeners.add(listener);return()=>devListeners.delete(listener);},()=>devMode);}
+  function useDevMode(){return useSyncExternalStore(listener=>{devListeners.add(listener);return()=>devListeners.delete(listener);},()=>devMode,()=>devMode);}
 
   /** 界面上的开关。做成真的能点，而不是一张写着「推荐设置」的说明卡。 */
   // 开关统一走 .lg-switch（样式表 4.8）。它坐在卡片里，所以不复用功能层玻璃。
@@ -722,7 +728,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   /** 界面上开关开发者模式的地方。只在设置页出现，消息页不重复放。 */
   function DevToggle(){
     const on=useDevMode();
-    return h('button',{onClick:()=>setDevMode(!on),title:'开发者模式：显示原始错误码、Runtime 原文与调用栈，便于定位「读不到消息」的原因。上线前关掉即可隐藏。',
+    return h('button',{onClick:()=>setDevMode(!on),title:'开发者模式：显示原始错误码、Runtime 原文与调用栈，并在导航底部放出回到原生界面的入口。排查完关掉即可。',
       style:{...small(false,false,true),color:on?C.warn:C.text3}},
       '开发者模式：'+(on?'开':'关'));
   }
@@ -751,6 +757,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   // Monochrome icons: they inherit the surrounding text colour via currentColor, so the
   // same glyph reads correctly on a light or dark host theme. Colour emoji cannot do that.
   const ICONS={
+    home:'M3 9.3 10 3.4l7 5.9v6.2a1 1 0 0 1-1 1h-3.4v-4.2H7.4v4.2H4a1 1 0 0 1-1-1V9.3Z',
     messages:'M4 5.5h12a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H9.6L6 17.4v-2.9H4A1.5 1.5 0 0 1 2.5 13V7A1.5 1.5 0 0 1 4 5.5Z',
     today:'M4.2 4.5h11.6a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4.2a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Zm2.5 5.7 1.5 1.5 2.9-2.9',
     contacts:'M10 9.3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 6.2c0-2.2 2.7-3.7 6-3.7s6 1.5 6 3.7',
@@ -934,132 +941,327 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         cursor:disabled?'default':'pointer',...style}});
   }
 
-  // 整理结果留在浏览器里。整理是用户主动发起、要花十几秒到一分钟的操作，而它的产物只是
-  // 「看一眼」的结果——切到「今天要做的」再回来、或者关掉面板再打开，都会让这段结果消失，
-  // 用户于是被迫再整理一次（重新读微信、重新调模型）。只留最近一次，并显示它的时间。
-  const ORGANIZER_KEY='ma-organizer-result';
-  function readOrganizerResult(){
-    try{
-      const parsed=JSON.parse(localStorage.getItem(ORGANIZER_KEY)||'null');
-      return parsed&&typeof parsed.answer==='string'?parsed:null;
-    }catch(e){return null;}
-  }
-  function writeOrganizerResult(value){
-    try{if(value)localStorage.setItem(ORGANIZER_KEY,JSON.stringify(value));else localStorage.removeItem(ORGANIZER_KEY);}catch(e){}
-  }
-
-  // 整理请求挂在**模块级**，不挂在组件里，也不写 localStorage。
+  // ---- 首页：消息（数据全部来自本机数据库）------------------------------------
   //
-  // 请求是在发起它的那个组件里等着的：用户切走再回来，组件会重建，请求却还在跑。上一版把
-  // "正在跑"存进 localStorage，回来时确实读得到"进行中"，但旧实例跑完后清掉的是那段存储 ——
-  // 新实例的 state 没人通知，动画就一直转，要再切一次页面才恢复（实测被指出来过）。
-  // 而纯 localStorage 方案还有更糟的一面：页面被刷新后请求已经不存在了，记录却还在，
-  // 那个动画永远不会结束。模块级变量正好只跨"同一个页面内的切换"，刷掉就没有，语义是对的。
-  let ORGANIZER_RUN=null;
-  let ORGANIZER_RUN_ERROR='';
-  const ORGANIZER_WATCHERS=new Set();
-  function notifyOrganizer(){for(const watcher of ORGANIZER_WATCHERS)watcher();}
+  // 这一页回答三个问题：**现在有什么**（关键信息）、**能做什么**（关键操作）、
+  // **还想知道什么**（对话）。三块都建立在本地解密数据库上，点开就是结果，不碰微信窗口。
+  //
+  // 和旧版「消息整理」页的区别：旧版整条链路是 OCR —— 先刷新可见列表拿到候选名，再让
+  // 模型按名字逐个打开会话去读。一次整理要动好几回微信窗口，抢走用户正在看的会话、
+  // 清掉未读红点，而且只覆盖滚在顶上的那十来行，名字被省略号截断就认不出来。
+  // 新版由服务端一次读库、一次调模型，整个过程中微信窗口不参与。
 
   /**
-   * 整理进行中的反馈。
+   * 一个会话一行：标题 + 时间 + 预览。点开进这个人的会话视图。
    *
-   * 整理这条链路上没有可观察的阶段事件（刷新列表 → 模型挑会话 → 读正文 → 生成结论都在一次
-   * 调用里），所以这里刻意不做假进度条：只给一个不确定的滑动条、一个真实计时和一句随耗时
-   * 变化的说明。用户要的是「它在动，不是我点漏了」，不是一个编出来的百分比。
+   * 「等你回复」用胶囊标出来而不是换个文字颜色 —— 颜色单独承载语义，在深浅两套主题里
+   * 总会丢一样。
    */
-  function OrganizerProgress({startedAt,restored,onStuck}){
-    const [now,setNow]=useState(()=>Date.now());
-    useEffect(()=>{const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[]);
-    const seconds=Math.max(0,Math.round((now-startedAt)/1000));
-    const stage=seconds<10?'正在查看微信当前可见的会话…'
-      :seconds<40?'正在读取最相关的几个会话，并整理其中的信息…'
-      :'还在读取和整理（会话越多越慢，通常不超过一分钟）…';
-    return h('div',{role:'status','aria-live':'polite',style:{marginTop:18,padding:'14px 16px',borderRadius:12,border:'1px solid '+C.border,background:C.panel}},
-      h('div',{style:{display:'flex',alignItems:'center',gap:9,color:C.text,fontSize:14}},h(Spinner,{size:15}),stage),
-      h('div',{className:'ma-track',style:{marginTop:11,height:4,borderRadius:99,background:C.hover,overflow:'hidden'}},
-        h('div',{className:'ma-track-fill',style:{height:'100%',background:C.brand,borderRadius:99}})),
-      // 这一段只说真话：读不到的条目会被跳过，不承诺"过一会儿就好"（那要看具体原因），
-      // 也不再提"微信正在被使用"——用户主动发起的整理不会再因为这条让开（实测就是这么被误导的）。
-      h('p',{style:{...hint,margin:'9px 0 0'}},(restored?'这次整理还在进行中（你在别的页面发起的），结果出来会自动留在这一页。':'')
-        +'已经等了 '+seconds+' 秒。读不到的条目会跳过并继续整理已取得的信息，不会在后台反复重试。'),
-      // 真的断掉时（宿主重启、连接被挂住）要有一条自己出来的路：请求本身取消不了，
-      // 但界面不必陪着它卡住 —— 之前只能刷新整页才能出来。
-      seconds>180&&onStuck&&h('button',{onClick:onStuck,style:{...small(false),marginTop:10}},'好像断掉了 · 点这里重新开始'));
+  function SessionRow({session,onOpen}){
+    const tags=[];
+    if(session.waitingReply)tags.push(h('span',{key:'wait',style:{...pill(C.brand),fontSize:12}},'等你回复'));
+    if(session.unread>0)tags.push(h('span',{key:'unread',style:{fontSize:12,color:C.warn,flexShrink:0}},'未读 '+session.unread));
+    if(session.kind==='group')tags.push(h('span',{key:'group',style:{fontSize:12,color:C.text3,flexShrink:0}},'群聊'));
+    return h('button',{onClick:onOpen,style:{display:'block',width:'100%',textAlign:'left',padding:'12px 14px',
+      border:'none',borderTop:'1px solid '+C.border,background:'transparent',color:C.text,cursor:'pointer'}},
+      h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline'}},
+        h('strong',{style:{fontSize:15,fontWeight:600,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},session.title),
+        h('span',{style:{fontSize:12,color:C.text3,flexShrink:0}},relativeTime(session.lastAt))),
+      h('div',{style:{display:'flex',gap:8,alignItems:'center',marginTop:5,minWidth:0}},
+        ...tags,
+        h('span',{style:{flex:1,minWidth:0,fontSize:13,color:C.text3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},
+          (session.lastDirection==='outgoing'?'我：':'')+(session.preview||'（没有可读的文本消息）'))));
   }
 
-  function AskDock({conversationKey,identity,onChanged,endpoint}){
-    const [text,setText]=useState(''),[asking,setAsking]=useState(false);
-    const [asked,setAsked]=useState(''),[answer,setAnswer]=useState(null);
-    const [note,setNote]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
-    const title=identity&&identity.title?identity.title:'他';
+  /** 首屏的一张卡：标题 + 一句说明 + 右上角操作。全页共用，保证节奏一致。 */
+  function HomeCard({title,meta,action,children}){
+    return h('section',{style:card},
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,marginBottom:children?12:0}},
+        h('div',{style:{minWidth:0}},
+          h('h2',{style:{...h2,margin:0,fontSize:15}},title),
+          meta&&h('span',{style:{display:'block',fontSize:12,color:C.text3,marginTop:3}},meta)),
+        action||null),
+      children);
+  }
+
+  /** 首屏三格数字。只放一眼能看懂的量，不做百分比、不做图表。 */
+  function StatStrip({totals}){
+    const cells=[['等你回复',totals.waiting,'最后一条是别人发的'],
+                 ['待办',totals.todos,'还没做完的事'],
+                 ['今天新消息',totals.todayMessages,'最近 24 小时内的消息条数']];
+    return h('div',{style:{display:'grid',gridTemplateColumns:'repeat(3,minmax(0,1fr))',gap:10,marginBottom:14}},
+      cells.map(([label,value,title])=>h('div',{key:label,title,
+        style:{padding:'14px 15px',borderRadius:'var(--lg-r-lg)',border:'1px solid var(--lg-card-line)',
+          backgroundColor:FIELD_BG,backgroundImage:'var(--lg-card-sheen)'}},
+        h('strong',{style:{display:'block',fontSize:26,lineHeight:1.15,color:C.text}},String(value??0)),
+        h('span',{style:{fontSize:12,color:C.text2}},label))));
+  }
+
+  /**
+   * 整理结果：结论 + 需要关注的人 + 可勾选的待办。
+   *
+   * 待办**默认全选、但不自动入库** —— 模型给"要做的事"永远只能是建议，记成待办是用户的
+   * 动作。旧版这类建议直接进待办，结果把用户不知道是什么的群聊也塞进了今天要做的事。
+   */
+  function OrganizeResult({result,busy,picked,added,onCheck,onAdd,onOpen}){
+    const todos=result?.todos||[];
+    const focus=result?.focus||[];
+    const chosen=todos.map((item,index)=>index).filter(index=>picked[index]!==false&&!added[index]);
+    return h('section',{style:card},
+      h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline',marginBottom:10}},
+        h('h2',{style:{...h2,margin:0,fontSize:15}},'整理结果'),
+        h('span',{style:{fontSize:12,color:C.text3}},
+          (result.at?relativeTime(result.at):'')+(result.sessionsRead?(' · 读了 '+result.sessionsRead+' 个会话'):''))),
+      result.summary&&h('p',{style:{margin:'0 0 14px',fontSize:15,lineHeight:1.85,color:C.text,whiteSpace:'pre-wrap',wordBreak:'break-word'}},result.summary),
+      !!focus.length&&h('div',{style:{marginBottom:14}},
+        h('p',{style:{...hint,margin:'0 0 8px'}},'需要你关注'),
+        h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
+          focus.map((item,index)=>h('div',{key:(item.conversation||'')+index,
+            style:{display:'flex',gap:10,alignItems:'flex-start',padding:'11px 14px',borderTop:index?'1px solid '+C.border:'none'}},
+            h('div',{style:{flex:1,minWidth:0}},
+              h('strong',{style:{fontSize:14,color:C.text}},item.conversation||'（未指明）'),
+              item.why&&h('div',{style:{fontSize:13,color:C.text2,marginTop:4,lineHeight:1.7}},item.why),
+              item.action&&h('div',{style:{fontSize:13,color:C.text3,marginTop:3}},'建议：'+item.action)),
+            item.username&&h('button',{onClick:()=>onOpen(item.username,item.conversation,item.kind),
+              style:{...small(false),flexShrink:0}},'看看'))))),
+      !!todos.length&&h('div',null,
+        h('p',{style:{...hint,margin:'0 0 8px'}},'勾选要记进待办的事（默认全选）：'),
+        h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
+          todos.map((item,index)=>h('label',{key:item.title+index,
+            style:{display:'flex',gap:10,alignItems:'flex-start',padding:'11px 14px',borderTop:index?'1px solid '+C.border:'none',
+              cursor:busy||added[index]?'default':'pointer'}},
+            h(Checkbox,{checked:picked[index]!==false&&!added[index],disabled:busy||!!added[index],
+              label:'记成待办：'+firstLine(item.title,20),onChange:event=>onCheck(index,event.target.checked),style:{marginTop:3}}),
+            h('div',{style:{flex:1,minWidth:0}},
+              h('div',{style:{fontSize:14,color:added[index]?C.text3:C.text,lineHeight:1.6,
+                textDecoration:added[index]?'line-through':'none',wordBreak:'break-word'}},item.title),
+              (item.detail||item.conversation)&&h('div',{style:{fontSize:12,color:C.text3,marginTop:3,lineHeight:1.6,wordBreak:'break-word'}},
+                (item.detail||'')+(item.conversation?((item.detail?' · ':'')+'来自 '+item.conversation):''))),
+            added[index]&&h('span',{style:{fontSize:12,color:C.ok,flexShrink:0}},'已加入')))),
+        h('button',{onClick:onAdd,disabled:busy||!chosen.length,style:{...small(true),marginTop:12}},
+          busy?'正在记…':(chosen.length?('加入选中的 '+chosen.length+' 件'):'没有选中任何条目'))),
+      !todos.length&&!focus.length&&h('p',{style:{margin:0,fontSize:14,color:C.text2,lineHeight:1.8}},'这次整理没有给出可执行的事项。'),
+      h('p',{style:{...hint,margin:'12px 0 0'}},'整理只读本机数据库；不会打开微信窗口，也不会发送任何消息。'));
+  }
+
+  /** 对话里的一条。用户的靠右、助手的靠左；助手答案里的「- [ ] 」可以一键记成待办。 */
+  function ChatBubble({item,onAddTodos}){
+    const mine=item.role==='user';
+    const todos=mine?[]:answerListItems(item.text);
+    const body=mine?String(item.text||''):(answerBody(item.text)||'');
+    return h('div',{style:{display:'flex',justifyContent:mine?'flex-end':'flex-start',marginBottom:10}},
+      h('div',{style:{maxWidth:'88%',minWidth:0,padding:'10px 13px',borderRadius:'var(--lg-r-lg)',
+        border:'1px solid '+(mine?'transparent':'var(--lg-card-line)'),
+        backgroundColor:mine?'var(--ma-primary-soft)':FIELD_BG,color:C.text,
+        fontSize:14,lineHeight:1.75,whiteSpace:'pre-wrap',wordBreak:'break-word'}},
+        body||null,
+        !mine&&!!item.tools?.length&&h('div',{style:{marginTop:6,fontSize:12,color:C.text3}},'（'+toolText(item.tools)+'）'),
+        !mine&&!!todos.length&&h('button',{onClick:()=>onAddTodos(todos),style:{...small(false),marginTop:9}},'把上面 '+todos.length+' 条记成待办')));
+  }
+
+  /**
+   * 与消息助手的对话。
+   *
+   * 服务端固定用一个 harness session（messaging-home），所以模型记得住上下文；这里渲染的
+   * items 来自 data/chat-log.json，只为"刷新之后还能看见刚才那几轮"。
+   * 每次提问，服务端都会把一份本地数据库快照拼进提示词 —— 助手不需要打开微信窗口读消息。
+   */
+  function HomeChat({narrow}){
+    const [items,setItems]=useState([]),[text,setText]=useState('');
+    const [asking,setAsking]=useState(false),[error,setError]=useState(''),[note,setNote]=useState('');
+    const [loading,setLoading]=useState(true),boxRef=useRef(null);
+    useEffect(()=>{
+      let live=true;
+      api('chat').then(result=>{if(live)setItems(result?.items||[]);})
+        .catch(()=>{}).finally(()=>{if(live)setLoading(false);});
+      return()=>{live=false;};
+    },[]);
+    useEffect(()=>{const node=boxRef.current;if(node)node.scrollTop=node.scrollHeight;},[items,asking]);
     async function submit(value){
       const question=String(value===undefined?text:value).trim();
       if(!question||asking)return;
-      setAsking(true);setError('');setNote('');setAnswer(null);setAsked(question);setText('');
-      try{setAnswer(await api(endpoint||('conversations/'+conversationKey+'/ask'),{text:question}));}
-      catch(e){setError(e.message);}
+      setAsking(true);setError('');setNote('');setText('');
+      const mine={role:'user',text:question,at:Date.now()/1000};
+      setItems(old=>[...old,mine]);
+      try{const result=await api('chat',{text:question});setItems(result?.items||[]);}
+      // 失败要把用户刚发的那句放回输入框：不然他写了半天的问题就这么没了。
+      catch(e){setError(e.message);setItems(old=>old.slice(0,-1));setText(question);}
       finally{setAsking(false);}
     }
-    async function addTodos(items){
-      setBusy(true);setError('');setNote('');
-      try{
-        for(const item of items)await api('todos',{conversationKey,title:firstLine(item,40),detail:item,source:'assistant'});
-        setNote('已记下 '+items.length+' 条待办');
-        onChanged&&onChanged();
-      }catch(e){setError(e.message);}finally{setBusy(false);}
+    async function clear(){
+      try{await mutate('chat','PATCH');setItems([]);setError('');setNote('');}
+      catch(e){setError(e.message);}
     }
-    async function saveFollowup(){
-      setBusy(true);setError('');setNote('');
+    async function addTodos(list){
+      setError('');setNote('');
       try{
-        await api('customers/'+conversationKey+'/followups',{kind:'助手摘要',note:answer.answer,evidence:toolText(answer.tools)});
-        setNote('已存为跟进记录');
-        onChanged&&onChanged();
-      }catch(e){setError(e.message);}finally{setBusy(false);}
+        for(const item of list)await api('todos',{title:firstLine(item,60),source:'assistant'});
+        setNote('已记下 '+list.length+' 条待办');
+      }catch(e){setError(e.message);}
     }
-    const items=answer?answerListItems(answer.answer):[];
-    // 正文与下面的待办清单不重复：清单里的条目从正文里摘掉，只在清单那处呈现。
-    // 「存为跟进记录」保存的仍是完整答案（见上面的 saveFollowup），档案里不该丢东西。
-    const body=answer?answerBody(answer.answer):'';
-    const evidence=answer&&answer.tools&&answer.tools.length?'已读取微信记录':'';
-    // 提问保持自然口语；"哪些事要我做"由后端的产品级提示词负责标成「- [ ] 」，前端不再猜格式。
-    const quick=[
-      ['最近有什么事要处理？','最近有什么事需要我本人处理？'],
-      ['总结最近聊天要点','用几句话总结我和'+title+'最近聊天的要点。'],
-      ['我答应过什么没兑现？','我答应过'+title+'什么但还没兑现？']];
-    return h('div',{'data-ask':'dock',style:{flexShrink:0,borderTop:'1px solid '+C.border,background:C.bg,padding:'12px 20px 16px'}},
-      h('div',{style:{maxWidth:780}},
+    const quick=['最近有什么事要我处理？','谁在等我回复？','总结一下最近的群消息'];
+    return h('div',{style:{display:'flex',flexDirection:'column',height:narrow?'auto':'100%',
+      minHeight:narrow?380:0,minWidth:0}},
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,padding:'14px 18px 10px',flexShrink:0}},
+        h('div',{style:{minWidth:0}},
+          h('strong',{style:{fontSize:15,color:C.text}},'问助手'),
+          h('span',{style:{display:'block',fontSize:12,color:C.text3,marginTop:2}},'读本机数据库，不打开微信窗口')),
+        items.length?h('button',{onClick:clear,style:small(false,false,true)},'清空'):null),
+      h('div',{ref:boxRef,style:{flex:1,minHeight:0,overflowY:'auto',padding:'4px 18px 12px'}},
+        loading&&h('p',{style:hint},'正在读取对话…'),
+        !loading&&!items.length&&h('div',{style:{padding:'10px 0 18px'}},
+          h('p',{style:{...hint,margin:'0 0 12px'}},'可以直接问，例如：'),
+          h('div',{style:{display:'flex',gap:8,flexWrap:'wrap'}},
+            quick.map(question=>h('button',{key:question,onClick:()=>submit(question),style:small(false,false,true)},question)))),
+        items.map((item,index)=>h(ChatBubble,{key:index,item,onAddTodos:addTodos})),
+        asking&&h('div',{style:{display:'flex',alignItems:'center',gap:9,color:C.text2,fontSize:13,padding:'6px 0'}},
+          h(Spinner,{size:14}),'助手在想，通常十几秒…')),
+      h('div',{style:{padding:'0 18px 16px',flexShrink:0}},
         h(Notice,{error}),
-        // 回答就落在输入框上方：不跳页、不盖住正文，读完了可以关掉。
-        answer&&h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:RESULT_BG,marginBottom:10,maxHeight:'44vh',overflowY:'auto'}},
-          h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline',padding:'11px 15px',borderBottom:'1px solid '+C.border,position:'sticky',top:0,background:C.panel}},
-            h('span',{style:{fontSize:13,color:C.text3,minWidth:0,wordBreak:'break-word'}},'你问：'+asked),
-            h('button',{onClick:()=>{setAnswer(null);setNote('');},'aria-label':'关闭回答',style:{...small(false,false,true),flexShrink:0}},'关闭')),
-          body&&h('p',{style:{margin:0,padding:'14px 15px',fontSize:15,lineHeight:1.85,color:C.text,whiteSpace:'pre-wrap',wordBreak:'break-word'}},body),
-          !!items.length&&h('div',{style:{padding:'0 15px 14px'}},
-            h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,marginBottom:6}},
-              h('span',{style:{fontSize:13,color:C.text3}},'以上可以直接变成待办'),
-              h('button',{onClick:()=>addTodos(items),disabled:busy,style:small(true)},busy?'正在记…':'全部记成待办')),
-            items.map((item,index)=>h('div',{key:item+index,style:{display:'flex',gap:10,alignItems:'flex-start',padding:'9px 0',borderTop:'1px solid '+C.border}},
-              h('span',{style:{flex:1,minWidth:0,fontSize:14,color:C.text2,lineHeight:1.7}},item),
-              h('button',{onClick:()=>addTodos([item]),disabled:busy,style:{...small(false),flexShrink:0}},'记成待办')))),
-          h('div',{style:{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center',padding:'0 15px 14px'}},
-            h('button',{onClick:saveFollowup,disabled:busy,style:small(false)},busy?'正在保存…':'存为跟进记录'),
-            evidence&&h('span',{style:{fontSize:13,color:C.text3}},evidence)),
-          note&&h('div',{style:{padding:'0 15px 14px'}},h(Result,{text:note}))),
-        // 运行中只说在做事，不给中间步骤。
-        asking&&h('div',{style:{display:'flex',alignItems:'center',gap:9,marginBottom:9,color:C.text2,fontSize:14}},
-          h('span',{className:'ma-pulse',style:{width:9,height:9,borderRadius:'50%',background:C.brand,flexShrink:0}}),
-          '助手正在处理「'+asked+'」，通常十几秒，不用留在这页。'),
+        h(Result,{text:note}),
         h('div',{style:{display:'flex',gap:8,alignItems:'center'}},
           h('input',{value:text,onChange:event=>setText(event.target.value),
             onKeyDown:event=>{if(event.key==='Enter')submit();},
-            placeholder:'问助手任何关于'+title+'和这段聊天的事，例如：最近有什么事要处理？',
-            'aria-label':'问助手',style:{...field,flex:'1 1 auto',minWidth:0}}),
-          h('button',{onClick:()=>submit(),disabled:asking||!text.trim(),style:{...button(true),flexShrink:0}},asking?'运行中…':'发送')),
-        !answer&&!asking&&h('div',{style:{display:'flex',gap:8,marginTop:9,flexWrap:'wrap'}},
-          quick.map(([label,question])=>h('button',{key:label,onClick:()=>submit(question),style:small(false,false,true)},label)))));
+            placeholder:'问助手任何关于你消息的事…','aria-label':'问助手',style:{...field,flex:'1 1 auto',minWidth:0}}),
+          h('button',{onClick:()=>submit(),disabled:asking||!text.trim(),style:{...button(true),flexShrink:0}},asking?'…':'发送'))));
   }
 
+  /** 首页：关键信息 + 关键操作 + 对话。 */
+  function HomePage({store,narrow}){
+    const home=usePoller(true,()=>api('home'),8000);
+    const [organizing,setOrganizing]=useState(false),[busy,setBusy]=useState(false);
+    const [error,setError]=useState(''),[note,setNote]=useState('');
+    const [picked,setPicked]=useState({}),[added,setAdded]=useState({});
+    const data=home.data;
+    const totals=data?.totals||{conversations:0,reading:0,waiting:0,todayMessages:0,todos:0,doing:0,automation:0};
+    const result=data?.lastOrganize||null;
+    const openConversation=(username,title,kind)=>store.set({tab:'home',contactKey:username,contactTitle:title,contactKind:kind});
+    async function organize(){
+      if(organizing)return;
+      setOrganizing(true);setError('');setNote('');setPicked({});setAdded({});
+      try{await api('home/organize',{});await home.refresh();}
+      catch(e){setError(e.message);}
+      finally{setOrganizing(false);}
+    }
+    async function addPicked(){
+      const todos=result?.todos||[];
+      const chosen=todos.map((item,index)=>index).filter(index=>picked[index]!==false&&!added[index]);
+      if(!chosen.length||busy)return;
+      setBusy(true);setError('');setNote('');
+      try{
+        // 服务端对「同来源 + 同标题 + 未完成」的重复会返回已存在的那条（deduped），
+        // 这里照实说，不报一个虚的数量。
+        let created=0;
+        for(const index of chosen){
+          const item=todos[index];
+          const saved=await api('todos',{title:firstLine(item.title,60),detail:item.detail,source:'assistant',
+            username:item.username||undefined,conversationTitle:item.conversation||undefined,kind:item.kind});
+          if(!saved.deduped)created++;
+        }
+        setAdded(old=>{const next={...old};chosen.forEach(index=>{next[index]=true;});return next;});
+        setNote(created
+          ? ('已把 '+created+' 件加进待办'+(chosen.length>created?('（另外 '+(chosen.length-created)+' 件之前已经记过）'):''))
+          : '这几件之前已经记过了，没有重复添加。');
+        await home.refresh();
+      }catch(e){setError(e.message);}finally{setBusy(false);}
+    }
+    async function finishTodo(todo){
+      setBusy(true);setError('');
+      try{await api('todos/'+todo.id+'/done',{});await home.refresh();}
+      catch(e){setError(e.message);}finally{setBusy(false);}
+    }
+    if(home.loading&&!data)return h(Empty,{title:'正在打开消息',text:'正在读取本机微信数据库，请稍等一下…'});
+    const waiting=data?.waiting||[],recent=data?.recent||[],todos=data?.todos||[],automation=data?.automation||[];
+    const opened=new Set(waiting.map(session=>session.username));
+    const others=recent.filter(session=>!opened.has(session.username));
+    const list=(sessions)=>h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
+      sessions.map(session=>h(SessionRow,{key:session.username,session,
+        onOpen:()=>openConversation(session.username,session.title,session.kind)})));
+    const pagebar=h('div',{className:'lg-glass ma-pagebar'},
+      h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',minWidth:0}},
+        h('h1',{style:{...h1,fontSize:20,margin:0}},'消息'),
+        data?.scanAt?h('span',{style:{fontSize:12,color:C.text3}},'数据库更新于 '+relativeTime(data.scanAt)):null),
+      h('button',{onClick:organize,disabled:organizing,
+        style:{...button(true),display:'inline-flex',alignItems:'center',justifyContent:'center',gap:8}},
+        organizing?h(Spinner,{size:14}):null,organizing?'正在整理…':'整理消息'));
+    const todoCard=h(HomeCard,{title:'待办',meta:'还没做完的 '+totals.todos+' 件',
+      action:h('button',{onClick:()=>store.set({tab:'todos'}),style:small(false)},'全部待办')},
+      h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
+        todos.map((todo,index)=>h('div',{key:todo.id,style:{display:'flex',gap:11,alignItems:'flex-start',padding:'12px 14px',borderTop:index?'1px solid '+C.border:'none'}},
+          h(Checkbox,{checked:false,disabled:busy,label:'标记完成：'+firstLine(todo.title,20),
+            onChange:()=>finishTodo(todo),style:{marginTop:3}}),
+          h('div',{style:{flex:1,minWidth:0}},
+            h('div',{style:{fontSize:14,color:C.text,lineHeight:1.6,wordBreak:'break-word'}},todo.title),
+            todo.who&&h('div',{style:{fontSize:12,color:C.text3,marginTop:3}},'来自 '+todo.who))))));
+    const automationCard=h(HomeCard,{title:'自动回复需要你看一眼',
+      action:h('button',{onClick:()=>store.set({tab:'automation'}),style:small(false)},'去处理')},
+      h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
+        automation.map((item,index)=>h('div',{key:item.key||index,style:{padding:'11px 14px',borderTop:index?'1px solid '+C.border:'none'}},
+          h('strong',{style:{fontSize:14,color:C.text}},item.title||'（未命名会话）'),
+          item.reason&&h('div',{style:{fontSize:13,color:C.text2,marginTop:4,lineHeight:1.7}},item.reason)))));
+    const left=h('div',{style:{flex:narrow?'0 0 auto':'1 1 auto',minWidth:0,overflowY:narrow?'visible':'auto'}},
+      h('div',{style:{padding:narrow?'18px 16px 26px':'24px clamp(18px,3vw,40px) 48px',maxWidth:940,margin:'0 auto',boxSizing:'border-box'}},
+        pagebar,
+        h(Notice,{error,dev:home.errorDev,code:home.errorCode}),
+        h(Result,{text:note}),
+        h(StatStrip,{totals}),
+        !totals.conversations&&h(HomeCard,{title:'还没有读到会话'},
+          h('p',{style:{...hint,margin:0}},'本机微信数据库里暂时没有可读的会话。确认微信登录过、数据库已解锁后，这一页会自动出现内容。')),
+        result?h(OrganizeResult,{result,busy:busy||organizing,picked,added,
+          onCheck:(index,on)=>setPicked(old=>({...old,[index]:on})),
+          onAdd:addPicked,onOpen:openConversation}):null,
+        waiting.length?h(HomeCard,{title:'需要你回复',meta:'最后一条是对方发的，共 '+totals.waiting+' 个'},list(waiting)):null,
+        todos.length?todoCard:null,
+        others.length?h(HomeCard,{title:'最近有动静',meta:'按最后一条消息的时间排序'},list(others)):null,
+        automation.length?automationCard:null));
+    const chat=narrow
+      ? h('div',{style:{borderTop:'1px solid '+C.border,paddingTop:6}},h(HomeChat,{narrow:true}))
+      : h('div',{style:{width:400,flexShrink:0,borderLeft:'1px solid '+C.border,minHeight:0,display:'flex'}},h(HomeChat,{narrow:false}));
+    return h('div',{style:{display:'flex',height:'100%',width:'100%',minWidth:0,
+      flexDirection:narrow?'column':'row',overflowY:narrow?'auto':'hidden'}},left,chat);
+  }
+
+  /**
+   * 一个会话：本地数据库里的正文 + 它身上的待办 / 跟进。
+   *
+   * 这里**没有**「读取这条会话」按钮：旧版那一步要打开微信聊天，会挤走用户正在看的那个
+   * 会话、清掉未读红点，而读到的只有屏幕上的那几行。数据库读取随取随用，所以直接给结果。
+   */
+  function ConversationView({store,username,title,kind,narrow}){
+    // This state belongs to ONE conversation, which is why the caller renders this component
+    // with `key={username}`. Without that key React reuses the instance when the user picks
+    // another contact and the fetched rows, errors and scroll position follow them around.
+    const detail=usePoller(true,()=>api('home/conversation?username='+encodeURIComponent(username)
+      +'&title='+encodeURIComponent(title||'')),10000);
+    const data=detail.data,messages=data?.messages||[];
+    const back=()=>store.set({contactKey:null,contactTitle:null,contactKind:null});
+    return h('div',{style:{display:'flex',flexDirection:'column',height:'100%',width:'100%',minWidth:0}},
+      h('div',{style:{flexShrink:0,padding:'14px clamp(16px,3vw,32px) 12px',borderBottom:'1px solid '+C.border,
+        display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}},
+        h('button',{onClick:back,style:{...small(false),flexShrink:0}},'← 全部消息'),
+        h('h1',{style:{...h1,fontSize:19,margin:0,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},
+          data?.identity?.title||title||username),
+        h('span',{style:{...pill(kind==='group'?C.text3:C.brand),fontSize:12,flexShrink:0}},kind==='group'?'群聊':'单聊'),
+        h('span',{style:{fontSize:12,color:C.text3}},messages.length?('本地数据库里最近 '+messages.length+' 条'):'')),
+      h('div',{style:{flex:1,minHeight:0,overflowY:'auto'}},
+        h('div',{style:{maxWidth:840,margin:'0 auto',padding:narrow?'14px 14px 40px':'22px 32px 48px',boxSizing:'border-box'}},
+          h(Notice,{error:detail.error,dev:detail.errorDev,code:detail.errorCode}),
+          h('section',{style:card},
+            h('h2',{style:{...h2,marginBottom:12}},'聊天记录'),
+            !messages.length&&h('p',{style:{...hint,margin:0}},
+              detail.loading?'正在读取…':'本地数据库里没有可读的文本消息（可能都是图片、语音这类内容）。'),
+            messages.map((message,index)=>h('div',{key:index,style:{display:'flex',
+              justifyContent:message.direction==='outgoing'?'flex-end':'flex-start',marginBottom:8}},
+              h('div',{style:{maxWidth:'78%',minWidth:0,padding:'9px 12px',borderRadius:'var(--lg-r-lg)',
+                fontSize:14,lineHeight:1.7,whiteSpace:'pre-wrap',wordBreak:'break-word',
+                border:'1px solid '+(message.direction==='outgoing'?'transparent':'var(--lg-card-line)'),
+                backgroundColor:message.direction==='outgoing'?'var(--ma-primary-soft)':FIELD_BG,color:C.text}},
+                message.content,
+                h('span',{style:{display:'block',fontSize:11,color:C.text3,marginTop:4}},relativeTime(message.at))))))),
+          data&&h(CrmSections,{key:data.conversationKey,customerKey:data.conversationKey,identity:data.identity,
+            data:{customer:data.customer,todos:data.todos,followups:data.followups},
+            loading:detail.loading,error:'',onChanged:detail.refresh})));
+  }
   function CrmSections({customerKey,identity,data,loading,error,onChanged}){
     const [busy,setBusy]=useState(false),[actionError,setActionError]=useState('');
     const [todoOpen,setTodoOpen]=useState(false),[followOpen,setFollowOpen]=useState(false);
@@ -1136,430 +1338,6 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           h('div',null,h('button',{onClick:saveCustomer,disabled:saving||!dirty,style:small(true)},saving?'正在保存…':(dirty?'保存':'已保存'))))));
   }
 
-  function DraftCard({draft,onChanged}){
-    const [editing,setEditing]=useState(false),[text,setText]=useState(draft.text),[busy,setBusy]=useState(false),[error,setError]=useState(''),[copied,setCopied]=useState(false);
-    const open=draft.state==='awaiting_confirmation';
-    const SETTLED={sent:'已发送',uncertain:'发送结果待确认',approval_required:'等待你在消息服务里批准',not_sent:'没有发出',sending:'正在发送…',cancelled:'已取消的草稿',expired:'已过期的草稿'};
-    const stateColor=draft.state==='sent'?C.ok:(draft.state==='uncertain'||draft.state==='approval_required'?C.warn:draft.state==='not_sent'?C.error:null);
-    async function save(){setBusy(true);setError('');try{await api('drafts/'+draft.id+'/revise',{expectedRevision:draft.revision,text});setEditing(false);onChanged();}catch(e){setError(e.message);}finally{setBusy(false);}}
-    async function cancel(){if(!window.confirm('取消这条回复草稿吗？'))return;setBusy(true);try{await api('drafts/'+draft.id+'/cancel',{});onChanged();}catch(e){setError(e.message);}finally{setBusy(false);}}
-    async function confirm(){setBusy(true);setError('');try{await api('drafts/'+draft.id+'/confirm',{expectedRevision:draft.revision});onChanged();}catch(e){setError(e.message);}finally{setBusy(false);}}
-    async function copy(){try{await navigator.clipboard.writeText(text);setCopied(true);setTimeout(()=>setCopied(false),2000);}catch{setError('复制失败了，请手动选中文字复制');}}
-    return h('article',{style:{...card,padding:16}},
-      h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,alignItems:'center'}},
-        h('strong',{style:{fontSize:15,color:C.text}},SETTLED[draft.state]||(open?'等你确认的回复':draft.state)),
-        h('span',{style:pill(stateColor)},'第 '+draft.revision+' 版')),
-      editing?h('textarea',{value:text,onChange:event=>setText(event.target.value),rows:4,style:{...field,marginTop:12,resize:'vertical',lineHeight:1.7}})
-        :h('p',{style:{margin:'12px 0',fontSize:16,lineHeight:1.85,color:C.text,whiteSpace:'pre-wrap',wordBreak:'break-word'}},draft.text),
-      (draft.detail&&draft.state!=='awaiting_confirmation')&&h('p',{style:{margin:'0 0 10px',fontSize:13,color:stateColor||C.text2,lineHeight:1.7}},draft.detail),
-      h(Notice,{error}),
-      open&&h('div',{style:{display:'flex',gap:10,flexWrap:'wrap'}},
-        editing?h(React.Fragment,null,
-          h('button',{disabled:busy,onClick:save,style:button(true)},busy?'正在保存…':'保存修改'),
-          h('button',{disabled:busy,onClick:()=>{setEditing(false);setText(draft.text);},style:button(false)},'不保存'))
-        :h(React.Fragment,null,
-          h('button',{disabled:busy,onClick:confirm,style:button(true)},busy?'正在发送…':'确认发送'),
-          h('button',{disabled:busy,onClick:copy,style:button(false)},copied?'已复制':'复制正文'),
-          h('button',{disabled:busy,onClick:()=>setEditing(true),style:button(false)},'改一改'),
-          h('button',{disabled:busy,onClick:cancel,style:button(false,true)},'不用了'))),
-      open&&h('p',{style:{...hint,marginTop:12}},'上面就是最终要发给「'+draft.target.title+'」的正文。点「确认发送」才会真正发出去。'));
-  }
-
-  function ContactDetail({store,ctx,items,narrow}){
-    const {contactKey}=useStore(store);
-    const item=items.find(value=>value.key===contactKey);
-    const [actionError,setActionError]=useState('');
-    // 「再检查一次」过去只是把轮询重跑一遍，状态没变时界面毫无动静，用户无法判断点中了没有。
-    // 现在分三拍给反馈：按下即变「正在检查…」→ 等这一轮真正读完 → 落一行带时间的结论。
-    const [checking,setChecking]=useState(false),[checkedAt,setCheckedAt]=useState(0);
-    const detail=usePoller(item?.key||false,signal=>fetch('/message-agent/api/conversations/'+item.key,{signal}).then(async response=>{const data=await response.json().catch(()=>({}));if(!response.ok)throw Error(data.error||'暂时无法读取详情');return data;}),8000);
-    const check=async()=>{
-      if(checking)return;
-      setChecking(true);setCheckedAt(0);
-      // refresh() 要等这一轮真正读完（成功或失败）才 resolve；再兜一个超时，避免永远卡在「正在检查…」。
-      try{await Promise.race([detail.refresh(),new Promise(resolve=>setTimeout(resolve,8000))]);}catch{}
-      setChecking(false);setCheckedAt(Date.now());
-    };
-    const clockTime=value=>{const date=new Date(value);return pad2(date.getHours())+':'+pad2(date.getMinutes());};
-    if(!item)return h(Empty,{title:'选一个人',text:'左边点一个联系人，就能看到和他的聊天情况、要跟进的事，以及让助手帮忙。'});
-    const jobs=detail.data?.recentJobs||[],drafts=detail.data?.drafts||[],jobRuns=foldJobRuns(jobs);
-    // 功能层：页头是「一直悬在内容之上」的功能条，用玻璃。
-    // zIndex 从 1 抬到 3：玻璃条被内容层后来的定位元素压住会显得很脏。
-    const header=h('header',{className:'lg-glass lg-bar','data-liquid-glass':'','data-scale':'-72','data-chroma':'5','data-border':'.09','data-blur':'2',
-      style:{position:'sticky',top:0,zIndex:3,padding:'14px 20px',display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,flexWrap:'wrap'}},
-      h('div',{style:{display:'flex',alignItems:'center',gap:12}},
-        narrow&&h('button',{onClick:()=>store.set({contactKey:null}),'aria-label':'返回消息列表',style:{...small(false),padding:'8px 12px'}},'←'),
-        h('div',null,
-          h('h2',{style:{margin:0,fontSize:20,color:C.text}},item.identity.title),
-          h('p',{style:{margin:'4px 0 0',fontSize:13,color:C.text3}},(item.identity.kind==='group'?'微信群聊':'微信联系人')+' · '+(item.rule.enabled?'自动回复中':'自动回复已暂停')))),
-      item.attentionKind==='connection'&&h('button',{onClick:check,disabled:checking,style:{...button(false),opacity:checking?0.6:1,cursor:checking?'default':'pointer'}},checking?'正在检查…':'重新检查'));
-    const alertBox=item.attentionReason&&h('div',{style:{padding:'15px 16px',borderRadius:12,border:'1px solid '+(item.bucket==='error'?C.error:C.warn),marginBottom:20}},
-      h('strong',{style:{fontSize:15,color:C.text}},item.bucket==='error'?'需要处理一下':'等你处理'),
-      h('p',{style:{margin:'7px 0 0',color:C.text2,fontSize:14,lineHeight:1.75}},item.attentionReason),
-      item.attentionKind==='send'&&h('p',{style:{margin:'7px 0 0',color:C.text3,fontSize:13,lineHeight:1.7}},
-        '助手不会自动重发（避免发重复）。这条到底发出去没有，你去微信里看一眼就行 —— 监听没有中断，新消息照常处理。'),
-      item.attentionKind==='connection'&&h('button',{onClick:check,disabled:checking,style:{...small(false),marginTop:12,opacity:checking?0.6:1,cursor:checking?'default':'pointer'}},checking?'正在检查…':'再检查一次'),
-      // 结论必须落成文字，否则「点了没反应」还会再回来。
-      item.attentionKind==='connection'&&!!checkedAt&&h('p',{style:{margin:'10px 0 0',color:C.text3,fontSize:13,lineHeight:1.7}},
-        clockTime(checkedAt)+' 又检查了一次，还是读不到微信；助手会继续每 5 秒自动重试，不用一直点。'),
-      // A record the user cannot act on is just noise: every attention state needs a way out.
-      item.attentionKind==='send'&&h('div',{style:{display:'flex',gap:10,flexWrap:'wrap',marginTop:12}},
-        h('button',{onClick:async()=>{
-          setActionError('');
-          try{await api('conversations/'+item.key+'/ack',{});detail.refresh();}catch(e){setActionError(e.message);}
-        },style:small(true)},'知道了'),
-        h('button',{onClick:detail.refresh,style:small(false)},'刷新')));
-    return h('section',{style:{flex:1,display:'flex',flexDirection:'column',minWidth:0,minHeight:0},'aria-label':item.identity.title+'的消息详情'},
-      header,
-      h('div',{style:{flex:1,overflowY:'auto',minWidth:0}},
-      h('div',{style:{padding:'20px 20px 24px',maxWidth:780}},
-        h(Notice,{error:actionError||detail.error}),
-        alertBox,
-        h(CrmSections,{key:item.key,customerKey:item.key,identity:item.identity,data:detail.data,loading:detail.loading,error:detail.error,onChanged:detail.refresh}),
-        // A draft is the one thing that can actually leave the machine, so it keeps a
-        // full block — but only when one exists. An empty section is just noise.
-        !!drafts.length&&h(Section,{title:'回复草稿',meta:'等你确认'},
-          drafts.map(draft=>h(DraftCard,{key:draft.id,draft,onChanged:detail.refresh}))),
-        h(Fold,{title:'助手最近做了什么',meta:jobRuns.length?(jobRuns.length+' 条'):'暂无'},
-          !jobRuns.length&&h('p',{style:hint},'还没有处理记录。'),
-          jobRuns.map(({count,job})=>h('div',{key:job.id,style:{padding:'12px 0',borderBottom:'1px solid '+C.border}},
-            h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline'}},
-              h('strong',{style:{fontSize:14,color:job.state==='failed'||job.state==='uncertain'?C.error:C.text}},JOB[job.state]||'已处理'),
-              h('span',{style:{fontSize:13,color:C.text3}},relativeTime(job.finished_at||job.created_at)+(count>1?' · 同类 '+count+' 条':''))),
-            job.text&&h('p',{style:{margin:'6px 0 0',color:C.text2,fontSize:14,lineHeight:1.75,whiteSpace:'pre-wrap'}},job.text),
-            job.detail&&h('p',{style:{margin:'6px 0 0',color:C.text3,fontSize:13,lineHeight:1.7}},job.detail),
-            // A delivery record with no way to close it is just noise: let the user say they
-            // have seen it, without touching the record itself.
-            (job.state==='failed'||job.state==='uncertain')&&(job.acknowledged
-              ?h('p',{style:{margin:'6px 0 0',color:C.text3,fontSize:13}},'已确认看过，不会再提醒')
-              :h('button',{onClick:async()=>{
-                setActionError('');
-                try{await api('conversations/'+item.key+'/ack',{});detail.refresh();}catch(e){setActionError(e.message);}
-              },style:{...small(false),marginTop:8}},'这条不用发了，我知道了'))))))),
-      h(AskDock,{conversationKey:item.key,identity:item.identity,onChanged:detail.refresh}));
-  }
-
-  // ---- 消息中心 -------------------------------------------------------------
-  // 「分类」这个概念已经从界面上拿掉了。
-  //
-  // 服务端仍然会给每条消息打一个内部标签（它只用来排序），但**不给用户看**：把一条消息
-  // 标成「只需了解 / 需要回复」既不是用户自己的判断，错了还会误导 —— 用户实测就看到过
-  // 「助手判断：只需了解」配着一条跟自己无关的群聊，于是以为助手要他去做点什么。
-  // 这里连带删掉了几个只为展示分类而存在的组件（列表里的分类药丸、这次整理了多少条的
-  // 摘要卡、改分类的入口）。
-  function CenterRow({item,active,onClick}){
-    const meta=(item.summary&&item.summary.length)?firstLine(item.summary[0],44):(item.read?'已读取正文':'尚未读取正文');
-    const extra=[
-      // 标为已看以前在列表上完全没有痕迹：服务端确实记下了（批次置为 reviewed，行状态
-      // 变成 done），但这一行照旧什么都不显示，所以点完的感觉是"什么都没发生"。把它写出来。
-      item.actionState==='done'?'已看':'',
-      item.following===false?'已忽略':'',
-      item.pendingDrafts>0?'草稿待确认':'',
-      item.openTodos>0?(item.openTodos+' 件待办'):'',
-      item.identityStatus==='ambiguous'?'联系人身份有冲突':'',
-      item.automationState==='active'?'自动回复：开':'',
-      item.automationProblem?'自动回复异常':''
-    ].filter(Boolean).join(' · ');
-    return h(Row,{key:item.key,title:item.identity.title,right:item.lastActivityAt?relativeTime(item.lastActivityAt):'',meta,active,inboxItem:true,onClick},
-      // 这一行不再下判断（原来是一个「需要回复 / 只需了解」的药丸）。剩下的都是事实：
-      // 整理了多少条、是不是群聊，以及下面那串状态。
-      (item.newCount!=null||item.identity.kind==='group')&&h('div',{style:{display:'flex',gap:8,marginTop:8,flexWrap:'wrap'}},
-        item.newCount!=null&&h('span',{style:{fontSize:13,color:C.text3}},item.newCount+' 条已整理'),
-        item.identity.kind==='group'&&h('span',{style:{fontSize:13,color:C.text3}},'群聊')),
-      extra&&h('div',{style:{marginTop:6,fontSize:13,color:C.text3}},extra));
-  }
-
-  function CenterList({store,items,narrow}){
-    const {contactKey}=useStore(store),[query,setQuery]=useState('');
-    const needle=query.trim().toLowerCase();
-    const shown=items.filter(item=>!needle||item.identity.title.toLowerCase().includes(needle)||(item.summary||[]).join(' ').toLowerCase().includes(needle));
-    return h('section',{style:{display:'flex',flexDirection:'column',height:'100%',minWidth:0},'aria-label':'消息列表'},
-      h('header',{style:{padding:narrow?'14px 14px 10px':'18px 18px 12px',borderBottom:'1px solid '+C.border}},
-        h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginBottom:12}},
-          h('h1',{style:{...h1,fontSize:20,margin:0}},'最近整理'),
-          // 「整理消息」读起来像在整理这份列表；它真正做的是回到「你想整理什么？」入口页
-          // （contactKey=null），不读微信、不发请求。名字改成动作本身，回路的另一头
-          // （详情页的「← 再整理一次」）也指向同一个地方。
-          h('button',{onClick:()=>store.set({contactKey:null}),title:'回到「你想整理什么？」',style:small(false)},'整理新消息')),
-        h('input',{value:query,onChange:event=>setQuery(event.target.value),placeholder:'搜索整理记录','aria-label':'搜索消息',style:field})),
-      h('div',{style:{flex:1,overflowY:'auto'}},
-        !shown.length&&h('p',{style:{padding:24,textAlign:'center',color:C.text3,fontSize:14,lineHeight:1.8}},needle?'没有找到相关记录':'还没有整理记录'),
-        shown.map(item=>h(CenterRow,{key:item.key,item,active:contactKey===item.key,onClick:()=>store.set({contactKey:item.key})}))));
-  }
-
-  function OrganizerHome({items,onChanged,store,narrow}){
-    const [text,setText]=useState(''),[busy,setBusy]=useState(false),[refreshing,setRefreshing]=useState(false);
-    // 结果来自浏览器里存的最近一次整理，所以切走再回来、或者关掉面板再打开都还在。
-    const [stored,setStored]=useState(()=>readOrganizerResult());
-    const [fresh,setFresh]=useState(false);
-    // 订阅模块级的"正在跑"：切走再回来动画和计时都在，而且旧实例跑完时这一份会一起更新，
-    // 不会卡住。也因为没有第二份状态，重复发起不可能发生。
-    const [,bumpRun]=useState(0);
-    useEffect(()=>{const watcher=()=>bumpRun(value=>value+1);ORGANIZER_WATCHERS.add(watcher);return()=>{ORGANIZER_WATCHERS.delete(watcher);};},[]);
-    const running=ORGANIZER_RUN;
-    const [picked,setPicked]=useState({}),[added,setAdded]=useState({});
-    const [error,setError]=useState(()=>ORGANIZER_RUN_ERROR),[note,setNote]=useState('');
-    useEffect(()=>{if(ORGANIZER_RUN_ERROR){setError(ORGANIZER_RUN_ERROR);ORGANIZER_RUN_ERROR='';}},[]);
-    // 进行中就锁住入口：包括"别处发起、这次回来才看到"的那种。
-    const locked=busy||!!running;
-    const quick=[
-      ['整理最近消息','查看微信当前可见的最近会话，读取最多 5 个最值得关注的会话，告诉我发生了什么，并列出需要我处理的事项。'],
-      ['找出需要回复的','查看最近会话，找出明确在等我回复的人。只给必要背景和建议回复方向，不要发送。'],
-      ['提取待办','从最近相关消息中提取需要我本人完成的事情；不需要回复的也要列出来。'],
-      ['看看有没有遗漏','检查最近会话里是否有日期、承诺、文件、付款或决定被我遗漏。']
-    ];
-    async function run(request){
-      const value=String(request??text).trim();if(!value||busy||ORGANIZER_RUN)return;
-      ORGANIZER_RUN={asked:value,startedAt:Date.now()};
-      setBusy(true);setError('');setNote('');notifyOrganizer();
-      try{
-        const result=await api('message-center/organize',{text:value});
-        const next={answer:String(result.answer||''),asked:value,at:Date.now()/1000};
-        setStored(next);writeOrganizerResult(next);
-        setFresh(true);setPicked({});setAdded({});setText('');onChanged();
-      }
-      // 失败信息也放在模块级：这一次整理是用户在别的页面时跑完的，光 setError 会随组件一起丢掉，
-      // 他回来只看到"什么都没发生"。module 级留着，谁挂载上来谁显示。
-      catch(e){ORGANIZER_RUN_ERROR=e.message;}
-      finally{ORGANIZER_RUN=null;notifyOrganizer();}
-    }
-    // 界面从"卡住"里出来。请求取消不了，但它已经不会再影响这一页（结果仍然会落到 localStorage）。
-    function unstick(){
-      ORGANIZER_RUN=null;setBusy(false);notifyOrganizer();
-      setError('这次整理好像断掉了（消息服务可能刚重启过），可以重新开始。');
-    }
-    function forget(){
-      writeOrganizerResult(null);setStored(null);setFresh(false);setPicked({});setAdded({});setNote('');
-    }
-    async function refresh(){
-      setRefreshing(true);setError('');setNote('');
-      try{const result=await api('message-center/refresh',{});setNote(result.observationMessage||('已看到微信当前列表里的 '+result.visibleCount+' 个会话，没有打开聊天。'));await onChanged();}
-      catch(e){setError(e.message);}finally{setRefreshing(false);}
-    }
-    const todos=stored?answerListItems(stored.answer):[];
-    // 正文里已经不包含下面那份勾选清单的条目，同一件事不会写两遍。
-    const body=stored?answerBody(stored.answer):'';
-    const chosen=todos.map((item,index)=>index).filter(index=>picked[index]!==false&&!added[index]);
-    async function addPicked(){
-      const list=chosen.map(index=>({item:todos[index],index}));
-      if(!list.length||busy)return;
-      setBusy(true);setError('');setNote('');
-      try{
-        // 服务端对「同来源 + 同标题 + 未完成」的重复会返回已存在的那条（deduped），
-        // 这里照实说，不要报一个虚的数量。
-        let created=0;
-        for(const {item} of list){
-          const saved=await api('todos',{title:firstLine(item,40),detail:item,source:'assistant'});
-          if(!saved.deduped)created++;
-        }
-        setAdded(old=>{const next={...old};for(const {index} of list)next[index]=true;return next;});
-        setNote(created
-          ? ('已把 '+created+' 件加进待办'+(list.length>created?('（另外 '+(list.length-created)+' 件之前已经记过，没有重复添加）'):''))
-          : '这几件之前已经记过了，没有重复添加。');
-      }catch(e){setError(e.message);}finally{setBusy(false);}
-    }
-    return h('section',{style:{flex:1,minWidth:0,height:'100%',overflowY:'auto'}},
-      h('div',{style:{maxWidth:820,padding:narrow?'22px 16px 42px':'38px 42px 60px',margin:'0 auto'}},
-        h('h1',{style:{...h1,fontSize:28,marginBottom:8}},'你想整理什么？'),
-        h('p',{style:{...hint,fontSize:14,margin:'0 0 22px'}},'只有你发起整理时，助手才会查看微信；不会在后台持续监听，也不会发送消息。自动回复仍按单独配置运行。'),
-        h(Notice,{error}),
-        h(Result,{text:note}),
-        h('div',{style:{display:'grid',gridTemplateColumns:narrow?'1fr':'repeat(2,minmax(0,1fr))',gap:12,marginBottom:18}},
-          quick.map(([title,prompt],index)=>h('button',{key:title,onClick:()=>run(prompt),disabled:locked,
-            style:{textAlign:'left',padding:'16px 17px',borderRadius:14,border:'1px solid '+C.border,background:index===0?C.hover:C.panel,color:C.text,cursor:locked?'default':'pointer',minHeight:92,opacity:locked&&!(running&&running.asked===prompt)?0.5:1}},
-            h('strong',{style:{display:'flex',alignItems:'center',gap:8,fontSize:16,marginBottom:7}},
-              running&&running.asked===prompt?h(Spinner,{size:15}):null,title),
-            h('span',{style:{fontSize:13,color:C.text3,lineHeight:1.6}},running&&running.asked===prompt?'正在整理，结果会留在这一页…':firstLine(prompt,42))))),
-        h('div',{style:{display:'flex',gap:10,alignItems:'center',padding:10,border:'1.5px solid '+FIELD_BORDER,borderRadius:14,background:FIELD_BG}},
-          h('input',{value:text,onChange:event=>setText(event.target.value),onKeyDown:event=>{if(event.key==='Enter')run();},
-            placeholder:'例如：帮我看看最近有没有要确认时间的消息','aria-label':'输入整理需求',style:{...field,border:'none',background:'transparent',flex:1,minWidth:0}}),
-          h('button',{onClick:()=>run(),disabled:locked||!text.trim(),style:{...button(true),display:'inline-flex',alignItems:'center',justifyContent:'center',gap:8,flexShrink:0}},
-            locked&&h(Spinner,{size:14}),locked?'正在整理…':'开始整理')),
-        h('div',{style:{display:'flex',alignItems:'center',gap:10,marginTop:11,flexWrap:'wrap'}},
-          h('button',{onClick:refresh,disabled:refreshing||locked,style:small(false)},refreshing?'正在查看…':'只刷新会话列表'),
-          h('span',{style:{fontSize:12,color:C.text3}},'这个操作不会打开聊天，也不会清未读红点。')),
-        running&&h(OrganizerProgress,{startedAt:running.startedAt,restored:!busy,onStuck:unstick}),
-        stored&&h('div',{style:{marginTop:22,border:'1px solid '+C.border,borderRadius:14,background:C.panel,overflow:'hidden'}},
-          h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,flexWrap:'wrap',padding:'12px 16px',borderBottom:'1px solid '+C.border}},
-            h('span',{style:{fontSize:13,color:C.text3}},fresh?'整理结果':('上次的整理结果 · '+(stored.at?relativeTime(stored.at):'之前'))),
-            h('div',{style:{display:'flex',gap:8,flexShrink:0}},
-              stored.asked&&h('button',{onClick:()=>run(stored.asked),disabled:locked,style:small(false,false,true)},'重新整理'),
-              h('button',{onClick:forget,disabled:busy,style:small(false,false,true)},'清空'))),
-          !fresh&&h('p',{style:{margin:0,padding:'11px 17px',borderBottom:'1px solid '+C.border,fontSize:13,color:C.text3,lineHeight:1.7}},'这是上一次整理的结论。微信里如果又来了新消息，点「重新整理」才会重新读取；不点就不会再动微信。'),
-          stored.asked&&h('p',{style:{margin:0,padding:'11px 17px 0',fontSize:13,color:C.text3,lineHeight:1.7}},'当时的要求：'+firstLine(stored.asked,60)),
-          body&&h('p',{style:{margin:0,padding:'16px 17px',whiteSpace:'pre-wrap',lineHeight:1.85,fontSize:15,color:C.text}},body),
-          !body&&!todos.length&&h('p',{style:{margin:0,padding:'16px 17px',fontSize:15,color:C.text2,lineHeight:1.85}},'这次整理没有给出可执行的事项。'),
-          !!todos.length&&h('div',{style:{padding:body?'4px 17px 16px':'16px 17px 16px'}},
-            h('p',{style:{...hint,margin:'0 0 8px'}},'勾选要加进待办的条目（默认全选，可以只加其中几件）：'),
-            todos.map((item,index)=>h('label',{key:item+index,style:{display:'flex',gap:10,alignItems:'flex-start',padding:'9px 0',borderTop:'1px solid '+C.border,cursor:busy||added[index]?'default':'pointer'}},
-              h(Checkbox,{checked:picked[index]!==false&&!added[index],disabled:busy||!!added[index],label:firstLine(item,30),
-                onChange:event=>setPicked(old=>({...old,[index]:event.target.checked})),style:{marginTop:4}}),
-              h('span',{style:{flex:1,minWidth:0,fontSize:14,color:added[index]?C.text3:C.text2,lineHeight:1.7,textDecoration:added[index]?'line-through':'none'}},item),
-              added[index]&&h('span',{style:{fontSize:13,color:C.ok,flexShrink:0}},'已加入'))),
-            h('div',{style:{display:'flex',gap:8,alignItems:'center',marginTop:12,flexWrap:'wrap'}},
-              h('button',{onClick:addPicked,disabled:busy||!chosen.length,style:small(true)},
-                busy?'正在记…':(chosen.length?('加入选中的 '+chosen.length+' 件'):'没有选中任何条目')),
-              h('button',{onClick:()=>setPicked({}),disabled:busy||chosen.length===todos.length,style:small(false,false,true)},'全选'),
-              h('button',{onClick:()=>{const next={};for(const index of todos.map((_,i)=>i))next[index]=false;setPicked(next);},disabled:busy||!chosen.length,style:small(false,false,true)},'全不选')))),
-        narrow&&!!items.length&&h('div',{style:{marginTop:28}},
-          h('h2',{style:{...h3,marginBottom:10}},'最近整理'),
-          items.slice(0,8).map(item=>h('button',{key:item.key,onClick:()=>store.set({contactKey:item.key}),
-            style:{display:'block',width:'100%',textAlign:'left',padding:'12px 4px',border:'none',borderTop:'1px solid '+C.border,background:'transparent',color:C.text}},
-            h('strong',{style:{fontSize:14}},item.identity.title),
-            h('span',{style:{display:'block',fontSize:13,color:C.text3,marginTop:4}},item.summary?.[0]||'查看整理记录'))))));
-  }
-
-  function CenterDetail({store,item,narrow,onChanged}){
-    const [busy,setBusy]=useState(false),[error,setError]=useState(''),[errorDev,setErrorDev]=useState(null);
-    const [todoOpen,setTodoOpen]=useState(false),[todoText,setTodoText]=useState(''),[note,setNote]=useState('');
-    // What the last action did, applied the moment it is clicked. Waiting for the list poll
-    // AND the detail poll to come back made a successful click look like nothing happened —
-    // the server state did change (已看/已排期), the screen just never said so.
-    //
-    // This state belongs to ONE conversation, which is why the caller renders this component
-    // with `key={item.key}`. Without that key React reuses the instance when the user picks
-    // another contact and 「已看」 follows them around the whole list.
-    const [local,setLocal]=useState({});
-    const detail=usePoller(item.key,()=>api('message-center/'+item.key),8000);
-    const d=detail.data,drafts=d?.drafts||[],messages=d?.messages||[],todos=(d?.todos||[]).filter(todo=>todo.state!=='done');
-    async function run(fn,optimistic){
-      setBusy(true);setError('');setErrorDev(null);setNote('');
-      const state=optimistic?.state??{};
-      if(optimistic){setLocal(old=>({...old,...state}));setNote(optimistic.note);}
-      try{await fn();onChanged();detail.refresh();}
-      catch(e){
-        setError(e.message);setErrorDev(e.dev||null);setNote('');
-        // Put the screen back the way the server still reports it, so a refused action never
-        // leaves a "已标为已看" behind. `state` defaults to {} because several actions only
-        // carry a note — reading `optimistic.state` here threw a TypeError out of the catch,
-        // which turned every failed 读取这条会话 into an unhandled rejection.
-        setLocal(old=>{const next={...old};for(const key of Object.keys(state))delete next[key];return next;});
-      }finally{setBusy(false);}
-    }
-    // 「已看」以服务端为准（这次消息的批次是否已经置为 reviewed）。早先只记在组件本地状态里，
-    // 于是关掉页面再进来按钮又回来了 —— 用户问的正是「标记为已看到底有什么用，下次进入还是有
-    // 这个按钮」。现在标记过就换成一行「你已标为已看」，不再给按钮。
-    const isSeen=local.seen!==undefined?local.seen:item.actionState==='done';
-    const seen=()=>run(()=>api('message-center/'+item.key+'/seen',{}),{state:{seen:true},note:'已标为已看，不会再当作新消息提醒。'});
-    const draft=()=>run(()=>api('message-center/'+item.key+'/drafts',{}),{note:'草稿已备好，确认之后才会发出。'});
-    const read=()=>run(()=>api('message-center/'+item.key+'/read',{}),{note:'已读取这条会话的正文。'});
-    const addTodo=()=>{if(!todoText.trim()&&!(item.summary&&item.summary.length)){setError('先写一句要做什么');return;}run(()=>api('message-center/'+item.key+'/todos',{title:todoText.trim()||item.summary[0],source:'message'}),{note:'已记成待办。'});
-      setTodoOpen(false);};
-    const finishTodo=todo=>run(()=>api('todos/'+todo.id+'/done',{}),{note:'这件待办做完了。'});
-    const follow=following=>run(()=>api('message-center/'+item.key+'/follow',{following}),
-      {state:following?{seen:true}:{},note:following?'已恢复关注。':'已忽略这个会话，它不会再进队列。'});
-    const confirmIdentity=()=>run(()=>api('message-center/'+item.key+'/confirm-identity',{}),
-      {state:{identityConfirmed:true},note:'已确认这个本地联系人身份。以后名称识别有轻微变化也会继续归到这里。'});
-    const identityConfirmed=local.identityConfirmed||item.identityStatus==='confirmed';
-    // 这几个动作里「读取这条会话」和「让助手起草回复」都要十几秒到一分钟。按钮上只换文案时，
-    // 用户看到的是一个不动的界面，会以为没点上；转一圈的指示器才说明「在跑，别重复点」。
-    const busyStyle={...button(true),display:'inline-flex',alignItems:'center',justifyContent:'center',gap:8};
-    return h('section',{style:{flex:1,display:'flex',flexDirection:'column',minWidth:0,minHeight:0},'aria-label':item.identity.title+'的消息详情'},
-      h('header',{className:'lg-glass lg-bar','data-liquid-glass':'','data-scale':'-72','data-chroma':'5','data-border':'.09','data-blur':'2',
-        style:{position:'sticky',top:0,zIndex:3,padding:'14px 20px',display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:12}},
-        h('div',{style:{display:'flex',alignItems:'center',gap:12,minWidth:0,flex:'1 1 auto'}},
-          // 只有窄屏才需要：那时左栏被整块换掉，没有这个箭头就回不到入口页。
-          // 宽屏下左栏一直在，标题行里的「整理新消息」就是回路，再放一个「再整理一次」
-          // 是同一件事说两遍（实测被指出来过）。
-          narrow&&h('button',{onClick:()=>store.set({contactKey:null}),'aria-label':'回到整理入口（你想整理什么？）',
-            title:'回到「你想整理什么？」',style:{...small(false),padding:'8px 12px',flexShrink:0}},'←'),
-          h('div',{style:{minWidth:0}},
-            h('h2',{style:{margin:0,fontSize:20,color:C.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},item.identity.title),
-            h('p',{style:{margin:'4px 0 0',fontSize:13,color:C.text3}},(item.identity.kind==='group'?'微信群聊':'微信联系人')
-              +(isSeen?' · 已看':(item.newCount!=null?(' · '+item.newCount+' 条新消息'):' · 有新动态'))))),
-        h('div',{style:{display:'flex',alignItems:'center',gap:8,flexShrink:0}},
-          item.following===false
-            ? h('button',{onClick:()=>follow(true),disabled:busy,style:small(false)},'恢复关注')
-            : h('button',{onClick:()=>follow(false),disabled:busy,style:small(false,false,true)},'忽略这个会话'))),
-      h('div',{style:{flex:1,overflowY:'auto',minWidth:0}},
-      h('div',{style:{padding:'20px 20px 24px',maxWidth:780}},
-        h(Notice,{error:error||detail.error,dev:errorDev||detail.errorDev,code:errorDev?.code||detail.errorCode}),
-        h(Result,{text:note}),
-        !identityConfirmed&&h('div',{style:{padding:'11px 13px',borderRadius:10,
-          border:'1px solid '+(item.identityStatus==='ambiguous'?C.error:C.warn),background:RESULT_BG,marginBottom:14}},
-          h('strong',{style:{fontSize:14,color:item.identityStatus==='ambiguous'?C.error:C.text}},
-            item.identityStatus==='ambiguous'?'联系人身份有冲突':'联系人身份尚未确认'),
-          h('p',{style:{margin:'5px 0 9px',fontSize:13,color:C.text2,lineHeight:1.65}},
-            item.identityStatus==='ambiguous'
-              ?'检测到同名或相似联系人，但现有证据不足。请先查看原消息，确认当前会话后再绑定。'
-              :'当前身份由 OCR 名称和会话特征暂时建立。确认一次后，本地 UUID 会作为长期身份。'),
-          h('button',{onClick:confirmIdentity,disabled:busy,style:small(true)},'确认当前联系人')),
-        (item.summary&&item.summary.length>0)&&h(Section,{title:'这段时间发生了什么',meta:'AI 总结'},
-          h('ul',{style:{margin:'4px 0 0',paddingLeft:20}},item.summary.map(point=>h('li',{key:point,style:{fontSize:14,color:C.text2,lineHeight:1.85,wordBreak:'break-word'}},point))),
-          // 总结没出来的时候只有开发者模式能看到原因（模型弃权，或者根本没读到正文）。
-          h('div',{style:{marginTop:10}},
-            h(DevBox,{dev:item.classificationError?{
-              code:item.classificationError.code,
-              message:item.classificationError.message,
-              detail:item.classificationError.detail,
-              at:item.classificationError.at?new Date(item.classificationError.at*1000).toLocaleString('zh-CN'):''
-            }:null,label:'这次为什么没整理出来'}))),
-        // 助手不再替用户判断这条消息「属于哪一类」。要做什么由用户自己决定，所以这里
-        // 把可做的动作平铺出来：起草回复、记成待办、标为已看、看原消息。
-        h(Section,{title:'这条你要怎么处理',meta:(item.openTodos||0)>0?('已有 '+item.openTodos+' 件待办'):''},
-          h('div',{style:{display:'flex',gap:10,flexWrap:'wrap'}},
-            h('button',{onClick:draft,disabled:busy,style:busyStyle},busy&&h(Spinner,{size:14}),busy?'正在起草…':'让助手起草回复'),
-            h('button',{onClick:()=>setTodoOpen(value=>!value),disabled:busy,style:button(false)},'记成待办'),
-            // 已经标过就是一行状态，不再是按钮：带边框的药丸和旁边的按钮长得一样，看着还想点。
-            isSeen
-              ? h('span',{style:{display:'inline-flex',alignItems:'center',minHeight:44,padding:'10px 14px',borderRadius:10,background:RESULT_BG,color:C.text2,fontSize:14}},'你已标为已看')
-              : h('button',{onClick:seen,disabled:busy,style:busyStyle},busy&&h(Spinner,{size:14}),'标为已看'),
-            h('button',{onClick:read,disabled:busy,style:button(false,false,true)},busy?'正在读取…':'看原消息')),
-          todoOpen&&h('div',{style:{marginTop:12,border:'1.5px solid '+FIELD_BORDER,borderRadius:12,padding:12,background:FIELD_BG}},
-            h('input',{value:todoText,onChange:event=>setTodoText(event.target.value),placeholder:'要做什么？'+(item.summary&&item.summary.length?'（默认：'+firstLine(item.summary[0],20)+'）':''),style:field}),
-            h('div',{style:{display:'flex',gap:10,marginTop:10}},
-              h('button',{onClick:addTodo,disabled:busy,style:button(true)},busy?'正在保存…':'记成待办'),
-              h('button',{onClick:()=>setTodoOpen(false),style:button(false)},'取消')))),
-        !!todos.length&&h(Section,{title:'待办',meta:'未完成 '+todos.length+' 件'},
-          h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.panel,overflow:'hidden'}},
-            todos.map((todo,index)=>h('div',{key:todo.id,style:{display:'flex',gap:10,alignItems:'flex-start',padding:'11px 14px',borderTop:index?'1px solid '+C.border:'none'}},
-              h(Checkbox,{checked:false,disabled:busy,label:'标记完成：'+firstLine(todo.title,20),onChange:()=>finishTodo(todo),style:{marginTop:3}}),
-              h('div',{style:{flex:1,minWidth:0}},
-                h('div',{style:{fontSize:14,color:C.text,lineHeight:1.7,wordBreak:'break-word'}},todo.title),
-                h('div',{style:{display:'flex',gap:8,alignItems:'center',marginTop:4,flexWrap:'wrap'}},
-                  todo.state==='doing'&&h('span',{style:pill(C.brand)},'在做'),
-                  todo.dueAt&&h('span',{style:pill(dueInfo(todo.dueAt).color)},dueInfo(todo.dueAt).text))))))),
-        !!drafts.length&&h(Section,{title:'回复草稿',meta:'等你确认'},drafts.map(draft=>h(DraftCard,{key:draft.id,draft,onChanged:detail.refresh}))),
-        h(Fold,{title:'原始消息',meta:item.newCount!=null?(item.newCount+' 条新'):'还没读'},
-          !messages.length
-            ? h('div',null,
-                h('p',{style:hint},'助手还没有读这条会话的正文。'),
-                h('button',{onClick:read,disabled:busy,style:{...small(true),display:'inline-flex',alignItems:'center',gap:8}},
-                  busy&&h(Spinner,{size:13}),busy?'正在读取微信…':'读取这条会话（会消掉它在微信里的未读红点）'))
-            : h('div',{style:{marginTop:4}},
-                messages.slice(-30).map((message,index)=>
-                  h('div',{key:index,style:{padding:'8px 0',borderBottom:'1px solid '+C.border}},
-                    h('div',{style:{fontSize:12,color:C.text3,marginBottom:2}},(message.direction==='outgoing'?'我方':'对方')+(message.sender?(' · '+message.sender):'')),
-                    h('p',{style:{margin:0,fontSize:14,color:C.text,lineHeight:1.7,whiteSpace:'pre-wrap',wordBreak:'break-word'}},message.content))))))),
-      h(AskDock,{conversationKey:item.key,identity:item.identity,onChanged:detail.refresh,endpoint:'message-center/'+item.key+'/ask'}));
-  }
-
-  function MessagesPage({store,narrow}){
-    const {contactKey}=useStore(store);
-    const center=usePoller(true,()=>api('message-center?scope=all&order=recent&limit=60'),10000);
-    // Old continuous-observation rows are not "整理记录". Only show conversations for
-    // which the user actually read content or created an action.
-    const items=(center.data?.items||[]).filter(item=>item.read||(item.summary&&item.summary.length)
-      ||item.openTodos>0||item.pendingDrafts>0);
-    // Only judge "the selected conversation is gone" against a payload that was actually
-    // fetched for the scope we are showing now. Jumping here from a row's 「去看看」 sets the
-    // scope to `all` and the selection at the same time, while `items` still holds the
-    // previous scope's page — which of course does not contain it, so the selection was
-    // cleared on the spot. That is why the jump looked like it did nothing.
-    useEffect(()=>{
-      if(!contactKey||!items.length)return;
-      if(!items.some(item=>item.key===contactKey))store.set({contactKey:null});
-    },[contactKey,items,store]);
-    if(center.loading&&!center.data)return h(Empty,{title:'正在打开消息整理',text:'请稍等一下…'});
-    if(center.error&&!center.data)return h('div',{style:{padding:24,maxWidth:640}},
-      h(Empty,{title:'暂时读不到消息',text:center.error},h('button',{onClick:center.refresh,style:button(true)},'重新读取')),
-      h(DevBox,{dev:center.errorDev,code:center.errorCode,label:'读取失败原因'}));
-    const item=items.find(entry=>entry.key===contactKey)||null;
-    return h('div',{style:{display:'flex',height:'100%',width:'100%',minWidth:0}},
-      !narrow&&h('div',{style:{width:340,flexShrink:0,borderRight:'1px solid '+C.border}},h(CenterList,{store,items,narrow:false})),
-      item?h(CenterDetail,{key:item.key,store,item,narrow,onChanged:center.refresh})
-        :h(OrganizerHome,{items,onChanged:center.refresh,store,narrow}));
-  }
 
   function RuleCard({rule,onAction}){
     const [editing,setEditing]=useState(false),[prompt,setPrompt]=useState(rule.prompt),[busy,setBusy]=useState(false),[error,setError]=useState('');
@@ -1703,7 +1481,15 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       finally{setGone(old=>{const next={...old};delete next[id];return next;});setBusy(false);}
     }
     async function addTodo(_,text,dueAt){try{setAdding(false);await api('todos',{title:text,dueAt,source:'manual'});await today.refresh();}catch(e){setError(e.message);}}
-    const go=(key)=>{store.set({tab:'messages',contactKey:key,scope:'all'});};
+    // 待办/草稿挂的是会话 key（sha256），而会话视图要的是 DB 身份（username）。
+    // 服务端把 key 换回身份，本地不做任何猜测；换不到就只说没找到，不跳一个空页面。
+    const go=async(key)=>{
+      if(!key)return;
+      try{
+        const found=await api('home/lookup?key='+encodeURIComponent(key));
+        store.set({tab:'home',contactKey:found.username,contactTitle:found.title,contactKind:found.kind});
+      }catch(e){setError(e.message);}
+    };
     const groups=(data?.groups||[]).map(group=>({...group,items:group.items.filter(entry=>!(entry.todoId&&gone[entry.todoId]))}));
     const total=counts.todos+counts.confirm;
     // 首次加载时先给一句"正在打开"，不要先摆出空列表：接口要等 Worker 一圈（实测 0.3–0.8s），
@@ -2239,11 +2025,12 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           savingModel&&h('p',{style:{...hint,margin:'8px 0 0'}},'正在保存…')),
         h('section',{style:{...card,marginTop:16}},
           h('h3',h3,'开发者模式'),
-          h('p',{style:{...hint,margin:'0 0 12px'}},'打开后，界面上出错的地方会多出一块折叠的「开发者详情」：Runtime 的错误码、它自己的原文、调用栈和读取到的条数，都可以一键复制。定位「读不到消息」「助手判断不出来」时用它。上线前关掉即可，用户侧不会看到任何原始报错。原始日志另外逐条记在数据目录的 dev-errors.log 里。'),
+          h('p',{style:{...hint,margin:'0 0 12px'}},'默认关闭。打开后会多两样东西：出错的地方多一块折叠的「开发者详情」（Runtime 的错误码、原文、调用栈和读取条数，可一键复制），导航底部多一个回到原生界面的入口。原始日志另外逐条记在数据目录的 dev-errors.log 里。'),
           h(DevToggle,{})),
         h('section',{style:{...card,marginTop:16}},
           h('h3',h3,'数据保存在哪'),
-          h('p',{style:{...hint,margin:'0'}},'自动回复规则和发送记录保存在本机的 reply.db。主动查询消息时，助手通过消息 MCP 按你的要求读取，不会创建后台整理任务。')),
+          h('p',{style:{...hint,margin:'0 0 10px'}},'自动回复规则和发送记录保存在本机的 reply.db。看消息、整理消息都读微信本机的数据库副本：不打开微信窗口、不切前台、不清未读红点。整理结果与对话记录分别存在数据目录的 organize.json 和 chat-log.json。'),
+          h('p',{style:{...hint,margin:0}},'关闭开发者模式后，界面上的原生入口（工作区、模型选择器、工具 JSON）也会一起隐藏。')),
         data&&h('details',{style:{marginTop:16,color:C.text2}},
           h('summary',{style:{cursor:'pointer',fontSize:15}},'高级信息'),
           h('div',{style:{marginTop:12,padding:16,borderRadius:10,background:C.panel,fontSize:14,lineHeight:2,color:C.text2}},
@@ -2273,30 +2060,53 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   }
 
   // 首版只呈现自动回复核心。主动查消息继续走原生对话框里的 MCP，避免再造一个不稳定的整理页。
-  const NAV=[['automation','自动回复'],['context','回复配置']];
-  const NAV_ICON={messages:'messages',today:'today',customers:'contacts',automation:'automation',context:'context'};
+  // 首屏是「消息」：关键信息 + 关键操作 + 对话。主动查消息不再需要回到原生对话框 ——
+  // 产品自己的对话区走的是同一个 Agent，而且带着一份本地数据库快照。
+  const NAV=[['home','消息'],['todos','待办'],['automation','自动回复'],['context','回复配置']];
+  const NAV_ICON={home:'home',messages:'messages',today:'today',customers:'contacts',automation:'automation',context:'context'};
   function NavEntry({store,wide}){
     const {open}=useStore(store);
-    return h('button',{onClick:()=>store.set({open:!open,cover:true,tab:'automation'}),title:'自动回复',
+    return h('button',{onClick:()=>store.set({open:!open,cover:true,tab:'home'}),title:'消息',
       style:{display:'flex',alignItems:'center',gap:10,width:'100%',minHeight:44,padding:'10px 12px',border:'none',borderRadius:10,cursor:'pointer',background:open?C.hover:'transparent',color:C.text,fontSize:14}},
-      h(Icon,{name:'automation',size:18}),wide&&h('span',null,'自动回复'));
+      h(Icon,{name:'home',size:18}),wide&&h('span',null,'消息'));
   }
   /**
-   * Closed used to mean "hand the screen back to the DSH web UI", which is a developer
-   * surface: workspaces, model pickers, tool JSON. The product covers it instead and keeps
-   * a discreet way back in for whoever is building the thing.
+   * 收起来的时候的封面。
+   *
+   * 「回到对话框」原来直接摆在这里和导航底部 —— 那是 DSH 的原生界面（工作区、模型选择器、
+   * 工具 JSON），属于开发面，不该出现在日常路径上。现在它只在开发者模式里出现：
+   * 产品自己的对话区已经能聊天、能整理、能看消息。
    */
   function Cover({store}){
+    const dev=useDevMode();
     return h('div',{'data-ma':'cover',style:{position:'fixed',inset:0,zIndex:60,background:C.bg,color:C.text,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:14,padding:32,textAlign:'center'}},
-      h('div',{style:{display:'flex',alignItems:'center',gap:10}},h(Icon,{name:'automation',size:28}),h('strong',{style:{fontSize:21}},'自动回复助手')),
+      h('div',{style:{display:'flex',alignItems:'center',gap:10}},h(BrandMark,{size:28}),h('strong',{style:{fontSize:21}},'消息助手')),
       h('p',{style:{margin:0,color:C.text3,fontSize:14,lineHeight:1.85,maxWidth:380}},
-        '助手会继续在后台值守指定联系人。想主动查某个人的消息，直接回到对话框告诉助手。'),
-      h('button',{onClick:()=>store.set({open:true,tab:'automation'}),style:{...button(true),minWidth:180,marginTop:6}},'管理自动回复'),
-      h('button',{onClick:()=>store.set({cover:false}),
-        style:{marginTop:6,border:'none',background:'transparent',color:C.text3,fontSize:13,cursor:'pointer'}},'回到对话框'));
+        '助手会继续在后台值守指定联系人。要看消息、整理消息或问助手，打开面板就行。'),
+      h('button',{onClick:()=>store.set({open:true,tab:'home'}),style:{...button(true),minWidth:180,marginTop:6}},'打开消息助手'),
+      dev&&h('button',{onClick:()=>store.set({cover:false}),
+        style:{marginTop:6,border:'none',background:'transparent',color:C.text3,fontSize:13,cursor:'pointer'}},'回到对话框（开发）'));
+  }
+  /**
+   * 导航轨底部：设置 + 一个**只在开发者模式出现**的出口。
+   *
+   * 「回到对话框」通向 DSH 原生界面（工作区/模型/工具 JSON），是开发面。产品自己的
+   * 对话区已经能完成日常的事，所以这里不再把它摆在日常路径上；要排查时打开开发者模式
+   * （设置页有开关）它才出现。
+   */
+  function RailFoot({store,narrow,tab,closeRef}){
+    const dev=useDevMode();
+    return h('div',{className:'lg-railfoot'},
+      h('button',{onClick:()=>store.set({tab:'settings'}),'aria-current':tab==='settings'?'page':undefined,title:'设置',
+        'data-active':tab==='settings'?'':undefined,className:'lg-navitem',
+        style:{minHeight:46,padding:'11px 12px',cursor:'pointer',textAlign:narrow?'center':'left',fontSize:14,display:'flex',alignItems:'center',gap:10,justifyContent:narrow?'center':'flex-start'}},
+        h(Icon,{name:'settings',size:18}),narrow?null:'设置'),
+      dev&&h('button',{ref:closeRef,onClick:()=>store.set({open:false,cover:false}),title:'回到原生对话框（开发用）',
+        className:'lg-navitem lg-quiet',style:{minHeight:42,padding:'9px 12px',cursor:'pointer',fontSize:13,textAlign:narrow?'center':'left'}},
+        narrow?'原生':'← 原生对话框'));
   }
   function Workbench({ctx,store}){
-    const {open,cover,tab}=useStore(store),[narrow,setNarrow]=useState(()=>matchMedia('(max-width: 900px)').matches),closeRef=useRef(null),rootRef=useRef(null);
+    const {open,cover,tab,contactKey,contactTitle,contactKind}=useStore(store),[narrow,setNarrow]=useState(()=>matchMedia('(max-width: 900px)').matches),closeRef=useRef(null),rootRef=useRef(null);
     useEffect(()=>{const media=matchMedia('(max-width: 900px)'),change=()=>setNarrow(media.matches);media.addEventListener('change',change);return()=>media.removeEventListener('change',change);},[]);
     useEffect(()=>{if(!open)return;const key=event=>{if(event.key==='Escape')store.set({open:false,cover:false});};document.addEventListener('keydown',key);closeRef.current?.focus();return()=>document.removeEventListener('keydown',key);},[open,store]);
     // 折射的挂载点。玻璃元素（页头、回执条）是各页面自己渲染出来的，出现和消失都不经过
@@ -2349,20 +2159,18 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         narrow?items:wideItems,
         h('div',{style:{flex:1}}),
         // 底部出口单独成一块内嵌面：让轨道读得出「品牌 / 导航 / 底部」三段结构
-        h('div',{className:'lg-railfoot'},
-          h('button',{onClick:()=>store.set({tab:'settings'}),'aria-current':tab==='settings'?'page':undefined,title:'设置',
-            'data-active':tab==='settings'?'':undefined,className:'lg-navitem',
-            style:{minHeight:46,padding:'11px 12px',cursor:'pointer',textAlign:narrow?'center':'left',fontSize:14,display:'flex',alignItems:'center',gap:10,justifyContent:narrow?'center':'flex-start'}},
-            h(Icon,{name:'settings',size:18}),narrow?null:'设置'),
-          h('button',{ref:closeRef,onClick:()=>store.set({open:false,cover:false}),title:'回到对话框',className:'lg-navitem lg-quiet',style:{minHeight:42,padding:'9px 12px',cursor:'pointer',fontSize:13,textAlign:narrow?'center':'left'}},narrow?'返回':'← 回到对话框'))),
+        h(RailFoot,{store,narrow,tab,closeRef})),
       h('main',{'data-ma':'main',style:{flex:1,minWidth:0,height:'100%',display:'flex',overflow:'hidden',position:'relative',zIndex:1}},
-        tab==='automation'?h(AutomationPage)
+        tab==='home'?(contactKey?h(ConversationView,{key:contactKey,store,username:contactKey,
+            title:contactTitle,kind:contactKind,narrow}):h(HomePage,{store,narrow}))
+          :tab==='todos'?h(TodayPage,{store,ctx})
+          :tab==='automation'?h(AutomationPage)
           :tab==='context'?h(ContextPage)
           :h(SettingsPage)));
   }
   const TOOL_NAMES=['mcp__messaging__list_conversations','mcp__messaging__read_messages','mcp__messaging__sync_conversation','mcp__messaging__search_messages','mcp__messaging__send_message','mcp__messaging__reply_message','mcp__messaging__get_send_status','submit_reply_decision'];
   return{inject:['slots','sessions'],apply(ctx){
-    const saved=readSaved(),allowedTabs=['automation','context','settings'],store=createStore({open:saved.open===undefined?true:saved.open,cover:saved.cover===undefined?true:saved.cover,tab:allowedTabs.includes(saved.tab)?saved.tab:'automation',contactKey:null,customerKey:null,filter:'all',scope:'attention',order:'recent',pending:0});
+    const saved=readSaved(),allowedTabs=['home','todos','automation','context','settings'],store=createStore({open:saved.open===undefined?true:saved.open,cover:saved.cover===undefined?true:saved.cover,tab:allowedTabs.includes(saved.tab)?saved.tab:'home',contactKey:null,contactTitle:null,contactKind:null,customerKey:null,filter:'all',scope:'attention',order:'recent',pending:0});
     ctx.slots.inject('sidebar.footer.action',()=>ctx.slots.register({name:'sidebar.footer.action',id:'message-agent-workbench',order:5,label:()=> '自动回复'},({wide})=>h(NavEntry,{store,wide})));
     ctx.slots.inject('shell.overlay',()=>ctx.slots.register({name:'shell.overlay',id:'message-agent-workbench',order:20},()=>h(Workbench,{ctx,store})));
     ctx.slots.inject('tool.call.toolview',function*(){for(const key of TOOL_NAMES)yield ctx.slots.register({name:'tool.call.toolview',key},MessageToolCard);});

@@ -82,6 +82,16 @@ export class RuntimeAdapter {
   searchContacts(keyword) {
     return this.#call('POST', '/api/search_contacts', {keyword});
   }
+  /**
+   * 首页与整理的数据底座：一次拿回「最近有动静的若干会话 + 各自最近消息」。
+   *
+   * 纯数据库读取：不打开会话、不切前台、不清未读。整个首页的"关键信息"都建立在
+   * 这一次调用上，所以它必须便宜 —— 也正是它取代了原来的 `refreshObservation()`
+   * （那一次是 OCR 全窗截图 + 逐行识别）。
+   */
+  dbRecent({sessions = 12, perSession = 20} = {}) {
+    return this.#call('POST', '/api/db_recent', {sessions, per_session: perSession});
+  }
   /** Compatibility shim: continuous inbox discovery no longer exists. */
   setObserving(enabled) {
     return this.#call('POST', '/api/settings', {observe_enabled: !!enabled});

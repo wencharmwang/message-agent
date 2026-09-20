@@ -7,6 +7,8 @@ import { createCrm } from './crm.mjs';
 import { CLASSIFICATIONS, ORDERS, SCOPES, createMessageCenter, isSystemEntry } from './message-center.mjs';
 import { classifyIntent, detectRiskTags, maxRiskGrade, DEFAULT_DECISION_POLICY } from './reply-context/risk-gate.mjs';
 import { fetchPageText, splitKnowledge } from './reply-context/import.mjs';
+import { buildBundle, homeOverview, parseOrganizeAnswer, renderChatContext, renderOrganizePrompt,
+         stamp, CHAT_SYSTEM, ORGANIZE_SYSTEM } from './home.mjs';
 
 /**
  * Conversation identity key. Automatic sessions keep the historical key
@@ -378,8 +380,8 @@ export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [
  * (architecture §6). Returns true when the request was handled. index.mjs applies
  * the same-origin guards before delegating here.
  */
-export function createProductApi({config, token, conversations, bindingsPath, respond, readBody, ensureInteractiveSession, askAssistant, crm: crmInjected, context: contextSystem, messageCenter: messageCenterInjected, classifyMessages, draftReply, analyzeStyle}) {
-  const runtime = new RuntimeAdapter({controlPort: config.control_port, token});
+export function createProductApi({config, token, runtime: runtimeInjected, conversations, bindingsPath, respond, readBody, ensureInteractiveSession, askAssistant, crm: crmInjected, context: contextSystem, messageCenter: messageCenterInjected, classifyMessages, draftReply, analyzeStyle, organizeMessages}) {
+  const runtime = runtimeInjected ?? new RuntimeAdapter({controlPort: config.control_port, token});
   const drafts = new Drafts(join(dirname(config.database), 'drafts.json'));
   const crm = crmInjected ?? createCrm(join(dirname(config.database), 'crm.db'));
   const context = contextSystem ?? null;
@@ -880,6 +882,63 @@ export function createProductApi({config, token, conversations, bindingsPath, re
     return true;
   }
 
+  // ---- 首页（本地数据库驱动）------------------------------------------------
+  //
+  // 这一组路由**全程不打开微信窗口**：数据来自本地解密数据库 + 本地规则/job 状态。
+  // 「整理」是唯一会调模型的一条，而且模型的产物只是"建议"，落库仍由用户勾选决定。
+  //
+  // 为什么要重建这一层：旧的整理链路（message-center/organize）靠 OCR —— 先刷新可见
+  // 列表拿到候选名，再让模型逐个 conversation_id 去读，读一次要开一次会话。识别不准、
+  // 抢占前台、只能覆盖滚动的十来行，这正是当初把这块功能撤掉的原因。
+
+  const organizePath = join(dirname(config.database), 'organize.json');
+  const chatLogPath = join(dirname(config.database), 'chat-log.json');
+  const readJsonFile = (path, fallback) => {
+    try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return fallback; }
+  };
+  const writeJsonFile = (path, value) => {
+    try { writeFileSync(path, JSON.stringify(value)); } catch { /* 展示用缓存，写不进去不影响主流程 */ }
+  };
+  /** DB 快照缓存：首页每 8 秒轮询，没必要每次都重扫分片。 */
+  let dbCache = {at: 0, data: null};
+  async function dbSnapshot({fresh = false, sessions = 12, perSession = 20, maxAge = 20} = {}) {
+    const now = Date.now() / 1000;
+    if (!fresh && dbCache.data && now - dbCache.at < maxAge) return dbCache.data;
+    const raw = await runtime.dbRecent({sessions, perSession});
+    const data = {account: raw?.account ?? '', scanAt: Number(raw?.scanned_at ?? 0),
+                  bundle: buildBundle(raw), at: now};
+    dbCache = {at: now, data};
+    return data;
+  }
+  /**
+   * 用 DB 身份 ensure 联系人记录。和 requireCustomer 的区别：**不需要该联系人先有
+   * 自动回复规则** —— 首页面对的是全部会话，不是"已接入工作台"的那几个。
+   */
+  function ensureDbCustomer({username, title, kind}) {
+    const key = identityKey('wechat-main', username);
+    const identity = {provider: 'wechat-main', conversation: username,
+                      title: title || username, kind: kind === 'group' ? 'group' : 'direct'};
+    crm.ensureCustomer({key, ...identity, displayName: identity.title});
+    return {key, identity};
+  }
+  /** 结束一次整理后的产物：只留展示需要的东西，并把显示名对回 username。 */
+  function locate(bundle, title) {
+    if (!title) return null;
+    const exact = bundle.find(session => session.title === title);
+    const loose = exact ?? bundle.find(session => session.title.includes(title) || title.includes(session.title));
+    return loose ? {username: loose.username, kind: loose.kind} : null;
+  }
+  async function homePayload() {
+    const {account, scanAt, bundle} = await dbSnapshot();
+    const {items} = await aggregate();
+    const automation = items.filter(item => item.bucket === 'error'
+      || (item.bucket === 'pending' && item.attentionKind !== 'draft'));
+    return homeOverview({
+      bundle, todos: crm.listTodos({limit: 200}), automation, account, scanAt,
+      lastOrganize: readJsonFile(organizePath, null), now: Date.now() / 1000
+    });
+  }
+
   return async function handle(req, res, url) {
     const path = url.pathname;
     try {
@@ -917,6 +976,96 @@ export function createProductApi({config, token, conversations, bindingsPath, re
           todoBuckets: crm.todoBuckets(),
           completed: center.completedRecent(), doneTodos: doneTodosForToday(), now: Date.now() / 1000
         }));
+        return true;
+      }
+      // ---- 首页（本地数据库驱动，不打开微信窗口）-----------------------------
+      //
+      // 顺序有讲究：/api/home 与 /api/home/organize、/api/home/conversation 都是同一
+      // 前缀，必须用全等判断，不能只 startsWith。
+      if (path === '/message-agent/api/home' && req.method === 'GET') {
+        respond(res, 200, await homePayload());
+        return true;
+      }
+      if (path === '/message-agent/api/home/organize' && req.method === 'POST') {
+        await readBody(req).catch(() => ({}));
+        if (!organizeMessages) throw Object.assign(new Error('整理能力暂不可用'), {code: 'WORKER_UNAVAILABLE'});
+        const {account, scanAt, bundle} = await dbSnapshot({fresh: true, sessions: 12, perSession: 30});
+        if (!bundle.length) {
+          throw Object.assign(new Error('本地数据库里没有读到可整理的会话，先确认微信已登录过、数据库已解锁'),
+            {code: 'ORGANIZE_EMPTY'});
+        }
+        const result = await organizeMessages({bundle, prompt: renderOrganizePrompt(bundle)});
+        const located = {
+          summary: result.summary,
+          focus: result.focus.map(item => ({...item, ...(locate(bundle, item.conversation) ?? {})})),
+          todos: result.todos.map(item => ({...item, ...(locate(bundle, item.conversation) ?? {})})),
+          account, scannedAt: scanAt, sessionsRead: bundle.length, at: Date.now() / 1000
+        };
+        writeJsonFile(organizePath, located);
+        respond(res, 200, located);
+        return true;
+      }
+      // 会话 key（sha256）-> 本地数据库身份（username）。待办、草稿、跟进记录里存的是 key，
+      // 而读消息要的是 username；这一跳只在服务端做，界面不猜。
+      if (path === '/message-agent/api/home/lookup' && req.method === 'GET') {
+        const key = url.searchParams.get('key') ?? '';
+        const customer = key ? crm.getCustomer(key) : null;
+        if (!customer) throw Object.assign(new Error('找不到这个联系人，可能它已经被删掉了'), {code: 'CONVERSATION_NOT_FOUND'});
+        respond(res, 200, {...customer.identity, username: customer.identity.conversation, conversationKey: key});
+        return true;
+      }
+      // 一个会话的正文与它身上的待办 / 跟进 / 待确认草稿。全部按 DB username 定位。
+      if (path === '/message-agent/api/home/conversation' && req.method === 'GET') {
+        const username = url.searchParams.get('username') ?? '';
+        if (!username) throw Object.assign(new Error('请指定要查看的会话'), {code: 'CONTEXT_INVALID'});
+        const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '60', 10) || 60, 5), 300);
+        const page = await runtime.readConversationFromDb({username, limit});
+        const {key, identity} = ensureDbCustomer({
+          username,
+          title: page?.display || url.searchParams.get('title') || username,
+          kind: username.endsWith('@chatroom') ? 'group' : 'direct'
+        });
+        respond(res, 200, {
+          username, conversationKey: key, identity,
+          messages: (page?.messages ?? []).filter(message => message.content),
+          customer: crm.getCustomer(key),
+          todos: crm.listTodos({conversationKey: key}),
+          followups: crm.listFollowups(key),
+          drafts: drafts.list(identity).filter(draft => draft.state === 'awaiting_confirmation')
+        });
+        return true;
+      }
+      // ---- 与消息助手对话 --------------------------------------------------
+      //
+      // 会话复用同一个 harness session（messaging-home），模型侧靠它保持上下文；这里的
+      // chat-log.json 只供界面显示，是恢复刷新前那几轮问答用的。
+      if (path === '/message-agent/api/chat' && req.method === 'GET') {
+        respond(res, 200, readJsonFile(chatLogPath, {items: []}));
+        return true;
+      }
+      if (path === '/message-agent/api/chat' && req.method === 'PATCH') {
+        writeJsonFile(chatLogPath, {items: []});
+        respond(res, 200, {items: []});
+        return true;
+      }
+      if (path === '/message-agent/api/chat' && req.method === 'POST') {
+        const payload = await readBody(req);
+        if (!askAssistant) throw Object.assign(new Error('助手暂时不可用'), {code: 'WORKER_UNAVAILABLE'});
+        const question = typeof payload.text === 'string' ? payload.text.trim() : '';
+        if (!question) throw Object.assign(new Error('先写一句想问的'), {code: 'CONTEXT_INVALID'});
+        const {bundle} = await dbSnapshot();
+        const answer = await askAssistant({
+          sessionId: 'messaging-home',
+          identity: {provider: 'wechat-main', conversation: '__home__', title: '消息', kind: 'workspace'},
+          text: question, system: CHAT_SYSTEM, context: renderChatContext(bundle)
+        });
+        const at = Date.now() / 1000;
+        const log = readJsonFile(chatLogPath, {items: []});
+        const items = [...(log.items ?? []),
+          {role: 'user', text: question, at},
+          {role: 'assistant', text: answer.answer, at, tools: answer.tools ?? []}].slice(-40);
+        writeJsonFile(chatLogPath, {items});
+        respond(res, 200, {...answer, items});
         return true;
       }
       // ---- message centre (product design §14) ------------------------------
@@ -1068,7 +1217,21 @@ export function createProductApi({config, token, conversations, bindingsPath, re
           const payload = await readBody(req);
           let conversationKey = null;
           let identity = null;
-          if (payload.conversationKey) {
+          // 首页/整理出来的待办带的是 DB username，不是 message-centre 的 64 位 key：
+          // 走 DB 身份 ensure，这样"还没接自动回复规则的联系人"也能挂上待办。
+          //
+          // 显示名必须单独给（conversationTitle）：这里 payload.title 是**待办标题**，
+          // 拿它当联系人名会把档案里的备注改成"回复某某的报价"（踩过）。
+          if (payload.username) {
+            const scope = ensureDbCustomer({
+              username: String(payload.username),
+              title: payload.conversationTitle || crm.getCustomer(identityKey('wechat-main', String(payload.username)))?.identity?.title
+                || String(payload.username),
+              kind: payload.kind
+            });
+            conversationKey = scope.key;
+            identity = scope.identity;
+          } else if (payload.conversationKey) {
             const customer = await requireCustomer(String(payload.conversationKey));
             conversationKey = customer.key;
             identity = customer.identity;

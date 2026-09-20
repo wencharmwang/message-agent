@@ -141,6 +141,14 @@ def handler(worker, token):
                     limit = data.get('limit')
                     limit = max(5, min(limit, 300)) if isinstance(limit, int) and not isinstance(limit, bool) else 200
                     self.response(200, worker.db_messages(username, limit))
+                elif self.path == '/api/db_recent':
+                    # 首页与消息整理：一次取回最近有动静的若干会话 + 各自最近消息。
+                    # 纯 DB 读取，不开微信窗口、不动前台。
+                    size = data.get('sessions')
+                    size = max(1, min(size, 30)) if isinstance(size, int) and not isinstance(size, bool) else 12
+                    per = data.get('per_session')
+                    per = max(3, min(per, 80)) if isinstance(per, int) and not isinstance(per, bool) else 20
+                    self.response(200, worker.db_recent(sessions=size, per_session=per))
                 elif self.path == '/api/search_contacts':
                     # 本地搜索联系人（remark/nick_name/username），无需 OCR 也无需微信前台。
                     self.response(200, {'conversations': worker.db_search_contacts(data.get('keyword'))})

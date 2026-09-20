@@ -5,10 +5,12 @@ import { timingSafeEqual } from 'node:crypto';
 import { REPLY_POLICY, modelContext, validateSubmission } from './reply-policy.mjs';
 import { ConversationSessions, automaticRequestConfig, conversationKey, completedDecision } from './conversation-sessions.mjs';
 import { createProductApi, identityKey } from './host/product.mjs';
+import { RuntimeAdapter } from './host/runtime.mjs';
 import { createCrm } from './host/crm.mjs';
 import { createMessageCenter } from './host/message-center.mjs';
 import { TRIAGE_SYSTEM, buildTriagePrompt, parseTriageAnswer } from './host/triage.mjs';
 import { STYLE_SYSTEM, buildStylePrompt, parseStyleAnswer } from './host/style-analysis.mjs';
+import { ORGANIZE_SYSTEM, parseOrganizeAnswer, preview, stamp } from './host/home.mjs';
 import { createReplyContextSystem, renderContextPrompt } from './host/reply-context/index.mjs';
 
 /**
@@ -62,6 +64,66 @@ export function apply(ctx) {
   const active = new Map();
   const bindingsPath = join(dirname(config.database), 'conversation-sessions.json');
   const conversations = new ConversationSessions(bindingsPath);
+  // 唯一一份 Worker 适配器：产品 API 与交互会话的 DB 工具共用它（两处各建一个也能跑，
+  // 但那样 loopback 地址与超时就有两份，改一处忘一处）。
+  const worker = new RuntimeAdapter({controlPort: config.control_port, token});
+  /**
+   * 交互会话专用的「从本机数据库读消息」工具。
+   *
+   * 预设自带的 messaging MCP 工具是 OCR 路线：要打开会话、会抢前台、只看得到列表里
+   * 可见的十来行，识别不准时还会认错人。而这些会话的正文本来就在本地解密数据库里 ——
+   * 补上这个工具，模型才有一条准确、快速、不打扰用户的路。
+   *
+   * 按 sessionId 去重：会话 resume 后 ctx 仍在，重复注册会撞工具名。
+   */
+  const DB_TOOL_SESSIONS = new Set();
+  function attachDbTool(agentCtx, sessionId) {
+    if (DB_TOOL_SESSIONS.has(sessionId)) return;
+    DB_TOOL_SESSIONS.add(sessionId);
+    try {
+      agentCtx.tools.register(defineTool({
+        name: 'read_local_messages',
+        description: '从本机微信数据库直接读取某个联系人或群聊的最近消息：不打开微信窗口、不切前台、不比截图识别。'
+          + '需要核对或补读某段聊天时优先用它；只有在数据库里确实找不到这个会话时才用消息运行时的工具。',
+        parameters: {
+          conversation: {type: 'string', required: true,
+            description: '联系人或群聊的显示名（如「张三」「轮滑班群」），也可以直接给 wxid'},
+          limit: {type: 'integer', description: '读取条数，默认 40，最多 200'}
+        },
+        output: {
+          schema: {type: 'object', additionalProperties: false, properties: {text: {type: 'string', required: true}}},
+          render: result => [{type: 'text', text: result.text}]
+        },
+        async execute(args) {
+          const keyword = String(args?.conversation ?? '').trim();
+          if (!keyword) throw new Error('请说明要读哪个联系人或群聊');
+          const limit = Math.max(5, Math.min(Number.isInteger(args?.limit) ? args.limit : 40, 200));
+          let username = keyword;
+          let title = keyword;
+          const found = await worker.searchContacts(keyword).catch(() => null);
+          const list = found?.conversations ?? [];
+          const hit = list.find(item => item.title === keyword) ?? list.find(item => item.id === keyword) ?? list[0];
+          if (hit) {
+            username = hit.id;
+            title = hit.title;
+          } else if (/[\u4e00-\u9fff]/.test(keyword)) {
+            return {text: '本地数据库里没有找到「' + keyword + '」，请确认名字和微信里显示的一致。'};
+          }
+          const page = await worker.readConversationFromDb({username, limit});
+          const messages = (page?.messages ?? []).filter(message => message.content);
+          title = page?.display || title;
+          if (!messages.length) return {text: '「' + title + '」在本地数据库里没有可读的文本消息。'};
+          const lines = messages.map(message =>
+            `${stamp(message.at)} ${message.direction === 'outgoing' ? '我' : '对方'}：${preview(message.content, 200)}`);
+          return {text: `「${title}」最近 ${messages.length} 条消息（来自本机数据库，从早到晚）：\n` + lines.join('\n')};
+        }
+      }));
+    } catch (error) {
+      // 注册失败要留痕：defineTool 的 schema 写错会在调用点同步抛出，整个会话会静默瘫痪。
+      DB_TOOL_SESSIONS.delete(sessionId);
+      ctx.logger.warn('read_local_messages 注册失败：' + (error instanceof Error ? error.message : String(error)));
+    }
+  }
   // Interactive sessions are the "ask the assistant about this contact" surface. They
   // are created on demand, resumed after a restart, and always keep the same preset so
   // a workbench question can never fall into the automatic-reply flow.
@@ -90,6 +152,7 @@ export function apply(ctx) {
       ? await ctx.agents.resume({resumeSessionId: SessionId(sessionId), ...composition})
       : await ctx.agents.create({sessionId: SessionId(sessionId), meta: {cwd: workspace.path, agentPreset: preset.id}, ...composition});
     active.set(SessionId(sessionId), handle);
+    attachDbTool(handle.agent.ctx, sessionId);
     await workspace.attachSession(SessionId(sessionId));
     ctx.sessionTitle.rename(handle.agent.session, identity.title);
     await ctx.sessions.flush(handle.agent.session);
@@ -145,13 +208,16 @@ export function apply(ctx) {
       + title + '」这个名字作为 conversation_id 去读（运行时会用微信搜索定位），'
       + '不要先去确认他是谁，也不要换成别的会话。回答里不要出现那个内部标识。';
   };
-  const askAssistant = async ({sessionId, identity, text}) => {
+  const askAssistant = async ({sessionId, identity, text, system, context}) => {
     const question = typeof text === 'string' ? text.trim() : '';
     if (!question || question.length > 2000) throw Object.assign(new Error('请先写清楚要问助手什么'), {code: 'PRODUCT_API_ERROR'});
     const handle = await ensureInteractiveSession({sessionId, identity});
     const agent = handle.agent;
     if (agent.status !== 'idle') throw Object.assign(new Error('助手正在回答上一个问题，请等几秒再试'), {code: 'ASSISTANT_BUSY'});
-    const prompt = [ASK_POLICY, askScope(identity), '用户的问题：' + question].filter(Boolean).join('\n\n');
+    // 调用方可以补一段自己的规矩（如首页对话的"数据来自数据库，不要去开微信"）和一整块
+    // 事实上下文（DB 快照）。顺序固定：产品规矩 → 本次任务规矩 → 对象 → 事实 → 问题。
+    const prompt = [ASK_POLICY, system, askScope(identity), context, '用户的问题：' + question]
+      .filter(Boolean).join('\n\n');
     const message = createUserMessage({source: {kind: 'user'}, content: [{type: 'text', text: prompt}]});
     const start = agent.session.events.length;
     let timer;
@@ -277,7 +343,23 @@ export function apply(ctx) {
   const crm = createCrm(join(dirname(config.database), 'crm.db'));
   const contextSystem = createReplyContextSystem({databasePath: join(dirname(config.database), 'reply-context.db'), workspaceId: 'local', crm});
   const messageCenter = createMessageCenter({databasePath: join(dirname(config.database), 'inbox.db'), identityKey});
-  const productApi = createProductApi({config, token, conversations, bindingsPath, respond, readBody: body, ensureInteractiveSession, askAssistant, crm, context: contextSystem, messageCenter, classifyMessages, draftReply, analyzeStyle});
+  /**
+   * 消息整理（DB 版）：正文已经在提示词里了，模型只做"理解"—— 归纳发生了什么、谁需要
+   * 用户关注、用户本人要做什么。返回结构化 JSON；解析不出来就抛错，绝不把半截文本
+   * 当成结论交出去（旧版把最终聊天文本当结果解析时就吃过这个亏）。
+   */
+  const organizeMessages = async ({prompt}) => {
+    const {text, finish} = await oneShot({system: ORGANIZE_SYSTEM, prompt, maxTokens: 2000, reasoningEffort: 'off'});
+    try {
+      return parseOrganizeAnswer(text);
+    } catch (error) {
+      ctx.logger.warn('organize failed: ' + JSON.stringify({
+        finish: finish?.kind ?? null, chars: text.length, sample: text.slice(0, 240)
+      }));
+      throw error;
+    }
+  };
+  const productApi = createProductApi({config, token, runtime: worker, conversations, bindingsPath, respond, readBody: body, ensureInteractiveSession, askAssistant, crm, context: contextSystem, messageCenter, classifyMessages, draftReply, analyzeStyle, organizeMessages});
   ctx.effect(() => () => {
     for (const handle of active.values()) handle.agent.cancel({kind:'user'});
   });
