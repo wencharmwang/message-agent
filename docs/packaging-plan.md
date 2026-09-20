@@ -396,13 +396,40 @@ MessageAgent.exe / 计划任务
 
 安装完成后这台机器上**不再有明文模型 key**（`.env` 里的那一份改由 DPAPI 存储接管，见 13.4）。
 
-### 13.2 还没做（P0，且是发给外人的最后一道坎）
+### 13.2 引擎与密钥：已按你的决定做完（2026-09-20 第二轮）
 
-**引擎仍是"源码 + node_modules"**。`build-package.ps1` 默认不打引擎（`engine/README-引擎未打包.txt`），
-要打必须显式 `-IncludeEngine`，而且那是 1.4 GB 量级、还不是最终形态。要给普通用户一个"双击就好"的
-包，必须先做出可分发的引擎构建产物 —— 这是本方案 §11 里风险最高的一项，本次没有动它。
+**引擎整包带走，用户不用再装任何依赖。**
 
-另外 Runtime（8766）是独立产品：安装器目前只**检测**它，没装就提示"发送会失败"，包内不带它。
+- `build-package.ps1` 现在**默认**复制引擎（`-SkipEngine` 才跳过）。必须用 **robocopy**：
+  pnpm 的 `node_modules` 是很深的符号链接树，路径普遍超过 260 字符，`Copy-Item` 会成片失败。
+  复制后自检 `apps\cli\src\bin.ts` 与 `node_modules\tsx` 都在，缺一个就中止打包。
+- 安装器把引擎装到 `<安装目录>\engine\harness`，并在完成后自检；配置里的 `harness_root`
+  指向安装目录内的那份，安装包文件夹删掉也不影响。
+- 排除项：`.git` / `.github` / `.claude` / `.agents` / `snapshots` / `coverage` / `*.tsbuildinfo`。
+- 引擎入口支持 `-NodeRuntime`（用本地目录代替下载官方包）。
+
+**微信密钥：DPAPI 保管 + 只在用户授权时读内存。**
+
+| 环节 | 做法 |
+| --- | --- |
+| 存放 | `credentials\wechat-keys.dat`（DPAPI，`agent_worker/secrets_store.py`）；**明文 `keys\*.json` 与 `.bak` 安装时迁移后删除** |
+| 运行时 | `launch.py` 解密到 `<run_dir>\keys\<账号>.json`，用 `WECHAT_DB_LAB_KEYS_DIR` 喂给 watcher；**进程退出时删掉这份运行时副本** |
+| 不自动扫 | `launch.py` 给 worker 带 `WECHAT_DB_LAB_NO_SCAN=1`；`wechat-db-lab` 的 `vault.memory_scan_allowed()` 据此跳过第二轮（读内存），只如实报告缺哪些密钥 |
+| 用户授权扫一次 | `packaging/读取微信密钥.ps1`（要输入 YES 确认）→ `wechat_keys.py scan` → 跑一次解锁（允许扫内存）→ 存进 DPAPI → 删明文 |
+| 安装时 | 先 `migrate`（明文→DPAPI）；若仍没有密钥，**问用户**要不要现在读一次（默认建议读，但必须他确认） |
+
+**已在你机器上实测**：迁移 10 条密钥后重启，明文缓存消失，界面照常读到 8 个会话 /
+60 条正文 —— 也就是"密钥只在 DPAPI + 运行时副本里"这条链路真的通。
+
+### 13.2.1 仍没有解决的
+
+**引擎是"源码 + node_modules"（GB 级）**，不是官方构建产物。它能跑，但包很大、首次安装要
+复制几分钟。引擎仓库有 `tsx scripts/build.ts` 与 `build:lib`（tsc + tsdown）两条构建路径，
+将来接上官方产物可以让包小一个量级 —— 属于优化，不是能不能交付的问题。
+
+另外：**打包实例的完整启动仍未端到端验证**（这个会话里起的进程会被回收，只能用计划任务；
+上一轮的测试任务没等出结果就收了）。安装流程、配置生成、密钥链路都已验证，缺的是
+"装完由计划任务拉起来能跑"这一幕。
 
 ### 13.3 本轮踩到的坑（都已在代码里留注释）
 

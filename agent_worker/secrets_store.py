@@ -102,3 +102,30 @@ def read_secret(path: str | Path, entropy: bytes | None = None) -> dict | None:
 
 def has_secret(path: str | Path) -> bool:
     return Path(path).exists()
+
+
+# --------------------------------------------------------------------------
+# 微信数据库密钥
+#
+# 明文形态是 `{「库相对路径」: 「64 位十六进制密钥」}`（wechat-db-lab 的 KeyVault 格式）。
+# 这里不改变它的内容，只是整份加密保存 —— 上游组件（wechat-db-lab）照旧按"目录"读，
+# 由启动器在运行时解密到一个**本次运行专用的目录**里。
+# --------------------------------------------------------------------------
+WECHAT_KEYS_FILE = 'wechat-keys.dat'
+
+
+def store_wechat_keys(path: str | Path, keys: dict, *, account: str, source: str = '') -> None:
+    """保存微信数据库密钥。
+
+    只多存一个**账号名**（wechat-db-lab 的密钥缓存是按账号分文件的，运行时要把文件写成
+    `<账号>.json`）。密钥内容原样保存，不改上游组件的格式。
+    """
+    write_secret(path, {'version': 1, 'account': account, 'source': source, 'keys': keys})
+
+
+def load_wechat_keys(path: str | Path) -> tuple[str, dict] | None:
+    """返回 (账号名, 密钥表)。读不到或格式不对返回 None。"""
+    payload = read_secret(path)
+    if not payload or not isinstance(payload.get('keys'), dict) or not payload['keys']:
+        return None
+    return str(payload.get('account') or 'account'), payload['keys']

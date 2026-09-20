@@ -11,6 +11,41 @@ from agent_worker.decision import read_dotenv
 
 ROOT = Path(__file__).resolve().parent
 
+# 宿主（产品）侧的约定，和 wechat-db-lab 的 vault.memory_scan_allowed() 对应。
+NO_SCAN_ENV = 'WECHAT_DB_LAB_NO_SCAN'
+# "用户已经授权扫一次"的标记文件：由 packaging/读取微信密钥.ps1 在一次授权动作里写入，
+# 用完就删（见 allow_memory_scan）。不是一个长期开关 —— 长期开着等于自动扫。
+SCAN_GRANT_FILE = 'wechat-scan-grant'
+
+
+def allow_memory_scan(credentials: Path) -> bool:
+    """本次启动是否允许 watcher 去读微信进程内存。
+
+    只有"用户刚点过授权"（授权标记还在）才允许。标记由授权脚本写入并**在启动后被消费掉**，
+    这样即使脚本中途失败，也不会留下一个"以后都自动扫"的状态。
+    """
+    grant = credentials / SCAN_GRANT_FILE
+    try:
+        if not grant.exists():
+            return False
+        grant.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def write_wechat_key_cache(run_dir: Path, account: str, keys: dict) -> Path:
+    """把密钥写成 wechat-db-lab 认识的样子：`<运行目录>/keys/<账号>.json`。
+
+    它的 `cache_dirs()` 支持用 `WECHAT_DB_LAB_KEYS_DIR` 覆盖缓存目录，启动器就是靠这个
+    把"解密出来的运行时副本"喂给它，磁盘上不再需要那份长期存在的明文缓存。
+    """
+    directory = run_dir / 'keys'
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / (account + '.json')
+    target.write_text(json.dumps(keys, ensure_ascii=False), encoding='utf-8')
+    return target
+
 def main():
     config_path = ROOT / 'config.json'
     config = json.loads(config_path.read_text(encoding='utf-8-sig'))
@@ -71,8 +106,26 @@ def main():
                 raise RuntimeError('Harness message plugin did not become ready')
             time.sleep(.25)
     # Worker never inherits the main interactive Runtime token or model credential.
+    # 但微信密钥要给它：worker 会拉起 watcher，watcher 需要密钥目录才能解锁。
+    # 所以只挑这两项传过去，其余（模型 key、Runtime token）一律不给。
+    worker_env = dict(os.environ)
+    worker_env['MESSAGE_AGENT_CONFIG'] = str(config_path)
+    worker_env['MESSAGE_AGENT_ROOT'] = str(ROOT)
+    worker_env['MESSAGE_AGENT_CREDENTIALS'] = str(credentials)
+    # 默认**不允许**自动读微信进程内存：把 DPAPI 里保存的密钥解到一个本次运行专用的目录，
+    # 让 watcher 只用缓存。缓存凑不齐时它会如实报告缺哪些密钥，由界面提示用户点一次授权
+    # （那一次走 packaging/读取微信密钥.ps1，会显式开放扫描）。
+    stored = secrets_store.load_wechat_keys(credentials / secrets_store.WECHAT_KEYS_FILE)
+    if stored:
+        account, stored_keys = stored
+        write_wechat_key_cache(Path(config.get('run_dir') or (credentials / 'run')), account, stored_keys)
+        worker_env['WECHAT_DB_LAB_KEYS_DIR'] = str(Path(config.get('run_dir') or (credentials / 'run')) / 'keys')
+    else:
+        worker_env.pop('WECHAT_DB_LAB_KEYS_DIR', None)
+    if not allow_memory_scan(credentials):
+        worker_env[NO_SCAN_ENV] = '1'
     worker = subprocess.Popen([sys.executable,'-m','agent_worker','--config',str(config_path)],cwd=ROOT,
-                              stdout=log,stderr=log,creationflags=subprocess.CREATE_NO_WINDOW)
+                              env=worker_env, stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW)
     try:
         while host.poll() is None and worker.poll() is None:
             time.sleep(1)
@@ -80,6 +133,13 @@ def main():
     finally:
         host.terminate()
         worker.terminate()
+        # 运行时那份解密出来的密钥缓存用完就删：它是明文，只该存在于进程存活期间。
+        # （DPAPI 里的那份不受影响，下次启动重新解出来。）
+        try:
+            for leftover in (Path(config.get('run_dir') or (credentials / 'run')) / 'keys').glob('*.json'):
+                leftover.unlink()
+        except OSError:
+            pass
 
 if __name__ == '__main__':
     main()

@@ -166,11 +166,34 @@ $dblabSrc = Join-Path $InstallDir 'components\wechat-db-lab\src'
 Copy-Component (Join-Path $Source 'components\wechat-db-lab\src') (Join-Path $InstallDir 'components\wechat-db-lab') 'wechat_db_lab\__init__.py' '取密钥/解密组件' | Out-Null
 
 # 脚本与说明
-foreach ($s in 'start.ps1', 'stop.ps1', 'restart.ps1', 'uninstall.ps1', 'MessageAgent.cmd', '安装说明.md', 'make_config.py', 'config.template.json') {
+foreach ($s in 'start.ps1', 'stop.ps1', 'restart.ps1', 'uninstall.ps1', 'MessageAgent.cmd', '安装说明.md', 'make_config.py', 'config.template.json', 'wechat_keys.py', '读取微信密钥.ps1') {
   $from = Join-Path $Source $s
   if (Test-Path -LiteralPath $from) { Copy-Item -LiteralPath $from -Destination $InstallDir -Force }
 }
 Ok '程序文件就位'
+
+# 引擎：随包安装到安装目录，用户不需要再装引擎依赖。
+# 必须用 robocopy —— pnpm 的 node_modules 是很深的符号链接树，路径经常超过 260 字符，
+# Copy-Item 会成片失败（实测）。robocopy 原生支持长路径。
+if ($EngineRoot -and (Test-Path -LiteralPath (Join-Path $EngineRoot 'apps\cli\src\bin.ts'))) {
+  $engineInside = [IO.Path]::GetFullPath($EngineRoot).StartsWith([IO.Path]::GetFullPath($InstallDir), 'OrdinalIgnoreCase')
+  if ($engineInside) {
+    Ok '引擎已在安装目录内，跳过复制'
+  } else {
+    Say '    正在安装消息引擎（体积大，请耐心等）…' 'DarkGray'
+    $engineTarget = Join-Path $InstallDir 'engine\harness'
+    New-Item -ItemType Directory -Force -Path $engineTarget | Out-Null
+    & robocopy $EngineRoot $engineTarget /E /MT:16 /NFL /NDL /NJH /NJS /R:1 /W:1 | Out-Null
+    if ($LASTEXITCODE -ge 8) { Die "安装引擎失败（robocopy 退出码 $LASTEXITCODE）。" }
+    foreach ($must in 'apps\cli\src\bin.ts', 'node_modules\tsx') {
+      if (-not (Test-Path -LiteralPath (Join-Path $engineTarget $must))) { Die "引擎安装后缺少 $must，安装中止。" }
+    }
+    $EngineRoot = $engineTarget
+    Ok '消息引擎就位'
+  }
+} else {
+  Die "安装包里没有消息引擎（$EngineRoot）。发给用户的包必须带引擎，请重新打包。"
+}
 
 # --------------------------------------------------------------------------
 Step '迁移已有数据'
@@ -287,6 +310,39 @@ secrets_store.write_secret(r'$modelStore', {'DEEPSEEK_API_KEY': os.environ['MA_K
   if ($LASTEXITCODE -ne 0) { Die '保存 API key 失败（密钥保管组件不可用）。' }
   $env:MA_KEY_INPUT = $null
   Ok 'API key 已用 Windows 密钥保护写入（磁盘上没有明文）'
+}
+
+# --------------------------------------------------------------------------
+Step '保管微信数据库密钥'
+
+# 密钥原来以明文 JSON 存在 %LOCALAPPDATA%\wechat-db-lab\keys 下（还可能有个 .bak）。
+# 这里把它们收进 Windows 密钥保护（DPAPI）并删掉明文；日常启动只解密到运行时目录，
+# 磁盘上不再有长期存在的明文密钥。
+$credDir = Join-Path $DataDir 'credentials'
+$keyStore = Join-Path $credDir 'wechat-keys.dat'
+$env:MESSAGE_AGENT_CREDENTIALS = $credDir
+$keysScript = Join-Path $InstallDir 'wechat_keys.py'
+$migrateOutput = & $pythonConsole $keysScript 'migrate' 2>&1
+$migrateOutput | ForEach-Object { Say ("    " + $_) 'DarkGray' }
+$hasKeys = Test-Path -LiteralPath $keyStore
+
+if ($hasKeys) {
+  Ok '密钥已加密保存，明文缓存已清理'
+} else {
+  Say '' 
+  Warn '还没有可用的密钥 —— 现在读一次，还是稍后自己读？'
+  Say '    读密钥需要**读一次微信进程内存**（唯一需要你授权的动作），所以不自动做。' 'Yellow'
+  Say '    前提：微信正在运行并已登录。' 'Yellow'
+  $doScan = if ($Silent) { $false } else { Confirm '    现在读取微信密钥吗？（推荐：现在读，装完马上就能用）' $true }
+  if ($doScan) {
+    Say '    正在读取（这一步会读一次微信进程内存）…' 'DarkGray'
+    $scanOutput = & $pythonConsole $keysScript 'scan' 2>&1
+    $scanOutput | ForEach-Object { Say ("    " + $_) 'DarkGray' }
+    if (Test-Path -LiteralPath $keyStore) { Ok '密钥已加密保存' }
+    else { Warn '没有读到密钥。装好后可以右键运行安装目录里的「读取微信密钥.ps1」再试。' }
+  } else {
+    Warn '先跳过。装好后右键运行安装目录里的「读取微信密钥.ps1」即可（也只有那一次会读内存）。'
+  }
 }
 
 # --------------------------------------------------------------------------

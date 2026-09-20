@@ -6,18 +6,19 @@
     runtimes\node\       自带 Node（用户不需要自己装）
     runtimes\python\     自带 Python（用户不需要自己装）
     components\wechat-db-lab\src\   取密钥/解密组件
-    engine\harness\      消息引擎（用 -IncludeEngine 时打包；见文末说明）
+    engine\harness\      消息引擎（默认整包带走；-SkipEngine 可跳过）
     install.ps1 等脚本 + config.template.json + 安装说明.md
     manifest.json        版本与文件哈希清单
 
   用法：
     powershell -ExecutionPolicy Bypass -File build-package.ps1
-    powershell -ExecutionPolicy Bypass -File build-package.ps1 -IncludeEngine -EngineRoot C:\...\deepseek-harness
+    powershell -ExecutionPolicy Bypass -File build-package.ps1 -EngineRoot C:\...\deepseek-harness
     powershell -ExecutionPolicy Bypass -File build-package.ps1 -NodeRuntime <node目录> -PythonRuntime <python目录>
 
-  关于引擎：计划里建议交付「构建产物 + 依赖」。当前引擎仓库用 tsx 直接跑 TS 源码，
-  完整可分发产物属于打包方案里的 P0（见 docs/packaging-plan.md §11），**本脚本不假装
-  已经完成那一步**：只有显式给 -IncludeEngine 才会把引擎目录复制进来（体积很大）。
+  关于引擎：**默认整包带走**（用户不该再自己装引擎依赖）。当前引擎是"TS 源码 + pnpm
+  node_modules"，靠 tsx 直接跑 —— 能跑，但体积大（GB 级）。用 robocopy 复制，因为 pnpm 的
+  符号链接树路径普遍超过 260 字符，Copy-Item 会成片失败。
+  以后若引擎提供官方构建产物（`tsx scripts/build.ts`），换成那份会更小更快。
 #>
 [CmdletBinding()]
 param(
@@ -32,7 +33,7 @@ param(
   [string]$PythonRuntime = '',
   [string]$NodeVersion = 'v22.23.0',
   [string]$PythonVersion = '3.13.12',
-  [switch]$IncludeEngine,
+  [switch]$SkipEngine,
   [switch]$SkipHashes
 )
 
@@ -48,7 +49,17 @@ function Say($t, $c = 'Gray') { Write-Host $t -ForegroundColor $c }
 function Step($t) { Say ''; Say "== $t" 'Cyan' }
 
 $package = Join-Path $OutDir 'package'
-if (Test-Path -LiteralPath $package) { Remove-Item -LiteralPath $package -Recurse -Force }
+if (Test-Path -LiteralPath $package) {
+  # 清理旧包**不能用 Remove-Item**：它和 Copy-Item 一样受 260 字符路径限制，
+  # 而引擎的 node_modules 里随手就是超长路径（实测报"对路径 someLimit.js 的访问被拒绝"，
+  # 进而把整次构建卡死在清理这一步）。用 robocopy 拿空目录镜像过去最稳。
+  $empty = Join-Path $env:TEMP ('ma-empty-' + [Guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Force -Path $empty | Out-Null
+  & robocopy $empty $package /MIR /NFL /NDL /NJH /NJS /R:0 /W:0 | Out-Null
+  Remove-Item -LiteralPath $package -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $empty -Recurse -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $package) { throw "清理旧包失败（$package 还在）。手动删掉它再重试。" }
+}
 New-Item -ItemType Directory -Force -Path $package | Out-Null
 
 # -- 1. 产品本体 ------------------------------------------------------------
@@ -135,32 +146,39 @@ Say '    components\wechat-db-lab\src' 'Green'
 
 # -- 4. 引擎 ----------------------------------------------------------------
 Step '引擎'
-if ($IncludeEngine) {
+if ($SkipEngine) {
+  New-Item -ItemType Directory -Force -Path (Join-Path $package 'engine') | Out-Null
+  Set-Content -LiteralPath (Join-Path $package 'engine\README-引擎未打包.txt') -Encoding UTF8 -Value @'
+这个包里没有消息引擎（构建时加了 -SkipEngine）。
+只在自己机器上做实验时这样用；发给别人的包必须带引擎。
+'@
+  Say '    按要求跳过引擎' 'Yellow'
+} else {
   if (-not (Test-Path -LiteralPath (Join-Path $EngineRoot 'apps\cli\src\bin.ts'))) { throw "引擎目录不对：$EngineRoot" }
   $engineOut = Join-Path $package 'engine\harness'
   New-Item -ItemType Directory -Force -Path $engineOut | Out-Null
-  # 只带运行时需要的东西：源码、依赖、配置；不要 .git、测试快照和缓存。
-  foreach ($name in 'apps', 'packages', 'node_modules', 'package.json', 'pnpm-workspace.yaml', 'tsconfig.base.json') {
-    $src = Join-Path $EngineRoot $name
-    if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $engineOut -Recurse -Force }
-  }
-  foreach ($junk in '.git', '.storages', '.sessions', 'coverage') {
-    Get-ChildItem -LiteralPath $engineOut -Recurse -Directory -Filter $junk -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-  }
-  Say ("    engine\harness -> {0:N0} MB" -f ((Get-ChildItem $engineOut -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)) 'Yellow'
-  Warn '提醒：这是「源码 + node_modules」形态，能跑但不是最终交付形态。'
-  Say '    真正的构建产物属于打包方案 P0（docs/packaging-plan.md §11），做好之前不要把这份包发给用户。' 'Yellow'
-} else {
-  New-Item -ItemType Directory -Force -Path (Join-Path $package 'engine') | Out-Null
-  Set-Content -LiteralPath (Join-Path $package 'engine\README-引擎未打包.txt') -Encoding UTF8 -Value @'
-这个包里没有消息引擎。
+  Say '    正在复制引擎（体积大，耐心等；用 robocopy）…' 'DarkGray'
+  #
+  # 为什么必须用 robocopy 而不是 Copy-Item：
+  #  1) pnpm 的 node_modules 里全是符号链接/junction，树很深，**路径经常超过 260 字符**，
+  #     Copy-Item 到这些文件会直接失败；robocopy 原生支持长路径。
+  #  2) robocopy 可以按目录名排除，并且默认把 junction 的内容复制成真实目录 ——
+  #     复制出来的树不依赖原来的链接，给用户时才不会指向开发机的路径。
+  $excludeDirs = @('.git', '.github', '.claude', '.agents', 'snapshots', 'coverage', 'node_modules\.cache')
+  $args = @($EngineRoot, $engineOut, '/E', '/MT:16', '/NFL', '/NDL', '/NJH', '/NJS', '/R:1', '/W:1',
+            '/XF', '*.tsbuildinfo', '*.log')
+  foreach ($dir in $excludeDirs) { $args += @('/XD', (Join-Path $EngineRoot $dir)) }
+  & robocopy @args | Out-Null
+  # robocopy 的退出码：0-7 都是成功（1=有文件被复制），>=8 才是失败
+  if ($LASTEXITCODE -ge 8) { throw "复制引擎失败（robocopy 退出码 $LASTEXITCODE）" }
 
-引擎（deepseek-harness）需要先产出可分发的构建产物，见 docs/packaging-plan.md §11 的 P0。
-在那之前：
-  * 自己用：install.ps1 加参数 -EngineRoot <你的引擎目录>；
-  * 打包给别人：build-package.ps1 加 -IncludeEngine（会带上源码 + node_modules，能跑但体积大）。
-'@
-  Say '    未打包引擎（用 -IncludeEngine 或安装时 -EngineRoot 指定）' 'Yellow'
+  # 自检：入口和关键依赖必须在，否则等于发了一个跑不起来的引擎
+  foreach ($must in 'apps\cli\src\bin.ts', 'node_modules\tsx', 'package.json') {
+    if (-not (Test-Path -LiteralPath (Join-Path $engineOut $must))) { throw "引擎复制后缺少 $must，中止打包。" }
+  }
+  $engineMB = (Get-ChildItem -LiteralPath $engineOut -Recurse -File -ErrorAction SilentlyContinue |
+    Measure-Object Length -Sum).Sum / 1MB
+  Say ("    engine\harness -> {0:N0} MB（已排除 .git / .github / .claude / snapshots）" -f $engineMB) 'Green'
 }
 
 # -- 5. 脚本与说明 ----------------------------------------------------------
@@ -221,7 +239,7 @@ $manifest = [ordered]@{
   components = [ordered]@{
     app = [ordered]@{ repo = 'message-agent'; revision = "$repoHead" }
     'wechat-db-lab' = [ordered]@{ repo = 'wechat-db-lab'; revision = "$dbLabHead" }
-    engine = [ordered]@{ mode = $(if ($IncludeEngine) { 'bundled' } else { 'external' }); path = $EngineRoot }
+    engine = [ordered]@{ mode = $(if ($SkipEngine) { 'external' } else { 'bundled' }); path = $EngineRoot }
     node = [ordered]@{ version = (& (Join-Path $nodeOut 'node.exe') '-v') }
     python = [ordered]@{ version = (& (Join-Path $pythonOut 'python.exe') -c "import sys;print(sys.version.split()[0])") }
   }
