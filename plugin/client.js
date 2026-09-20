@@ -749,6 +749,22 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   }
 
   function relativeTime(value){if(!value)return'';const seconds=Math.max(0,Date.now()/1000-value);if(seconds<60)return'刚刚';if(seconds<3600)return Math.floor(seconds/60)+'分钟前';if(seconds<86400)return Math.floor(seconds/3600)+'小时前';const date=new Date(value*1000);if(seconds<86400*7)return Math.floor(seconds/86400)+'天前';return(date.getMonth()+1)+'月'+date.getDate()+'日';}
+  /**
+   * 消息时间，精确到分钟。
+   *
+   * 列表里用相对时间（"3小时前"）在聊天记录里不够用：同一段对话里每条都写"3小时前""2小时前"，
+   * 既看不出先后也看不出具体时刻。这里按聊天软件的习惯给绝对时间 ——
+   * 今天只给时分，昨天加"昨天"，更早给月日，跨年才带年份。
+   */
+  function messageTime(value){
+    if(!value)return '';
+    const date=new Date(value*1000),now=new Date();
+    const clock=pad2(date.getHours())+':'+pad2(date.getMinutes());
+    if(sameDay(date,now))return clock;
+    if(sameDay(date,dayStart(-1)))return '昨天 '+clock;
+    if(date.getFullYear()!==now.getFullYear())return date.getFullYear()+'年'+(date.getMonth()+1)+'月'+date.getDate()+'日 '+clock;
+    return (date.getMonth()+1)+'月'+date.getDate()+'日 '+clock;
+  }
   function pad2(value){return String(value).padStart(2,'0');}
   function toDateInput(date){return date.getFullYear()+'-'+pad2(date.getMonth()+1)+'-'+pad2(date.getDate());}
   function dayStart(offset){const date=new Date();date.setHours(9,0,0,0);date.setDate(date.getDate()+offset);return date;}
@@ -776,6 +792,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     spark:'M10 3.4l1.55 4.05L15.6 9l-4.05 1.55L10 14.6 8.45 10.55 4.4 9l4.05-1.55L10 3.4Z',
     person:'M10 9.3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 6.2c0-2.2 2.7-3.7 6-3.7s6 1.5 6 3.7',
     trash:'M4.6 5.8h10.8M8 5.8V4.5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.3M6.3 5.8l.6 8.7a1 1 0 0 0 1 .95h4.2a1 1 0 0 0 1-.95l.6-8.7',
+    // 「回到最新消息」的箭头。
+    down:'M10 4.6v10.4M5.8 10.8 10 15l4.2-4.2',
     contacts:'M10 9.3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 6.2c0-2.2 2.7-3.7 6-3.7s6 1.5 6 3.7',
     automation:'M11.2 3 5.2 11h3.9l-1.1 6 6-8h-3.9l1.1-6Z',
     settings:'M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm0-9.2v1.9m0 9.6v1.9M17.2 10h-1.9M4.7 10H2.8M15.1 4.9l-1.3 1.3M6.2 13.8l-1.3 1.3M15.1 15.1l-1.3-1.3M6.2 6.2 4.9 4.9',
@@ -1283,12 +1301,33 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     // 滚动位置管理变成一堆状态机（拉取后要保持视野、判到底、防抖）。窗口用满时在顶部
     // 说明一句，用户就知道上面不是"卡住了"。
     const boxRef=useRef(null),pinnedRef=useRef(false);
+    const [showJump,setShowJump]=useState(false),nearBottomRef=useRef(true);
     useEffect(()=>{
       const node=boxRef.current;
       if(!node||pinnedRef.current||!messages.length)return;
       node.scrollTop=node.scrollHeight;
       pinnedRef.current=true;
     },[messages.length]);
+    /**
+     * 往上翻时浮出一个"回到最新"的圆按钮。
+     *
+     * 只在**跨越阈值**时 setState：滚动事件一秒几十次，每次 setState 就是把 300 条消息
+     * 重渲一遍。这里状态只跟"是否贴着底部"这个布尔走，翻历史时不触发任何渲染。
+     */
+    function onScroll(event){
+      const node=event.currentTarget;
+      const near=node.scrollHeight-node.scrollTop-node.clientHeight<160;
+      if(near!==nearBottomRef.current){
+        nearBottomRef.current=near;
+        setShowJump(!near);
+      }
+    }
+    function jumpToLatest(){
+      const node=boxRef.current;
+      if(node)node.scrollTo({top:node.scrollHeight,behavior:'smooth'});
+      nearBottomRef.current=true;
+      setShowJump(false);
+    }
     // 拆成命名变量再拼：这一段原来是 8 层嵌套的 h() 调用，一个括号数错就会让滚动容器
     // 被塞进"不可收缩的页头"里 —— 页面看着在，滚不动（实测踩到过）。
     const header=h('div',{style:{flexShrink:0,padding:'14px clamp(16px,3vw,32px) 12px',borderBottom:'1px solid '+C.border,
@@ -1298,7 +1337,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         data?.identity?.title||title||username),
       h('span',{style:{...pill(kind==='group'?C.text3:C.brand),fontSize:12,flexShrink:0}},kind==='group'?'群聊':'单聊'),
       h('span',{style:{fontSize:12,color:C.text3}},messages.length?('最近 '+messages.length+' 条'):''));
-    const body=h('div',{ref:boxRef,style:{flex:1,minHeight:0,overflowY:'auto'}},
+    const body=h('div',{ref:boxRef,onScroll,style:{flex:1,minHeight:0,overflowY:'auto'}},
       h('div',{style:{maxWidth:840,margin:'0 auto',padding:narrow?'14px 14px 40px':'22px 32px 48px',boxSizing:'border-box'}},
         h(Notice,{error:detail.error,dev:detail.errorDev,code:detail.errorCode}),
         // 读满一窗时在顶部说明一句：让用户知道"上面没有了"，而不是以为界面卡住。
@@ -1307,10 +1346,35 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           h('h2',{style:{...h2,marginBottom:12}},'聊天记录'),
           !messages.length&&h('p',{style:{...hint,margin:0}},
             detail.loading?'正在读取…':'这段时间没有文字消息（可能都是图片、语音这类内容）。'),
-          messages.map((message,index)=>h(MessageBubble,{key:String(message.sort_seq||index),message}))),
+          messages.map((message,index)=>h(React.Fragment,{key:String(message.sort_seq||index)},
+            h(MessageDay,{message,previous:messages[index-1]}),
+            h(MessageBubble,{message})))),
         data&&h(ConversationTodos,{key:data.conversationKey,conversationKey:data.conversationKey,
           todos:data.todos,onChanged:detail.refresh})));
-    return h('div',{style:{display:'flex',flexDirection:'column',height:'100%',width:'100%',minWidth:0}},header,body);
+    return h('div',{style:{position:'relative',display:'flex',flexDirection:'column',height:'100%',width:'100%',minWidth:0}},
+      header,body,
+      // 功能层：往上翻历史时浮出的"回到最新"。圆底是刻意的 —— 它悬在聊天气泡上，
+      // 方形按钮在流动的内容里读不出"这是浮层"。
+      showJump&&h('button',{onClick:jumpToLatest,className:'ma-jump',title:'回到最新消息','aria-label':'回到最新消息'},
+        h(Icon,{name:'down',size:20})));
+  }
+
+  /**
+   * 日期分隔条：跨天时插一行"9月19日"。
+   *
+   * 有了它，气泡上就能只写时分（今天）——否则每条都要写"9月19日 20:04"，噪音把对话压没了。
+   * 这是"时间精确到分钟"能真正读得下去的前提。
+   */
+  function MessageDay({message,previous}){
+    const at=message?.at||0;
+    if(!at)return null;
+    if(previous&&sameDay(new Date(previous.at*1000),new Date(at*1000)))return null;
+    const date=new Date(at*1000),now=new Date();
+    const label=sameDay(date,now)?'今天'
+      :sameDay(date,dayStart(-1))?'昨天'
+      :(date.getFullYear()!==now.getFullYear()?date.getFullYear()+'年':'')+(date.getMonth()+1)+'月'+date.getDate()+'日';
+    return h('div',{style:{display:'flex',justifyContent:'center',margin:'14px 0 10px'}},
+      h('span',{style:{fontSize:12,color:C.text3,padding:'3px 10px',borderRadius:99,background:FIELD_BG,border:'1px solid '+C.border}},label));
   }
 
   /** 一条聊天气泡。自己的靠右、对方的靠左 —— 用对齐方向区分，不靠颜色单独承载语义。 */
@@ -1322,7 +1386,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         border:'1px solid '+(mine?'transparent':'var(--lg-card-line)'),
         backgroundColor:mine?'var(--ma-primary-soft)':FIELD_BG,color:C.text}},
         message.content,
-        h('span',{style:{display:'block',fontSize:11,color:C.text3,marginTop:4}},relativeTime(message.at))));
+        h('span',{style:{display:'block',fontSize:11,color:C.text3,marginTop:4}},messageTime(message.at))));
   }
 
   /**
@@ -2169,34 +2233,61 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h(KnowledgeSection,{data:knowledge.data,refresh:knowledge.refresh,filter:kFilter,setFilter:setKFilter})));
   }
 
-  function SettingsPage(){
-    const status=usePoller(true,()=>api('status'),10000),data=status.data;
-    const settings=usePoller(true,()=>api('settings'),15000);
-    const catalog=usePoller(true,()=>api('models'),60000);
-    const [savingModel,setSavingModel]=useState(false),[modelError,setModelError]=useState('');
-    const ok=data&&!data.error;
-    const autoModel=settings.data?.settings?.auto_model||data?.model||'';
-    const autoProvider=settings.data?.settings?.auto_provider||'deepseek-official';
+  /**
+   * 任务模型选择器。
+   *
+   * 「自动回复」和「整理消息」是两个不同任务 —— 一个要像人一样说话，一个要归纳和判断
+   * 轻重 —— 模型需求不一样，所以各配各的。原来只有一个总开关，等于逼用户二选一。
+   * 两份下拉共用同一份目录（`catalog`），只是选中项不同。
+   */
+  function TaskModelPicker({title,description,catalog,provider,model,clashHint,onPick,saving}){
     const listed=catalog.data?.models||[];
-    // 选中项用「provider::model」编码：不同提供方可能有同名模型，只用 id 会选错端点。
-    const modelKey=entry=>entry.provider+'::'+entry.id;
-    const current=listed.some(entry=>entry.provider===autoProvider&&entry.id===autoModel)
-      ? autoProvider+'::'+autoModel : '';
-    // 按提供方分组：官方模型和本地模型在同一张下拉里，用 optgroup 分开。
+    // 不同提供方可能有同名模型，只用 id 会选错端点，所以选中值编码成「provider::model」。
+    const here=entry=>entry.provider+'::'+entry.id;
+    const matched=listed.some(entry=>entry.provider===provider&&entry.id===model);
     const groups=[];
     for(const entry of listed){
       let group=groups.find(item=>item.provider===entry.provider);
       if(!group){group={provider:entry.provider,name:entry.providerName||entry.provider,models:[]};groups.push(group);}
       group.models.push(entry);
     }
-    async function changeAutoModel(event){
-      const value=event.target.value,split=value.indexOf('::');
+    return h('section',{style:{...card,marginTop:16}},
+      h('h3',h3,title),
+      h('p',{style:{...hint,margin:'0 0 12px'}},description),
+      clashHint&&clashHint,
+      h('select',{value:matched?provider+'::'+model:'',onChange:event=>onPick(event.target.value),
+        disabled:saving||!listed.length,'aria-label':title,style:selectField},
+        !listed.length&&h('option',{value:''},catalog.loading?'正在读取模型…':'暂无可用模型'),
+        // 选中的组合不在目录里时（比如那个本地模型被删了），也要列出来 ——
+        // 否则下拉会跳回第一项，用户以为自己的设置被改掉了。
+        !matched&&model&&h('option',{value:provider+'::'+model},provider+' · '+model+'（当前）'),
+        groups.map(group=>h('optgroup',{key:group.provider,label:group.name},
+          group.models.map(entry=>h('option',{key:here(entry),value:here(entry)},
+            entry.name===entry.id?entry.id:(entry.name+' · '+entry.id)))))),
+      saving&&h('p',{style:{...hint,margin:'8px 0 0'}},'正在保存…'));
+  }
+
+  function SettingsPage(){
+    const status=usePoller(true,()=>api('status'),10000),data=status.data;
+    const settings=usePoller(true,()=>api('settings'),15000);
+    const catalog=usePoller(true,()=>api('models'),60000);
+    // 一次只可能保存一个任务，所以用"哪个任务在存"而不是两个布尔。
+    const [saving,setSaving]=useState(''),[modelError,setModelError]=useState('');
+    const ok=data&&!data.error;
+    const autoModel=settings.data?.settings?.auto_model||data?.model||'';
+    const autoProvider=settings.data?.settings?.auto_provider||'deepseek-official';
+    const organizeModel=settings.data?.settings?.organize_model||data?.model||'';
+    const organizeProvider=settings.data?.settings?.organize_provider||'deepseek-official';
+    async function saveTaskModel(task,value){
+      const split=value.indexOf('::');
       if(split<0)return;
       const provider=value.slice(0,split),model=value.slice(split+2);
-      if(provider===autoProvider&&model===autoModel)return;
-      setSavingModel(true);setModelError('');
-      try{await api('settings',{auto_provider:provider,auto_model:model});settings.refresh();status.refresh();}
-      catch(e){setModelError(e.message);}finally{setSavingModel(false);}
+      setSaving(task);setModelError('');
+      try{
+        await api('settings',task==='auto'?{auto_provider:provider,auto_model:model}
+          :{organize_provider:provider,organize_model:model});
+        settings.refresh();status.refresh();
+      }catch(e){setModelError(e.message);}finally{setSaving('');}
     }
     return h('div',{style:{width:'100%',overflowY:'auto'}},
       h('div',{style:{padding:'24px clamp(18px,4vw,48px) 60px',maxWidth:760}},
@@ -2212,19 +2303,15 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
               h('strong',{style:{display:'block',fontSize:16,color:C.text}},ok?'消息服务运行正常':'正在检查消息服务'),
               h('span',{style:{fontSize:13,color:C.text3}},data?('已接入 '+data.rules.length+' 个联系人'):'请稍等…'))),
            h('p',{style:{marginTop:16,color:C.text2,fontSize:14,lineHeight:1.8}},'自动回复规则和发送记录保存在这台电脑上。使用云端模型时，为了生成回复，相关聊天内容会发送给模型服务。')),
-        h('section',{style:{...card,marginTop:16}},
-          h('h3',h3,'自动回复模型'),
-          h('p',{style:{...hint,margin:'0 0 12px'}},'管的是后台自动回复由谁来写。选本地模型（如「本地 Qwen」）时，那一轮回复的内容不会离开这台电脑。修改后从下一条新消息开始生效。'),
-          h('p',{style:{...hint,margin:'0 0 12px'}},'「整理消息」「起草回复」和首页对话仍用云端模型 —— 它们要读懂整段上下文，本地小模型容易读偏。'),
-          h('select',{value:current,onChange:changeAutoModel,disabled:savingModel||!settings.data||!listed.length,'aria-label':'自动回复模型',style:selectField},
-            !listed.length&&h('option',{value:''},catalog.loading?'正在读取模型…':'暂无可用模型'),
-            // 当前选中的组合不在目录里时（比如那个本地模型被删了），也要列出来 ——
-            // 否则下拉会跳回第一项，用户以为自己的设置被改掉了。
-            !current&&autoModel&&h('option',{value:autoProvider+'::'+autoModel},autoProvider+' · '+autoModel+'（当前）'),
-            groups.map(group=>h('optgroup',{key:group.provider,label:group.name},
-              group.models.map(entry=>h('option',{key:modelKey(entry),value:modelKey(entry)},
-                entry.name===entry.id?entry.id:(entry.name+' · '+entry.id)))))),
-          savingModel&&h('p',{style:{...hint,margin:'8px 0 0'}},'正在保存…')),
+        h(TaskModelPicker,{title:'自动回复模型',
+          description:'管的是后台自动回复由谁来写。选本地模型（如「本地 Qwen」）时，那一轮回复的内容不会离开这台电脑。修改后从下一条新消息开始生效。',
+          catalog,provider:autoProvider,model:autoModel,saving:saving==='auto',
+          onPick:value=>saveTaskModel('auto',value)}),
+        h(TaskModelPicker,{title:'整理消息模型',
+          description:'管的是点「整理消息」时由谁来读消息、归纳要点。这个任务要读懂整段上下文并判断轻重，换成本地小模型时容易读偏，建议先试几次再定。',
+          catalog,provider:organizeProvider,model:organizeModel,saving:saving==='organize',
+          onPick:value=>saveTaskModel('organize',value)}),
+        h('p',{style:{...hint,margin:'10px 2px 0'}},'「起草回复」和首页对话暂时固定用云端模型。'),
         h('section',{style:{...card,marginTop:16}},
           h('h3',h3,'开发者模式'),
           h('p',{style:{...hint,margin:'0 0 12px'}},'默认关闭。打开后会多两样东西：出错的地方多一块折叠的「开发者详情」（Runtime 的错误码、原文、调用栈和读取条数，可一键复制），导航底部多一个回到原生界面的入口。原始日志另外逐条记在数据目录的 dev-errors.log 里。'),
@@ -2354,7 +2441,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       // 底层刻意不写 background：画布的环境色团与颗粒在 liquid 样式表里定义。
       // 行内样式权重最高，一旦写死就会把玻璃可折射的背景盖掉。
       style:{position:'fixed',inset:0,zIndex:60,display:'flex',pointerEvents:'auto',color:C.text,fontFamily:'Inter, ui-sans-serif, "Segoe UI", "Microsoft YaHei", sans-serif'}},
-      h('style',null,'[data-ma] .ma-iconbtn{color:var(--ma-muted);border-radius:8px;cursor:pointer;transition:background var(--lg-dur-1) var(--lg-ease-smooth),color var(--lg-dur-1) var(--lg-ease-smooth)}[data-ma] .ma-iconbtn:not(:disabled):hover{background:var(--lg-tint);color:var(--ma-danger)}[data-ma] .ma-iconbtn:disabled{opacity:.45;cursor:default}[data-ma] button{transition:background var(--lg-dur-1) var(--lg-ease-smooth),border-color var(--lg-dur-1) var(--lg-ease-smooth),color var(--lg-dur-1) var(--lg-ease-smooth),box-shadow var(--lg-dur-1) var(--lg-ease-smooth),transform var(--lg-dur-1) var(--lg-ease-interactive),filter var(--lg-dur-1) var(--lg-ease-smooth)}[data-ma] button:not(:disabled):hover{filter:brightness(1.04)}[data-ma] button:not(:disabled):active{transform:scale(.975)}[data-ma] button:focus-visible,[data-ma] input:focus-visible,[data-ma] textarea:focus-visible,[data-ma] select:focus-visible{outline:3px solid var(--ma-primary);outline-offset:2px}[data-ma] button:disabled{opacity:.55;cursor:not-allowed}[data-ma] summary{cursor:pointer}[data-ma] input[type="checkbox"]{accent-color:var(--ma-primary)}[data-ma] .ma-pulse{animation:ma-pulse 1.3s ease-in-out infinite}@keyframes ma-pulse{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}[data-ma] .ma-spin{animation:ma-spin .8s linear infinite}@keyframes ma-spin{to{transform:rotate(360deg)}}[data-ma] .ma-track-fill{animation:ma-track 1.6s ease-in-out infinite}@keyframes ma-track{0%{transform:translateX(-110%)}100%{transform:translateX(320%)}}@media(max-width:1100px){[data-ma] .ma-rule-grid{grid-template-columns:1fr!important}}@media (prefers-reduced-motion: reduce){[data-ma] .ma-pulse,[data-ma] .ma-spin,[data-ma] .ma-track-fill{animation:none}[data-ma] .ma-track-fill{width:100%;opacity:.5}[data-ma] button:not(:disabled):active{transform:none!important}}'),
+      h('style',null,'[data-ma] .ma-jump{position:absolute;right:22px;bottom:22px;width:44px;height:44px;border-radius:50%;border:1px solid var(--lg-edge);background-color:var(--lg-card-bg);background-image:var(--lg-card-sheen);box-shadow:var(--lg-card-shadow),inset 0 1px 0 var(--lg-card-rim);color:var(--ma-ink);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:4;-webkit-backdrop-filter:blur(var(--lg-blur-sm));backdrop-filter:blur(var(--lg-blur-sm))}[data-ma] .ma-jump:hover{filter:brightness(1.05)}[data-ma] .ma-iconbtn{color:var(--ma-muted);border-radius:8px;cursor:pointer;transition:background var(--lg-dur-1) var(--lg-ease-smooth),color var(--lg-dur-1) var(--lg-ease-smooth)}[data-ma] .ma-iconbtn:not(:disabled):hover{background:var(--lg-tint);color:var(--ma-danger)}[data-ma] .ma-iconbtn:disabled{opacity:.45;cursor:default}[data-ma] button{transition:background var(--lg-dur-1) var(--lg-ease-smooth),border-color var(--lg-dur-1) var(--lg-ease-smooth),color var(--lg-dur-1) var(--lg-ease-smooth),box-shadow var(--lg-dur-1) var(--lg-ease-smooth),transform var(--lg-dur-1) var(--lg-ease-interactive),filter var(--lg-dur-1) var(--lg-ease-smooth)}[data-ma] button:not(:disabled):hover{filter:brightness(1.04)}[data-ma] button:not(:disabled):active{transform:scale(.975)}[data-ma] button:focus-visible,[data-ma] input:focus-visible,[data-ma] textarea:focus-visible,[data-ma] select:focus-visible{outline:3px solid var(--ma-primary);outline-offset:2px}[data-ma] button:disabled{opacity:.55;cursor:not-allowed}[data-ma] summary{cursor:pointer}[data-ma] input[type="checkbox"]{accent-color:var(--ma-primary)}[data-ma] .ma-pulse{animation:ma-pulse 1.3s ease-in-out infinite}@keyframes ma-pulse{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}[data-ma] .ma-spin{animation:ma-spin .8s linear infinite}@keyframes ma-spin{to{transform:rotate(360deg)}}[data-ma] .ma-track-fill{animation:ma-track 1.6s ease-in-out infinite}@keyframes ma-track{0%{transform:translateX(-110%)}100%{transform:translateX(320%)}}@media(max-width:1100px){[data-ma] .ma-rule-grid{grid-template-columns:1fr!important}}@media (prefers-reduced-motion: reduce){[data-ma] .ma-pulse,[data-ma] .ma-spin,[data-ma] .ma-track-fill{animation:none}[data-ma] .ma-track-fill{width:100%;opacity:.5}[data-ma] button:not(:disabled):active{transform:none!important}}'),
       h('nav',{'data-ma':'nav','aria-label':'主要功能',className:'lg-glass','data-compact':narrow?'':undefined,
         // 功能层：悬浮玻璃轨。padding / 描边 / 底色 / 材质全在样式表的 nav[data-ma="nav"] 里；
         // 行内只留布局 —— 宽度随窄屏变，是动态值，只能写在这。

@@ -3,12 +3,17 @@ import { dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 
 export function automaticRequestConfig(proposed, settings) {
-  return {...proposed,
+  const next = {...proposed,
     // provider 只在明确给了才覆盖：本地模型（Ollama 等）挂在别的 provider 下，不带它的话
     // 请求会打到官方端点。旧配置里没有这个字段，所以缺省时保持原样。
     ...(settings.provider ? {provider:settings.provider} : {}),
-    model:settings.model,maxTokens:settings.max_tokens,
-    reasoningEffort:settings.auto_reasoning_effort ?? 'low'};
+    model:settings.model,maxTokens:settings.max_tokens};
+  // auto_reasoning_effort 显式为 undefined 表示"这个模型不支持推理档位"。
+  // 这里要**删掉**而不是"不赋新值"：proposed 里可能带着会话继承来的档位，留着照样会被拒
+  // （UNSUPPORTED_REASONING_EFFORT 在校验阶段抛出，那条链路会次次失败）。
+  if (settings.auto_reasoning_effort === undefined) delete next.reasoningEffort;
+  else next.reasoningEffort = settings.auto_reasoning_effort ?? 'low';
+  return next;
 }
 
 export function conversationKey(rule, job) {

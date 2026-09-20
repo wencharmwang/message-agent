@@ -123,14 +123,47 @@ test('消息页打开就停在最新一条，往上翻看历史', () => {
   assert.match(view, /只显示了最近 '\+CHAT_LIMIT\+' 条/);
 });
 
-test('自动回复模型能选本地模型（按提供方分组，两个字段一起提交）', () => {
+test('往上翻历史时浮出「回到最新」的圆按钮', () => {
+  const view = source.slice(source.indexOf('function ConversationView('), source.indexOf('function MessageBubble('));
+  assert.match(view, /onScroll/);
+  // 只在跨越阈值时才 setState —— 每次滚动都 setState 会把 300 条消息重渲一遍。
+  assert.match(view, /if\(near!==nearBottomRef\.current\)/);
+  assert.match(view, /className:'ma-jump'/);
+  assert.match(view, /name:'down'/);
+  // 圆底：它悬在气泡上是浮层，方形按钮在流动内容里读不出来。
+  assert.match(source, /\[data-ma\] \.ma-jump\{position:absolute;[\s\S]{0,200}?border-radius:50%/);
+  assert.match(view, /scrollTo\(\{top:node\.scrollHeight,behavior:'smooth'\}\)/);
+});
+
+test('消息时间精确到分钟，跨天有日期分隔', () => {
+  assert.match(source, /function messageTime\(value\)/);
+  assert.match(source, /if\(sameDay\(date,now\)\)return clock;/);
+  assert.match(source, /'昨天 '\+clock/);
+  assert.match(source, /date\.getFullYear\(\)!==now\.getFullYear\(\)/, '跨年要带年份');
+  // 气泡用绝对时间（分钟级），不是"3小时前"。
+  const bubble = source.slice(source.indexOf('function MessageBubble('), source.indexOf('function ConversationTodos('));
+  assert.match(bubble, /messageTime\(message\.at\)/);
+  assert.doesNotMatch(bubble, /relativeTime/);
+  // 有了日期分隔，气泡上才能只写时分。
+  assert.match(source, /function MessageDay\(\{message,previous\}\)/);
+  assert.match(source, /h\(MessageDay,\{message,previous:messages\[index-1\]\}\)/);
+});
+
+test('两个任务各配各的模型（自动回复 / 整理消息），都支持本地模型', () => {
+  const picker = source.slice(source.indexOf('function TaskModelPicker('), source.indexOf('function SettingsPage('));
   const settings = source.slice(source.indexOf('function SettingsPage('), source.indexOf('function parseBlock('));
-  assert.match(settings, /auto_provider/);
-  assert.match(settings, /entry\.provider\+'::'\+entry\.id/);
-  assert.match(settings, /h\('optgroup',\{key:group\.provider,label:group\.name\}/);
-  assert.match(settings, /api\('settings',\{auto_provider:provider,auto_model:model\}\)/);
-  // 当前选中的组合不在目录里时也要显示，不然下拉会跳回第一项。
-  assert.match(settings, /（当前）/);
+  // 下拉：按提供方分组，选中值用 provider::model 编码（不同提供方可能有同名模型）。
+  assert.match(picker, /entry\.provider\+'::'\+entry\.id/);
+  assert.match(picker, /h\('optgroup',\{key:group\.provider,label:group\.name\}/);
+  // 当前组合不在目录里时也要显示，不然下拉会跳回第一项，用户以为设置被改了。
+  assert.match(picker, /（当前）/);
+  // 两个任务两行，各存各的字段 —— 只存一个总开关等于逼用户二选一。
+  assert.match(settings, /title:'自动回复模型'/);
+  assert.match(settings, /title:'整理消息模型'/);
+  assert.match(settings, /api\('settings',task==='auto'\?\{auto_provider:provider,auto_model:model\}/);
+  assert.match(settings, /:\{organize_provider:provider,organize_model:model\}\)/);
+  assert.match(settings, /organize_provider/);
+  assert.match(settings, /organize_model/);
 });
 
 test('已完成里每一行都有删除入口，两类回执也不例外', () => {

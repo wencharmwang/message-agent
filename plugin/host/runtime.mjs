@@ -45,6 +45,13 @@ export class RuntimeAdapter {
   status() {
     return this.#call('GET', '/api/status');
   }
+  /**
+   * 用户可改的运行时设置（各任务的模型选择、值守开关…）。
+   * 纯本地状态，不碰微信；Host 侧要用这些配置时从这里读，不自己另存一份。
+   */
+  settings() {
+    return this.#call('GET', '/api/settings');
+  }
   /** Explicit visible-list read. Callers must treat this as a user-initiated sync only. */
   listConversations() {
     return this.#call('GET', '/api/conversations');

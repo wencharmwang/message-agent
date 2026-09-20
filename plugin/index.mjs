@@ -257,12 +257,43 @@ export function apply(ctx) {
    * Returns the text AND the finish reason. A call that failed or was truncated must not
    * be reported as "the model returned nothing parseable" — that masked the real cause.
    */
-  const oneShot = async ({system, prompt, maxTokens, model, reasoningEffort = 'low'}) => {
+  /**
+   * 这个 provider/model 认不认"推理档位"。
+   *
+   * 推理能力是模型**声明**出来的元数据，不是通用参数：harness 里手写的本地模型
+   * （Ollama 的 qwen-*）不带这份声明，传 reasoningEffort 会直接抛
+   * UNSUPPORTED_REASONING_EFFORT —— 而且校验发生在发请求之前，所以那条链路会**次次**
+   * 失败（实测把「整理消息」切到本地模型时报的就是这个）。
+   *
+   * 问一次记一次：切模型是低频动作，缓存不会过期到需要失效策略。
+   */
+  const REASONING_CAPABLE = new Map();
+  async function supportsReasoning(provider, model) {
+    const key = provider + '::' + model;
+    if (REASONING_CAPABLE.has(key)) return REASONING_CAPABLE.get(key);
+    let capable = true;
+    try {
+      const info = await ctx.llm.resolveModelInfo(provider, model);
+      capable = !!info?.reasoning;
+      if (!capable) ctx.logger.warn('模型不支持推理档位，调用时不传：' + key);
+    } catch {
+      // 问不出来（模型不存在、适配器出错）就按"支持"处理，让真正的调用去报它自己的错。
+      capable = true;
+    }
+    REASONING_CAPABLE.set(key, capable);
+    return capable;
+  }
+
+  const oneShot = async ({system, prompt, maxTokens, model, provider, reasoningEffort = 'low'}) => {
+    const routeProvider = provider || 'deepseek-official';
+    const routeModel = model || config.model;
     const assembler = new BlockAssembler();
     const options = {
-      provider: 'deepseek-official',
-      model: model || config.model,
-      reasoningEffort,
+      // provider 缺省是官方：单次调用大多是判断类任务，默认模型就够；需要换的调用方显式传。
+      provider: routeProvider,
+      model: routeModel,
+      // 模型不支持就不传 —— 传了连请求都发不出去。
+      ...(reasoningEffort && await supportsReasoning(routeProvider, routeModel) ? {reasoningEffort} : {}),
       ...(system ? {system} : {}),
       messages: [createUserMessage({source: {kind: 'plugin', plugin: 'message-agent'}, content: [{type: 'text', text: prompt}]})],
       maxTokens,
@@ -347,14 +378,23 @@ export function apply(ctx) {
    * 消息整理（DB 版）：正文已经在提示词里了，模型只做"理解"—— 归纳发生了什么、谁需要
    * 用户关注、用户本人要做什么。返回结构化 JSON；解析不出来就抛错，绝不把半截文本
    * 当成结论交出去（旧版把最终聊天文本当结果解析时就吃过这个亏）。
+   *
+   * **模型单独配**：整理要归纳和判断轻重，和"像人一样回一句话"是两种能力，用户可能给它们
+   * 用不同的模型（设置里两行，各配各的）。缺省跟自动回复一致。
    */
   const organizeMessages = async ({prompt}) => {
-    const {text, finish} = await oneShot({system: ORGANIZE_SYSTEM, prompt, maxTokens: 2000, reasoningEffort: 'off'});
+    const runtimeSettings = await worker.settings()
+      .then(result => result?.settings ?? {}).catch(() => ({}));
+    const {text, finish} = await oneShot({
+      system: ORGANIZE_SYSTEM, prompt, maxTokens: 2000, reasoningEffort: 'off',
+      provider: runtimeSettings.organize_provider, model: runtimeSettings.organize_model
+    });
     try {
       return parseOrganizeAnswer(text);
     } catch (error) {
       ctx.logger.warn('organize failed: ' + JSON.stringify({
-        finish: finish?.kind ?? null, chars: text.length, sample: text.slice(0, 240)
+        finish: finish?.kind ?? null, chars: text.length, sample: text.slice(0, 240),
+        provider: runtimeSettings.organize_provider ?? null, model: runtimeSettings.organize_model ?? null
       }));
       throw error;
     }
@@ -433,6 +473,9 @@ export function apply(ctx) {
           && (payload.auto_provider === 'deepseek-official' || knownProviders.includes(payload.auto_provider))
           ? payload.auto_provider : 'deepseek-official';
         const autoSettings = {...config, provider: autoProvider, model: autoModel};
+        // 自动回复这条链路同样要按模型能力决定传不传推理档位（本地模型不认，传了就次次失败）。
+        // 设成 undefined 由 automaticRequestConfig 省略掉这个字段。
+        if (!await supportsReasoning(autoProvider, autoModel)) autoSettings.auto_reasoning_effort = undefined;
         const key = conversationKey(rule, job);
         await conversations.run(key, async () => {
         if (job.expires_at && job.expires_at * 1000 <= Date.now()) throw new Error('Reply job expired');

@@ -61,8 +61,8 @@ function build() {
   assert.ok(source.includes(marker), 'client.js 的模块导出点变了，这个冒烟测试需要跟着改');
   const patched = source.replace(marker,
     '  globalThis.__MA_COMPONENTS__={SessionRow,HomeCard,StatStrip,OrganizeResult,ChatBubble,'
-    + 'HomeChat,HomePage,ConversationView,ConversationTodos,MessageBubble,RailFoot,Cover,TodayPage,'
-    + 'AutomationPage,ContextPage,SettingsPage,TodoRow,Row};\n' + marker);
+    + 'HomeChat,HomePage,ConversationView,ConversationTodos,MessageBubble,MessageDay,TaskModelPicker,'
+    + 'RailFoot,Cover,TodayPage,AutomationPage,ContextPage,SettingsPage,TodoRow,Row};\n' + marker);
 
   let factory = null;
   globalThis.window.__ModuleLoader__ = {load({factory: register}) { factory = register; }};
@@ -112,6 +112,14 @@ test('界面组件都能渲染出内容（白屏体检）', {skip: available ? f
     'HomePage 窄屏': h(C.HomePage, {store, narrow: true}),
     ConversationView: h(C.ConversationView, {store, username: 'doy1572', title: 'Wencharm', kind: 'direct', narrow: false}),
     MessageBubble: h(C.MessageBubble, {message: {direction: 'incoming', content: '周五的报价我改好了', at: now - 60}}),
+    MessageDay: h(C.MessageDay, {message: {at: now}, previous: {at: now - 86400 * 3}}),
+    'TaskModelPicker 空目录': h(C.TaskModelPicker, {title: '自动回复模型', description: 'x',
+      catalog: {loading: true, data: null}, provider: 'deepseek-official', model: 'deepseek-v4-flash', onPick() {}}),
+    'TaskModelPicker 有本地模型': h(C.TaskModelPicker, {title: '整理消息模型', description: 'y', saving: true,
+      catalog: {loading: false, data: {models: [
+        {provider: 'deepseek-official', providerName: 'DeepSeek', id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash'},
+        {provider: 'ollama-local', providerName: '本地 Qwen', id: 'qwen-dsh-16k:latest', name: 'qwen-dsh-16k'}
+      ]}}, provider: 'ollama-local', model: 'qwen-dsh-16k:latest', onPick() {}}),
     'ConversationTodos 空': h(C.ConversationTodos, {conversationKey: 'k', todos: [], onChanged() {}}),
     'ConversationTodos 有内容': h(C.ConversationTodos, {conversationKey: 'k', onChanged() {},
       todos: [{id: 't1', title: '回他电话', state: 'open', source: 'manual', detail: '周五前'},
