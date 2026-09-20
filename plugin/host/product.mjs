@@ -314,7 +314,7 @@ async function importKnowledge(context, workspaceId, payload = {}) {
  * 自动回复真正卡住、需要人处理的那种情况不属于"分类"，它仍然要能看见 —— 但不再占一块
  * 分类区，只由界面用一行指路（counts.automation）。
  */
-export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [], today: [], later: [], someday: []}, jobs = [], completed = [], doneTodos = [], now = Date.now() / 1000} = {}) {
+export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [], today: [], later: [], someday: []}, jobs = [], completed = [], doneTodos = [], dismissed = [], now = Date.now() / 1000} = {}) {
   const confirm = drafts.filter(d => d.state === 'awaiting_confirmation').map(d => ({
     id: 'draft:' + d.id, kind: 'draft', draftId: d.id, revision: d.revision,
     conversationKey: identityKey(d.target.provider, d.target.conversation),
@@ -373,8 +373,13 @@ export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [
       state: 'done', updatedAt: todo.doneAt ?? todo.updatedAt
     });
   }
+  // 「已完成」里每一行都要能删掉。待办是真删（crm），其余两类是**处理回执**：它们记录的是
+  // 客观发生过的事（助手处理过哪条消息、你把哪条标成已看），删不掉历史，所以是"从已完成里
+  // 移除"—— 记在 dismissed.json 里，只影响这一份清单。
+  const hidden = new Set(dismissed);
   // 做完的待办现在也在这张单子上，所以上限放宽一点：它是"回看"，不是"待办"。
-  const receipts = handled.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, 12);
+  const receipts = handled.filter(entry => !hidden.has(entry.id))
+    .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, 12);
   // 自动回复自己卡住了（规则被拦住、读不到微信）不属于"分类"，是故障，界面用一行指路。
   // 待确认的草稿不重复计：它在上面那块里有自己的位置。
   const automation = items.filter(item => item.bucket === 'pending' && item.attentionKind !== 'draft').length;
@@ -413,6 +418,24 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
   const reviewedPath = join(dirname(config.database), 'reviewed.json');
   const reviewed = () => {
     try { return JSON.parse(readFileSync(reviewedPath, 'utf8')); } catch { return {}; }
+  };
+  /**
+   * 「从已完成里移除」的记录。
+   *
+   * 已完成里有两类**回执**（助手处理过的消息、你标成已看的会话），它们记录的是客观发生过
+   * 的事，删不掉也不该删 —— 但用户需要一个办法让它们从这份清单上消失（用户实测：
+   * 「已完成这 2 条没有显示删除图标」）。所以这里只记 id，不碰任何事实数据。
+   */
+  const dismissedPath = join(dirname(config.database), 'dismissed.json');
+  const dismissed = () => {
+    try { const list = JSON.parse(readFileSync(dismissedPath, 'utf8')); return Array.isArray(list) ? list : []; }
+    catch { return []; }
+  };
+  const dismiss = id => {
+    const list = dismissed().filter(entry => entry !== id);
+    list.push(id);
+    writeFileSync(dismissedPath, JSON.stringify(list.slice(-800)));
+    return list.length;
   };
   const markReviewed = ids => {
     const now = Date.now() / 1000;
@@ -1008,8 +1031,17 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
         respond(res, 200, projectToday({
           items, drafts: drafts.list(), jobs: status.jobs ?? [],
           todoBuckets: crm.todoBuckets(),
-          completed: center.completedRecent(), doneTodos: doneTodosForToday(), now: Date.now() / 1000
+          completed: center.completedRecent(), doneTodos: doneTodosForToday(),
+          dismissed: dismissed(), now: Date.now() / 1000
         }));
+        return true;
+      }
+      // 「已完成」里那些处理回执的删除入口（待办走 /api/todos/<id>/delete，是真的删）。
+      if (path === '/message-agent/api/receipts/dismiss' && req.method === 'POST') {
+        const payload = await readBody(req);
+        const id = typeof payload.id === 'string' ? payload.id.trim().slice(0, 160) : '';
+        if (!id) throw Object.assign(new Error('缺少要移除的那条记录'), {code: 'CONTEXT_INVALID'});
+        respond(res, 200, {ok: true, id, dismissed: dismiss(id)});
         return true;
       }
       // ---- 首页（本地数据库驱动，不打开微信窗口）-----------------------------

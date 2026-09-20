@@ -86,12 +86,12 @@ test('会话页不做 CRM，完成的条目不划删除线', () => {
 });
 
 test('导航图标按用户逐条指认的形状', () => {
-  assert.match(source, /const NAV_ICON=\{home:'home',messages:'messages',today:'check',customers:'contacts',automation:'automation',context:'settings'\}/);
-  // 待办 = 一个勾（不带框）；设置 = 通用齿轮；回复配置沿用原来那颗圆盘 + 辐条。
-  assert.match(source, /check:'M4\.8 10\.7 8\.4 14\.3 15\.4 7\.1'/);
+  assert.match(source, /const NAV_ICON=\{home:'messages',todos:'today',automation:'automation',context:'settings'\}/);
+  // 消息 = 一个消息气泡；待办 = 方框里一个勾。
+  assert.match(source, /messages:'M4 5\.5h12a1\.5 1\.5 0 0 1 1\.5 1\.5v6/);
+  assert.match(source, /today:'M4\.2 4\.5h11\.6[^']*Zm2\.5 5\.7 1\.5 1\.5 2\.9-2\.9'/);
+  // 设置 = 通用齿轮。
   assert.match(source, /gear:'M10 3\.2/);
-  // 消息就是原来「待办」用的那个图标，原样搬过来。
-  assert.match(source, /home:'M4\.2 4\.5h11\.6[^']*Zm2\.5 5\.7 1\.5 1\.5 2\.9-2\.9'/);
   assert.match(source, /h\(Icon,\{name:'gear',size:18\}\),narrow\?null:'设置'/);
 });
 
@@ -109,6 +109,18 @@ test('图标按钮够大、位置固定，文案不啰嗦', () => {
   const page = source.slice(source.indexOf('function TodayPage('), source.indexOf('function CustomersPage('));
   assert.match(page, /'＋ 待办'/);
   assert.doesNotMatch(page, /＋ 加一条待办/);
+});
+
+test('已完成里每一行都有删除入口，两类回执也不例外', () => {
+  const page = source.slice(source.indexOf('function TodayPage('), source.indexOf('function CustomersPage('));
+  // 待办那条（真删）与回执那条（从清单移除）都要挂在第二行右侧。
+  const buttons = [...page.matchAll(/className:'ma-iconbtn'/g)].length;
+  assert.ok(buttons >= 2, '已完成里的待办和回执都该有删除按钮，现在只有 ' + buttons + ' 个');
+  assert.match(page, /api\('receipts\/dismiss',\{id:entry\.id\}\)/, '回执的删除要落库');
+  assert.match(page, /function dismissReceipt\(entry\)/);
+  assert.match(page, /function deleteDoneTodo\(entry\)/);
+  // 回执行的第二行同样要拆成两栏，否则长文案会把删除挤掉。
+  assert.match(page, /justifyContent:'space-between',gap:12[\s\S]{0,400}?ma-iconbtn/);
 });
 
 test('已完成条目的删除入口固定在第二行右侧，不会被长文案挤掉', () => {

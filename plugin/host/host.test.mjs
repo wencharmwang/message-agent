@@ -212,6 +212,29 @@ test('「今天要做的」只有待办、等你确认的发送和已完成', ()
   assert.match(draftRow.title, /长江证券孙盛/);
 });
 
+test('已完成里被移除的回执不再出现，但事实数据不动', () => {
+  // 回执行是从 jobs 投影出来的：job 必须能对上一条 inbox item 才会进「已完成」。
+  const item = (ruleId, key, title) => ({key, rule: {id: ruleId},
+    identity: {provider: 'wechat-main', conversation: key, title, kind: 'direct'}});
+  const page = projectToday({
+    items: [item('r1', 'k1', '甲'), item('r2', 'k2', '乙')],
+    drafts: [],
+    todoBuckets: {overdue: [], today: [], later: [], someday: []},
+    jobs: [
+      {id: 'j1', rule_id: 'r1', state: 'sent', text: '哈哈去忙吧', detail: '', created_at: 1789000000, finished_at: 1789000001},
+      {id: 'j2', rule_id: 'r2', state: 'sent', text: '好的', detail: '', created_at: 1789000100, finished_at: 1789000101}
+    ],
+    doneTodos: [{id: 't1', title: '做完了的', state: 'done', source: 'manual', doneAt: 1789000200}],
+    dismissed: ['job:j1'],
+    // 「已完成」只收最近 48 小时的处理记录，所以夹具要一起把 now 定住，否则整批都被时间窗滤掉。
+    now: 1789000300
+  });
+  const handled = page.groups.find(group => group.key === 'handled').items;
+  assert.ok(!handled.some(row => row.id === 'job:j1'), '被移除的那条不该再出现');
+  assert.ok(handled.some(row => row.id === 'job:j2'), '其它回执要留着');
+  assert.ok(handled.some(row => row.id === 'todo:t1'), '做完的待办也要留着');
+});
+
 test('在做的待办排在最前面；做完的离开「待办」进「已完成」', () => {
   const todo = (id, state, dueAt = null) => ({id, title: id, state, dueAt, source: 'manual', conversationKey: null});
   const page = projectToday({

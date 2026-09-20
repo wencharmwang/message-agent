@@ -767,20 +767,15 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   // Monochrome icons: they inherit the surrounding text colour via currentColor, so the
   // same glyph reads correctly on a light or dark host theme. Colour emoji cannot do that.
   const ICONS={
-    // 导航图标。四条要求都来自用户逐条指认：消息要"一个消息样子"、待办要一个勾、
-    // 回复配置沿用原来设置那颗（圆盘 + 辐条）、设置换成通用齿轮。
-    // 消息 = 原来「待办」用的那个图标，原样搬过来（用户要的就是它）。
-    home:'M4.2 4.5h11.6a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4.2a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Zm2.5 5.7 1.5 1.5 2.9-2.9',
-    // 待办：一个勾，不带框。
-    check:'M4.8 10.7 8.4 14.3 15.4 7.1',
+    // 导航图标。消息 = 一个消息气泡；待办 = 方框里一个勾。
+    messages:'M4 5.5h12a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H9.6L6 17.4v-2.9H4A1.5 1.5 0 0 1 2.5 13V7A1.5 1.5 0 0 1 4 5.5Z',
+    today:'M4.2 4.5h11.6a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4.2a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Zm2.5 5.7 1.5 1.5 2.9-2.9',
     // 设置：通用齿轮（外齿 + 内圆）。
     gear:'M10 3.2 12.6 5.6 15.9 6.6 15.1 10 15.9 13.4 12.6 14.4 10 16.8 7.4 14.4 4.1 13.4 4.9 10 4.1 6.6 7.4 5.6ZM12.3 10a2.3 2.3 0 1 1-4.6 0 2.3 2.3 0 0 1 4.6 0Z',
     // 待办来源：一颗星 = 助手记的，一个人形 = 自己记的。只有图标、没有文字。
     spark:'M10 3.4l1.55 4.05L15.6 9l-4.05 1.55L10 14.6 8.45 10.55 4.4 9l4.05-1.55L10 3.4Z',
     person:'M10 9.3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 6.2c0-2.2 2.7-3.7 6-3.7s6 1.5 6 3.7',
     trash:'M4.6 5.8h10.8M8 5.8V4.5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.3M6.3 5.8l.6 8.7a1 1 0 0 0 1 .95h4.2a1 1 0 0 0 1-.95l.6-8.7',
-    messages:'M4 5.5h12a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H9.6L6 17.4v-2.9H4A1.5 1.5 0 0 1 2.5 13V7A1.5 1.5 0 0 1 4 5.5Z',
-    today:'M4.2 4.5h11.6a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4.2a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Zm2.5 5.7 1.5 1.5 2.9-2.9',
     contacts:'M10 9.3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 6.2c0-2.2 2.7-3.7 6-3.7s6 1.5 6 3.7',
     automation:'M11.2 3 5.2 11h3.9l-1.1 6 6-8h-3.9l1.1-6Z',
     settings:'M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm0-9.2v1.9m0 9.6v1.9M17.2 10h-1.9M4.7 10H2.8M15.1 4.9l-1.3 1.3M6.2 13.8l-1.3 1.3M15.1 15.1l-1.3-1.3M6.2 6.2 4.9 4.9',
@@ -1595,6 +1590,18 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
      * 它挂在「已完成」那一组里，走的不是 TodoRow 的 act()，所以自己来一遍同样的乐观隐藏：
      * 点一下先让它从界面上消失，接口回来再以服务端为准（原来这里只有状态标签，没有删除）。
      */
+    /**
+     * 删掉一条**已完成**的处理回执（助手处理过的消息 / 你标成已看的会话）。
+     *
+     * 它不是待办，删的是"这份清单上的这一行"，不影响任何事实数据（那条记录在消息助手里
+     * 仍然存在）。和服务端的 dismissed 清单对应。
+     */
+    async function dismissReceipt(entry){
+      if(!entry||busy)return;
+      setBusy(true);setError('');
+      try{await api('receipts/dismiss',{id:entry.id});await today.refresh();}
+      catch(e){setError(e.message);}finally{setBusy(false);}
+    }
     async function deleteDoneTodo(entry){
       const id=entry.todoId;
       if(!id||busy)return;
@@ -1678,7 +1685,13 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
               return h(Row,{key:entry.id,title,right:relativeTime(entry.updatedAt),
                 // 写清是谁处理掉的、处理成了什么样。「已处理」三个字既没说人也没说事，
                 // 用户看完不知道助手到底做了什么（实测被问过"助手怎么处理呢"）。
-                meta:(entry.actor==='you'?'你':'助手')+' · '+firstLine(entry.detail||'处理完了',60)});
+                // 删除入口和待办那条一样钉在第二行右侧 —— 这两类回执（助手处理过的消息、
+                // 你标成已看的会话）也要能删掉（用户实测报的就是它们没有删除图标）。
+                meta:h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}},
+                  h('span',{style:{minWidth:0,wordBreak:'break-word'}},
+                    (entry.actor==='you'?'你':'助手')+' · '+firstLine(entry.detail||'处理完了',60)),
+                  h('button',{onClick:()=>dismissReceipt(entry),disabled:busy,className:'ma-iconbtn',
+                    title:'从已完成里移除','aria-label':'从已完成里移除',style:iconButton},h(Icon,{name:'trash',size:16})))});
             })))));
   }
 
@@ -2215,7 +2228,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   // 首屏是「消息」：关键信息 + 关键操作 + 对话。主动查消息不再需要回到原生对话框 ——
   // 产品自己的对话区走的是同一个 Agent，而且每次提问都会带上最新消息。
   const NAV=[['home','消息'],['todos','待办'],['automation','自动回复'],['context','回复配置']];
-  const NAV_ICON={home:'home',messages:'messages',today:'check',customers:'contacts',automation:'automation',context:'settings'};
+  // 消息 = 一个消息气泡；待办 = 方框里一个勾。只保留实际用到的四个映射。
+  const NAV_ICON={home:'messages',todos:'today',automation:'automation',context:'settings'};
   function NavEntry({store,wide}){
     const {open}=useStore(store);
     return h('button',{onClick:()=>store.set({open:!open,cover:true,tab:'home'}),title:'消息',
