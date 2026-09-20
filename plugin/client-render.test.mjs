@@ -68,6 +68,23 @@ test('首屏是消息页：关键信息 + 关键操作 + 对话', () => {
   assert.match(source, /不打开微信窗口，不会打扰你/);
 });
 
+test('会话页不做 CRM，完成的条目不划删除线', () => {
+  // 只看**代码**，注释里保留"为什么拿掉"的说明是有意为之。
+  const code = source.split('\n').filter(line => {
+    const trimmed = line.trim();
+    return !trimmed.startsWith('//') && !trimmed.startsWith('*') && !trimmed.startsWith('/*');
+  }).join('\n');
+  const view = code.slice(code.indexOf('function ConversationView('), code.indexOf('function CrmSections('));
+  assert.match(view, /ConversationTodos/);
+  // CRM 暂时不做：会话页里不许挂跟进记录 / 联系人资料 / CrmSections（等真要做时统一做）。
+  assert.doesNotMatch(view, /CrmSections/, '会话页不该挂 CRM 那套组件');
+  assert.doesNotMatch(view, /联系人资料|＋ 跟进|followups/);
+  // 待办来源只用图标（星 = 助手记的，人形 = 自己记的），不写文字。
+  assert.match(code, /name:fromAssistant\?'spark':'person'/);
+  // 全程不用删除线：表达"已完成 / 已加入"一律用状态标签或图标。
+  assert.doesNotMatch(code, /line-through/, '删除线是"作废"的语义，别拿它表示完成');
+});
+
 test('界面不提"数据库"这类实现细节', () => {
   // 用户明确要求：界面上不能出现读取本地数据库的说法。检查所有**字符串字面量**里的
   // 相关词——注释里为开发保留说明是允许的（`//` 与 `*` 开头的行不算）。

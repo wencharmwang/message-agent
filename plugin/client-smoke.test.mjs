@@ -61,8 +61,8 @@ function build() {
   assert.ok(source.includes(marker), 'client.js 的模块导出点变了，这个冒烟测试需要跟着改');
   const patched = source.replace(marker,
     '  globalThis.__MA_COMPONENTS__={SessionRow,HomeCard,StatStrip,OrganizeResult,ChatBubble,'
-    + 'HomeChat,HomePage,ConversationView,ConversationExtras,RailFoot,Cover,TodayPage,AutomationPage,'
-    + 'ContextPage,SettingsPage};\n' + marker);
+    + 'HomeChat,HomePage,ConversationView,ConversationTodos,MessageBubble,RailFoot,Cover,TodayPage,'
+    + 'AutomationPage,ContextPage,SettingsPage};\n' + marker);
 
   let factory = null;
   globalThis.window.__ModuleLoader__ = {load({factory: register}) { factory = register; }};
@@ -111,15 +111,11 @@ test('界面组件都能渲染出内容（白屏体检）', {skip: available ? f
     HomePage: h(C.HomePage, {store, narrow: false}),
     'HomePage 窄屏': h(C.HomePage, {store, narrow: true}),
     ConversationView: h(C.ConversationView, {store, username: 'doy1572', title: 'Wencharm', kind: 'direct', narrow: false}),
-    'ConversationExtras 空': h(C.ConversationExtras, {conversationKey: 'k', data: {customer: null, todos: [], followups: []},
-      loading: false, onChanged() {}}),
-    'ConversationExtras 有内容': h(C.ConversationExtras, {conversationKey: 'k', loading: false, onChanged() {},
-      data: {
-        customer: {stage: '已报价', nextStep: '周五回电', updatedAt: now},
-        todos: [{id: 't1', title: '回他电话', state: 'open', source: 'manual', detail: '周五前'},
-                {id: 't2', title: '已经问过了', state: 'done', source: 'manual'}],
-        followups: [{id: 'f1', kind: '记录', note: '电话确认了报价，等他周五回复', createdAt: now - 3600}]
-      }}),
+    MessageBubble: h(C.MessageBubble, {message: {direction: 'incoming', content: '周五的报价我改好了', at: now - 60}}),
+    'ConversationTodos 空': h(C.ConversationTodos, {conversationKey: 'k', todos: [], onChanged() {}}),
+    'ConversationTodos 有内容': h(C.ConversationTodos, {conversationKey: 'k', onChanged() {},
+      todos: [{id: 't1', title: '回他电话', state: 'open', source: 'manual', detail: '周五前'},
+              {id: 't2', title: '已经问过了', state: 'done', source: 'assistant'}]}),
     Cover: h(C.Cover, {store}),
     TodayPage: h(C.TodayPage, {store, ctx: {}}),
     AutomationPage: h(C.AutomationPage),
@@ -147,25 +143,43 @@ test('首页渲染出来的是「消息」三块，不是一个空白壳', {skip
   assert.match(settled, /打开消息助手/);
 });
 
-test('会话页底部在没内容时不摆空壳', {skip: available ? false : '找不到宿主的 react，跳过渲染体检'}, () => {
+test('会话页的滚动区是页面的兄弟节点，没有被塞进页头', {skip: available ? false : '找不到宿主的 react，跳过渲染体检'}, () => {
+  const {React, ReactDOMServer, C} = ctx;
+  const html = ReactDOMServer.renderToStaticMarkup(React.createElement(C.ConversationView,
+    {store, username: 'doy1572', title: 'Wencharm', kind: 'direct', narrow: false}));
+  // 回归（真实踩到）：页头那个 div 漏掉一个 ')' 时，滚动容器会被当成页头的**子节点**。
+  // 页头是 flex-shrink:0 且高度随内容走，于是整段内容溢出被裁掉 —— 页面看着在，滚不动。
+  // 页头的孩子里没有 div，所以"页头开始之后第一个 </div>"必然是页头自己的收尾，
+  // 它必须出现在滚动容器**之前**。
+  const headerStart = html.indexOf('flex-shrink:0');
+  assert.ok(headerStart >= 0, '没找到页头');
+  const headerClose = html.indexOf('</div>', headerStart);
+  const scrollStart = html.indexOf('overflow-y:auto');
+  assert.ok(scrollStart > 0, '没找到滚动区');
+  assert.ok(scrollStart > headerClose,
+    '滚动区被塞进页头里了：页头不收缩，内容会溢出被裁，页面就滚不动');
+});
+
+test('会话页底部只剩待办，空的时候不摆空壳', {skip: available ? false : '找不到宿主的 react，跳过渲染体检'}, () => {
   const {React, ReactDOMServer, C} = ctx;
   const h = React.createElement;
-  const empty = ReactDOMServer.renderToStaticMarkup(h(C.ConversationExtras,
-    {conversationKey: 'k', data: {customer: null, todos: [], followups: []}, loading: false, onChanged() {}}));
-  // 用户点一条最近动态进来，看到的应该是聊天记录 + 一排按钮，而不是三个"还没有…"。
-  assert.doesNotMatch(empty, /没有未完成的待办|还没有记录|还没有填写/);
+  const empty = ReactDOMServer.renderToStaticMarkup(h(C.ConversationTodos,
+    {conversationKey: 'k', todos: [], onChanged() {}}));
+  // CRM 那块暂时不做：跟进记录与联系人资料都不该出现在会话页里。
+  assert.doesNotMatch(empty, /跟进|联系人资料|没有未完成的待办|还没有记录|还没有填写/);
   assert.match(empty, /＋ 待办/);
-  assert.match(empty, /＋ 跟进/);
 
-  const filled = ReactDOMServer.renderToStaticMarkup(h(C.ConversationExtras, {conversationKey: 'k', loading: false, onChanged() {},
-    data: {
-      customer: {stage: '已报价', nextStep: '周五回电', updatedAt: 1},
-      todos: [{id: 't1', title: '回他电话', state: 'open', source: 'manual'},
-              {id: 't2', title: '已经问过了', state: 'done', source: 'manual'}],
-      followups: [{id: 'f1', kind: '记录', note: '电话确认了报价', createdAt: 1}]
-    }}));
+  const filled = ReactDOMServer.renderToStaticMarkup(h(C.ConversationTodos, {conversationKey: 'k', onChanged() {},
+    todos: [{id: 't1', title: '回他电话', state: 'open', source: 'manual'},
+            {id: 't2', title: '已经问过了', state: 'done', source: 'assistant'}]}));
   assert.match(filled, /回他电话/);
-  // 做完的收进折叠的「已完成」，并且**不划删除线**：横线是"取消"的语义。
+  // 做完的收进折叠的「已完成」，且不划删除线、不再重复标一次状态。
   assert.match(filled, /已完成 1 件/);
   assert.doesNotMatch(filled, /line-through/);
+  // 来源只留图标：允许出现在 title/aria-label（悬停提示与无障碍），但不能当可见文字。
+  for (const word of ['助手记的', '自己记的']) {
+    const total = [...filled.matchAll(new RegExp(word, 'g'))].length;
+    const asAttribute = [...filled.matchAll(new RegExp(`(?:title|aria-label)="${word}"`, 'g'))].length;
+    assert.equal(total, asAttribute, `${word} 只能出现在 title/aria-label 里，不能是可见文字`);
+  }
 });

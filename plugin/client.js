@@ -758,6 +758,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   // same glyph reads correctly on a light or dark host theme. Colour emoji cannot do that.
   const ICONS={
     home:'M3 9.3 10 3.4l7 5.9v6.2a1 1 0 0 1-1 1h-3.4v-4.2H7.4v4.2H4a1 1 0 0 1-1-1V9.3Z',
+    // 待办来源：一颗星 = 助手记的，一个人形 = 自己记的。只有图标、没有文字。
+    spark:'M10 3.4l1.55 4.05L15.6 9l-4.05 1.55L10 14.6 8.45 10.55 4.4 9l4.05-1.55L10 3.4Z',
+    person:'M10 9.3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 6.2c0-2.2 2.7-3.7 6-3.7s6 1.5 6 3.7',
+    trash:'M4.6 5.8h10.8M8 5.8V4.5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.3M6.3 5.8l.6 8.7a1 1 0 0 0 1 .95h4.2a1 1 0 0 0 1-.95l.6-8.7',
     messages:'M4 5.5h12a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H9.6L6 17.4v-2.9H4A1.5 1.5 0 0 1 2.5 13V7A1.5 1.5 0 0 1 4 5.5Z',
     today:'M4.2 4.5h11.6a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4.2a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Zm2.5 5.7 1.5 1.5 2.9-2.9',
     contacts:'M10 9.3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 6.2c0-2.2 2.7-3.7 6-3.7s6 1.5 6 3.7',
@@ -1034,7 +1038,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
               label:'记成待办：'+firstLine(item.title,20),onChange:event=>onCheck(index,event.target.checked),style:{marginTop:3}}),
             h('div',{style:{flex:1,minWidth:0}},
               h('div',{style:{fontSize:14,color:added[index]?C.text3:C.text,lineHeight:1.6,
-                textDecoration:added[index]?'line-through':'none',wordBreak:'break-word'}},item.title),
+                textDecoration:'none',wordBreak:'break-word'}},item.title),
               (item.detail||item.conversation)&&h('div',{style:{fontSize:12,color:C.text3,marginTop:3,lineHeight:1.6,wordBreak:'break-word'}},
                 (item.detail||'')+(item.conversation?((item.detail?' · ':'')+'来自 '+item.conversation):''))),
             added[index]&&h('span',{style:{fontSize:12,color:C.ok,flexShrink:0}},'已加入')))),
@@ -1256,57 +1260,53 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       +'&title='+encodeURIComponent(title||'')),10000);
     const data=detail.data,messages=data?.messages||[];
     const back=()=>store.set({contactKey:null,contactTitle:null,contactKind:null});
-    return h('div',{style:{display:'flex',flexDirection:'column',height:'100%',width:'100%',minWidth:0}},
-      h('div',{style:{flexShrink:0,padding:'14px clamp(16px,3vw,32px) 12px',borderBottom:'1px solid '+C.border,
-        display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}},
-        h('button',{onClick:back,style:{...small(false),flexShrink:0}},'← 全部消息'),
-        h('h1',{style:{...h1,fontSize:19,margin:0,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},
-          data?.identity?.title||title||username),
-        h('span',{style:{...pill(kind==='group'?C.text3:C.brand),fontSize:12,flexShrink:0}},kind==='group'?'群聊':'单聊'),
-        h('span',{style:{fontSize:12,color:C.text3}},messages.length?('最近 '+messages.length+' 条'):''),
-      h('div',{style:{flex:1,minHeight:0,overflowY:'auto'}},
-        h('div',{style:{maxWidth:840,margin:'0 auto',padding:narrow?'14px 14px 40px':'22px 32px 48px',boxSizing:'border-box'}},
-          h(Notice,{error:detail.error,dev:detail.errorDev,code:detail.errorCode}),
-          h('section',{style:card},
-            h('h2',{style:{...h2,marginBottom:12}},'聊天记录'),
-            !messages.length&&h('p',{style:{...hint,margin:0}},
-              detail.loading?'正在读取…':'这段时间没有文字消息（可能都是图片、语音这类内容）。'),
-            messages.map((message,index)=>h('div',{key:index,style:{display:'flex',
-              justifyContent:message.direction==='outgoing'?'flex-end':'flex-start',marginBottom:8}},
-              h('div',{style:{maxWidth:'78%',minWidth:0,padding:'9px 12px',borderRadius:'var(--lg-r-lg)',
-                fontSize:14,lineHeight:1.7,whiteSpace:'pre-wrap',wordBreak:'break-word',
-                border:'1px solid '+(message.direction==='outgoing'?'transparent':'var(--lg-card-line)'),
-                backgroundColor:message.direction==='outgoing'?'var(--ma-primary-soft)':FIELD_BG,color:C.text}},
-                message.content,
-                h('span',{style:{display:'block',fontSize:11,color:C.text3,marginTop:4}},relativeTime(message.at)))))),
-          data&&h(ConversationExtras,{key:data.conversationKey,conversationKey:data.conversationKey,
-            data:{customer:data.customer,todos:data.todos,followups:data.followups},
-            loading:detail.loading,onChanged:detail.refresh})))));
+    // 拆成命名变量再拼：这一段原来是 8 层嵌套的 h() 调用，一个括号数错就会让滚动容器
+    // 被塞进"不可收缩的页头"里 —— 页面看着在，滚不动（实测踩到过）。
+    const header=h('div',{style:{flexShrink:0,padding:'14px clamp(16px,3vw,32px) 12px',borderBottom:'1px solid '+C.border,
+      display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}},
+      h('button',{onClick:back,style:{...small(false),flexShrink:0}},'← 全部消息'),
+      h('h1',{style:{...h1,fontSize:19,margin:0,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},
+        data?.identity?.title||title||username),
+      h('span',{style:{...pill(kind==='group'?C.text3:C.brand),fontSize:12,flexShrink:0}},kind==='group'?'群聊':'单聊'),
+      h('span',{style:{fontSize:12,color:C.text3}},messages.length?('最近 '+messages.length+' 条'):''));
+    const body=h('div',{style:{flex:1,minHeight:0,overflowY:'auto'}},
+      h('div',{style:{maxWidth:840,margin:'0 auto',padding:narrow?'14px 14px 40px':'22px 32px 48px',boxSizing:'border-box'}},
+        h(Notice,{error:detail.error,dev:detail.errorDev,code:detail.errorCode}),
+        h('section',{style:card},
+          h('h2',{style:{...h2,marginBottom:12}},'聊天记录'),
+          !messages.length&&h('p',{style:{...hint,margin:0}},
+            detail.loading?'正在读取…':'这段时间没有文字消息（可能都是图片、语音这类内容）。'),
+          messages.map((message,index)=>h(MessageBubble,{key:String(message.sort_seq||index),message}))),
+        data&&h(ConversationTodos,{key:data.conversationKey,conversationKey:data.conversationKey,
+          todos:data.todos,onChanged:detail.refresh})));
+    return h('div',{style:{display:'flex',flexDirection:'column',height:'100%',width:'100%',minWidth:0}},header,body);
+  }
+
+  /** 一条聊天气泡。自己的靠右、对方的靠左 —— 用对齐方向区分，不靠颜色单独承载语义。 */
+  function MessageBubble({message}){
+    const mine=message.direction==='outgoing';
+    return h('div',{style:{display:'flex',justifyContent:mine?'flex-end':'flex-start',marginBottom:8}},
+      h('div',{style:{maxWidth:'78%',minWidth:0,padding:'9px 12px',borderRadius:'var(--lg-r-lg)',
+        fontSize:14,lineHeight:1.7,whiteSpace:'pre-wrap',wordBreak:'break-word',
+        border:'1px solid '+(mine?'transparent':'var(--lg-card-line)'),
+        backgroundColor:mine?'var(--ma-primary-soft)':FIELD_BG,color:C.text}},
+        message.content,
+        h('span',{style:{display:'block',fontSize:11,color:C.text3,marginTop:4}},relativeTime(message.at))));
   }
 
   /**
-   * 会话页底部：这个人的待办与跟进。
+   * 会话页底部：这个人身上还没做完的待办。
    *
-   * 刻意**不**复用「联系人」页那套 CrmSections。那套是给"管理资料"用的，它会无条件摆出
-   * 「待办 · 没有未完成的待办」「跟进记录 · 还没有记录」「联系人资料 · 还没有填写」三块空壳。
-   * 用户从「最近有动静」点一个人进来，想看的是聊天记录，结果下面全是"没有内容"（实测被抱怨过）。
+   * 这里**只做待办**。跟进记录与联系人资料属于 CRM，而产品里暂时没有 CRM —— 摆在那儿
+   * 只会让"点进来看聊天记录"的人先撞上两块"还没有填写"（用户实测抱怨过两次）。
+   * 真要做 CRM 的时候统一做，不在会话页里先长一半。
    *
-   * 这里的原则很简单：**有东西才铺开，没东西就只留一排按钮**。
+   * 空的时候只留一行标题 + 一个「＋ 待办」，不写"没有未完成的待办"这类空话。
    */
-  function ConversationExtras({conversationKey,data,loading,onChanged}){
-    const [open,setOpen]=useState('');
+  function ConversationTodos({conversationKey,todos:all=[],onChanged}){
+    const [adding,setAdding]=useState(false);
     const [busy,setBusy]=useState(false),[error,setError]=useState('');
-    const customer=data?.customer;
-    const todos=(data?.todos||[]).filter(todo=>todo.state!=='done');
-    const doneTodos=(data?.todos||[]).filter(todo=>todo.state==='done');
-    const followups=data?.followups||[];
-    const [stage,setStage]=useState(''),[nextStep,setNextStep]=useState(''),[note,setNote]=useState('');
-    useEffect(()=>{
-      if(!customer)return;
-      setStage(customer.stage||'');setNextStep(customer.nextStep||'');setNote(customer.note||'');
-    },[customer&&customer.updatedAt,conversationKey]);
-    const dirty=customer&&(stage!==(customer.stage||'')||nextStep!==(customer.nextStep||'')||note!==(customer.note||''));
-    const toggle=name=>setOpen(current=>current===name?'':name);
+    const open=all.filter(todo=>todo.state!=='done'),done=all.filter(todo=>todo.state==='done');
     async function run(fn){
       setBusy(true);setError('');
       try{await fn();onChanged();}catch(e){setError(e.message);}finally{setBusy(false);}
@@ -1318,46 +1318,20 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       if(action==='reopen')return run(()=>api('todos/'+todo.id+'/reopen',{}));
       return run(()=>api('todos/'+todo.id+'/'+action,{}));
     }
-    if(loading&&!data)return h('p',{style:hint},'正在读取…');
-    const label={display:'block',fontSize:13,color:C.text2,marginBottom:5};
     return h('section',{style:card},
       h(Notice,{error}),
-      h('div',{style:{display:'flex',gap:8,flexWrap:'wrap'}},
-        h('button',{onClick:()=>toggle('todo'),disabled:busy,style:small(open==='todo')},open==='todo'?'收起':'＋ 待办'),
-        h('button',{onClick:()=>toggle('followup'),disabled:busy,style:small(open==='followup')},open==='followup'?'收起':'＋ 跟进'),
-        h('button',{onClick:()=>toggle('profile'),disabled:busy,style:small(open==='profile')},open==='profile'?'收起':'联系人资料')),
-      open==='todo'&&h('div',{style:{marginTop:12}},
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10}},
+        h('h2',{style:{...h2,margin:0,fontSize:15}},'待办'),
+        h('button',{onClick:()=>setAdding(value=>!value),disabled:busy,style:small(adding)},adding?'收起':'＋ 待办')),
+      adding&&h('div',{style:{marginTop:12}},
         h(Composer,{mode:'todo',fixedMode:true,setMode:()=>{},busy,
           onSubmit:(_,text,dueAt)=>run(()=>api('todos',{conversationKey,title:text,dueAt,source:'manual'}))})),
-      open==='followup'&&h('div',{style:{marginTop:12}},
-        h(Composer,{mode:'followup',fixedMode:true,setMode:()=>{},busy,
-          onSubmit:(_,text)=>run(()=>api('customers/'+conversationKey+'/followups',{kind:'记录',note:text}))})),
-      open==='profile'&&h('div',{style:{display:'grid',gap:10,marginTop:14}},
-        h('div',null,h('label',{style:label},'现在是什么关系/阶段'),
-          h('input',{value:stage,onChange:event=>setStage(event.target.value),placeholder:'例如：朋友、家人、已报价、等回款',style:field})),
-        h('div',null,h('label',{style:label},'下一步'),
-          h('input',{value:nextStep,onChange:event=>setNextStep(event.target.value),placeholder:'例如：周五前回他电话',style:field})),
-        h('div',null,h('label',{style:label},'备注'),
-          h('textarea',{value:note,onChange:event=>setNote(event.target.value),rows:2,placeholder:'只有你自己看得到',style:{...field,resize:'vertical',lineHeight:1.7}})),
-        h('div',null,h('button',{onClick:()=>run(()=>api('customers/'+conversationKey,{stage,nextStep,note})),
-          disabled:busy||!dirty,style:small(true)},busy?'正在保存…':(dirty?'保存':'已保存')))),
-      // 下面两块只有真的有内容才出现。空的时候只有上面那排按钮，不再摆三个"还没有"。
-      !!todos.length&&h('div',{style:{marginTop:16}},
-        h('p',{style:{...hint,margin:'0 0 8px'}},'这个人的待办 · 还没做完 '+todos.length+' 件'),
-        h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
-          todos.map(todo=>h(TodoRow,{key:todo.id,todo,onAction:todoAction,busy})))),
-      !!doneTodos.length&&h('details',{style:{marginTop:12}},
-        h('summary',{style:{cursor:'pointer',fontSize:13,color:C.text3}},'已完成 '+doneTodos.length+' 件'),
+      !!open.length&&h('div',{style:{marginTop:12,border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
+        open.map(todo=>h(TodoRow,{key:todo.id,todo,onAction:todoAction,busy}))),
+      !!done.length&&h('details',{style:{marginTop:12}},
+        h('summary',{style:{cursor:'pointer',fontSize:13,color:C.text3}},'已完成 '+done.length+' 件'),
         h('div',{style:{marginTop:8,border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
-          doneTodos.slice(0,8).map(todo=>h(TodoRow,{key:todo.id,todo,onAction:todoAction,busy})))),
-      !!followups.length&&h('div',{style:{marginTop:16}},
-        h('p',{style:{...hint,margin:'0 0 8px'}},'跟进记录'),
-        h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
-          followups.slice(0,5).map((item,index)=>h('div',{key:item.id,style:{padding:'12px 14px',borderTop:index?'1px solid '+C.border:'none'}},
-            h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline'}},
-              h('strong',{style:{fontSize:14,color:C.text}},item.kind==='助手摘要'?'助手总结':'跟进'),
-              h('span',{style:{fontSize:13,color:C.text3}},relativeTime(item.createdAt))),
-            h(LongText,{text:item.note}))))));
+          done.slice(0,8).map(todo=>h(TodoRow,{key:todo.id,todo,onAction:todoAction,busy})))));
   }
   function CrmSections({customerKey,identity,data,loading,error,onChanged}){
     const [busy,setBusy]=useState(false),[actionError,setActionError]=useState('');
@@ -1407,7 +1381,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         !!todos.length&&h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.panel,overflow:'hidden'}},todos.map(todoLine)),
         doneTodos.length?h('button',{onClick:()=>setShowDone(value=>!value),style:{...small(false,false,true),marginTop:8}},showDone?'收起已完成':'已完成 '+doneTodos.length+' 件'):null,
         showDone&&doneTodos.map((todo,index)=>h('div',{key:todo.id,style:{display:'flex',gap:10,padding:'9px 0',borderBottom:'1px solid '+C.border,color:C.text3,fontSize:14}},
-          h('span',{style:{textDecoration:'line-through',flex:1,minWidth:0}},todo.title)))),
+          h('span',{style:{flex:1,minWidth:0,color:C.text3}},todo.title)))),
 
       h(Section,{title:'跟进记录',meta:followups.length?('共 '+followups.length+' 条'+(customer&&customer.lastFollowupAt?(' · 最近 '+relativeTime(customer.lastFollowupAt)):'')):'',
         action:h('button',{onClick:()=>setFollowOpen(value=>!value),style:small(!followOpen)},followOpen?'收起':'＋ 记一条')},
@@ -1532,29 +1506,42 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   // 以前它是另一套东西 —— 会话可以被单独挂进这一页，另有一块由模型给消息打的分类
   // 拼出来的任务区。用户的实际感受是「今天要做的和待办有什么区别」「点了不知道是什么」。
   // 现在只有一条路：要做的事就记成待办，别的都不进这一页。
-  function TodoRow({todo,onAction,busy}){
+  /**
+   * 一条待办。
+   *
+   * 三条界面约定，都是用户逐条提过之后定下来的：
+   *  1. 完成的不画删除线（横线是"作废"的语义）；
+   *  2. 完成的不再打「已完成」标签 —— 它既然列在「已完成」下面，状态本来就清楚，再标一遍
+   *     是重复（原话「自然都是已完成的条目」）。但在别处（会话页）仍然要知道状态，所以
+   *     胶囊只在**不是**已完成分组里才画：调用方用 `showState` 控制。
+   *  3. 谁记下的（自己 / 助手）只用一个图标表示，不写字 —— 这条信息本来就不重要。
+   */
+  function TodoRow({todo,onAction,busy,showState=true}){
     const due=dueInfo(todo.dueAt),done=todo.state==='done',doing=todo.state==='doing';
+    const fromAssistant=todo.source==='assistant';
+    const sourceTitle=fromAssistant?'助手记的':'自己记的';
     return h('div',{style:{display:'flex',gap:12,alignItems:'flex-start',padding:'13px 15px',borderBottom:'1px solid '+C.border}},
       h(Checkbox,{checked:done,disabled:busy,label:done?'重新打开：「'+firstLine(todo.title,20)+'」':'标记完成：「'+firstLine(todo.title,20)+'」',
         onChange:()=>onAction(done?'reopen':'done',todo),style:{marginTop:3}}),
       h('div',{style:{flex:1,minWidth:0}},
-        // 完成的事**不划删除线**：横线是"取消/作废"的语义，而这里只是做完了。状态交给
-        // 下面那颗「已完成」标签表达，一眼看得清，也不会把清单画得乱七八糟。
         h('div',{style:{fontSize:15,color:done?C.text2:C.text,lineHeight:1.6,wordBreak:'break-word'}},todo.title),
         todo.detail&&todo.detail!==todo.title&&h('p',{style:{margin:'5px 0 0',fontSize:13,color:C.text2,lineHeight:1.7,whiteSpace:'pre-wrap',maxHeight:60,overflow:'hidden'}},todo.detail),
         h('div',{style:{display:'flex',gap:8,alignItems:'center',marginTop:6,flexWrap:'wrap'}},
-          done&&h('span',{style:pill(C.ok)},'已完成'),
+          showState&&done&&h('span',{style:pill(C.ok)},'已完成'),
           doing&&h('span',{style:pill(C.brand)},'在做'),
           !done&&due&&h('span',{style:pill(due.color)},due.text),
           todo.identity&&h('span',{style:{fontSize:13,color:C.text3}},'来自 '+todo.identity.title),
-          // 只留一个维度：这条是谁记下来的。
-          // 原来这里是两条独立判断 —— 「助手记的」看 source、「自己记的」看有没有挂联系人 ——
-          // 于是一条没有联系人的助手待办会同时出现两个标签，互相打架（用户直接说看不懂）。
-          h('span',{style:{fontSize:13,color:C.text3}},todo.source==='assistant'?'助手记的':'自己记的'))),
-      !done&&h('div',{style:{display:'flex',gap:6,flexShrink:0}},
-        h('button',{onClick:()=>onAction(doing?'reopen':'doing',todo),disabled:busy,style:small(false)},doing?'放回待办':'在做'),
-        h('button',{onClick:()=>onAction('tomorrow',todo),disabled:busy,style:small(false)},'明天'),
-        h('button',{onClick:()=>onAction('delete',todo),disabled:busy,style:small(false,true)},'删除')));
+          h('span',{title:sourceTitle,'aria-label':sourceTitle,style:{display:'inline-flex',alignItems:'center',color:C.text3}},
+            h(Icon,{name:fromAssistant?'spark':'person',size:13})))),
+      done
+        // 做完的只留一个删除 —— 「在做 / 明天」对已经结束的事没有意义。
+        ? h('button',{onClick:()=>onAction('delete',todo),disabled:busy,title:'删除这条待办','aria-label':'删除这条待办',
+            style:{border:'none',background:'transparent',color:C.text3,cursor:busy?'default':'pointer',padding:6,flexShrink:0,lineHeight:0}},
+            h(Icon,{name:'trash',size:15}))
+        : h('div',{style:{display:'flex',gap:6,flexShrink:0}},
+            h('button',{onClick:()=>onAction(doing?'reopen':'doing',todo),disabled:busy,style:small(false)},doing?'放回待办':'在做'),
+            h('button',{onClick:()=>onAction('tomorrow',todo),disabled:busy,style:small(false)},'明天'),
+            h('button',{onClick:()=>onAction('delete',todo),disabled:busy,style:small(false,true)},'删除')));
   }
 
   function TodayPage({store,ctx}){
@@ -1581,6 +1568,21 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       finally{setGone(old=>{const next={...old};delete next[id];return next;});setBusy(false);}
     }
     async function addTodo(_,text,dueAt){try{setAdding(false);await api('todos',{title:text,dueAt,source:'manual'});await today.refresh();}catch(e){setError(e.message);}}
+    /**
+     * 删掉一条**已完成**的待办。
+     *
+     * 它挂在「已完成」那一组里，走的不是 TodoRow 的 act()，所以自己来一遍同样的乐观隐藏：
+     * 点一下先让它从界面上消失，接口回来再以服务端为准（原来这里只有状态标签，没有删除）。
+     */
+    async function deleteDoneTodo(entry){
+      const id=entry.todoId;
+      if(!id||busy)return;
+      setBusy(true);setError('');
+      setGone(old=>({...old,[id]:true}));
+      try{await api('todos/'+id+'/delete',{});await today.refresh();}
+      catch(e){setError(e.message);}
+      finally{setGone(old=>{const next={...old};delete next[id];return next;});setBusy(false);}
+    }
     // 待办/草稿挂的是会话 key（sha256），而会话视图要的是 DB 身份（username）。
     // 服务端把 key 换回身份，本地不做任何猜测；换不到就只说没找到，不跳一个空页面。
     const go=async(key)=>{
@@ -1640,12 +1642,23 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
               // 做过的事可能是"处理了某条消息"（有联系人），也可能是"做完了某件待办"
               // （可能根本没挂联系人）。所以标题要允许只有待办自身的文字。
               const title=(entry.identity&&entry.identity.title)||entry.title||'（未命名）';
+              if(entry.todo){
+                // 做完了的待办：**不再标一次「已完成」**（它就列在这一组里，状态本来就清楚），
+                // 也不再写"你自己记下的一件待办"（啰嗦）—— 来源只留一个图标，删除只留一个图标。
+                const fromAssistant=entry.source==='assistant',sourceTitle=fromAssistant?'助手记的':'自己记的';
+                return h(Row,{key:entry.id,title,
+                  right:h('span',{style:{display:'inline-flex',alignItems:'center',gap:8,flexShrink:0}},
+                    relativeTime(entry.updatedAt),
+                    h('button',{onClick:()=>deleteDoneTodo(entry),disabled:busy,title:'删除这条待办','aria-label':'删除这条待办',
+                      style:{border:'none',background:'transparent',color:C.text3,cursor:busy?'default':'pointer',padding:2,lineHeight:0}},
+                      h(Icon,{name:'trash',size:15}))),
+                  meta:h('span',{title:sourceTitle,'aria-label':sourceTitle,style:{display:'inline-flex',alignItems:'center',color:C.text3}},
+                    h(Icon,{name:fromAssistant?'spark':'person',size:13}))});
+              }
               return h(Row,{key:entry.id,title,right:relativeTime(entry.updatedAt),
                 // 写清是谁处理掉的、处理成了什么样。「已处理」三个字既没说人也没说事，
                 // 用户看完不知道助手到底做了什么（实测被问过"助手怎么处理呢"）。
-                meta:entry.todo?'你自己记下的一件待办':((entry.actor==='you'?'你':'助手')+' · '+firstLine(entry.detail||'处理完了',60)),
-                // 状态用标签表达，不用删除线：横线是"取消"的语义，而这里只是"已完成"。
-                children:entry.todo?h('div',{style:{marginTop:8}},h('span',{style:pill(C.ok)},'已完成')):null});
+                meta:(entry.actor==='you'?'你':'助手')+' · '+firstLine(entry.detail||'处理完了',60)});
             })))));
   }
 

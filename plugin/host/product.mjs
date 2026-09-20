@@ -362,9 +362,11 @@ export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [
   }
   // 做完的待办也收在这里。identity 可能为空（自己手记的待办没挂联系人），所以渲染侧要
   // 允许只有标题；也就是说这条回执说的是"哪件事做完了"，不一定是"跟谁的事"。
+  // todoId 与 source 一起带上：前者是删除按钮要用的真 id，后者决定来源图标（星 = 助手记的）。
   for (const todo of doneTodos ?? []) {
     handled.push({
-      id: 'todo:' + todo.id, kind: 'handled', actor: 'you', todo: true,
+      id: 'todo:' + todo.id, kind: 'handled', actor: 'you', todo: true, todoId: todo.id,
+      source: todo.source === 'assistant' ? 'assistant' : 'manual',
       conversationKey: todo.conversationKey ?? null,
       identity: todo.identity ?? null,
       title: todo.title, detail: '已完成',
