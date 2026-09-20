@@ -377,8 +377,30 @@ export function apply(ctx) {
     }
     if (path === '/message-agent/api/models' && req.method === 'GET') {
       try {
-        const models = await ctx.llm.listModels('deepseek-official');
-        respond(res, 200, {models: models.map(model => ({id:model.id, name:model.name ?? model.id}))});
+        // 列出**所有**配好的提供方，不只是官方的。
+        //
+        // 本地模型在 harness 里是挂在自己命名空间下的独立 provider（settings.yaml 的
+        // `llm-pi-ai.providers.ollama-local` 这类），只查 deepseek-official 的话，设置里
+        // 就永远看不到「本地 Qwen」（用户实测报的就是这个）。目录直接问 harness 要，
+        // 不在这里维护一份清单 —— 用户加一个本地 provider，这里自动就能选。
+        const directory = (() => {
+          try { return ctx.llm.listConfigurableProviders(); }
+          catch { return []; }
+        })();
+        const routes = directory.map(entry => ({provider: entry.provider, name: entry.displayName || entry.provider}));
+        if (!routes.some(route => route.provider === 'deepseek-official')) {
+          routes.unshift({provider: 'deepseek-official', name: 'DeepSeek'});
+        }
+        const models = [];
+        for (const route of routes) {
+          const listed = await ctx.llm.listModels(route.provider).catch(() => []);
+          for (const model of listed ?? []) {
+            models.push({provider: route.provider, providerName: route.name,
+              id: model.id, name: model.name ?? model.id});
+          }
+        }
+        if (!models.length) throw new Error('没有可用的模型');
+        respond(res, 200, {models});
       } catch {
         respond(res, 503, {error:'暂时无法读取模型列表'});
       }
@@ -401,7 +423,16 @@ export function apply(ctx) {
         if (!rule || !job || !/^[a-zA-Z0-9-]{1,80}$/.test(job.id)) throw new Error('Invalid job');
         const autoModel = typeof payload.auto_model === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(payload.auto_model)
           ? payload.auto_model : config.model;
-        const autoSettings = {...config, model:autoModel};
+        // 提供方也是可选的一部分：本地模型挂在别的 provider 下（如 Ollama），只带 model
+        // 会让请求仍打到官方端点。白名单直接用 harness 的 provider 目录，不自己维护清单。
+        const knownProviders = (() => {
+          try { return ctx.llm.listConfigurableProviders().map(entry => entry.provider); }
+          catch { return []; }
+        })();
+        const autoProvider = typeof payload.auto_provider === 'string'
+          && (payload.auto_provider === 'deepseek-official' || knownProviders.includes(payload.auto_provider))
+          ? payload.auto_provider : 'deepseek-official';
+        const autoSettings = {...config, provider: autoProvider, model: autoModel};
         const key = conversationKey(rule, job);
         await conversations.run(key, async () => {
         if (job.expires_at && job.expires_at * 1000 <= Date.now()) throw new Error('Reply job expired');
@@ -423,7 +454,7 @@ export function apply(ctx) {
         const live = ctx.agents.get(sessionId);
         if (live && live.status !== 'idle') throw new Error('Conversation is busy in Harness');
         const composition = {
-          agentOptions:{provider:'deepseek-official',model:autoModel,maxTokens:config.max_tokens},
+          agentOptions:{provider:autoProvider,model:autoModel,maxTokens:config.max_tokens},
           setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx,preset.id); }
         };
         handle = live ? {agent:live} : persisted

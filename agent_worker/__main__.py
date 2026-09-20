@@ -64,6 +64,9 @@ def handler(worker, token):
         return {
             'auto_reply_paused': worker.auto_reply_paused(),
             'auto_model': worker.store.setting('auto_model', worker.config['model']),
+            # 模型和提供方是两件事：本地模型（Ollama 等）挂在别的 provider 下，只记 model
+            # 的话后台任务仍会拿官方 provider 去请求（实测就是"设置里选不到本地模型"）。
+            'auto_provider': worker.store.setting('auto_provider', 'deepseek-official'),
             'observe_enabled': worker.observe_enabled(),
             'dev_diagnostics': dev_diagnostics(),
         }
@@ -294,6 +297,12 @@ def handler(worker, token):
                         if not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}', model):
                             raise ValueError('Invalid auto_model')
                         worker.store.set_setting('auto_model', model)
+                        changed = True
+                    if 'auto_provider' in data:
+                        provider = data['auto_provider']
+                        if not isinstance(provider, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}', provider):
+                            raise ValueError('Invalid auto_provider')
+                        worker.store.set_setting('auto_provider', provider)
                         changed = True
                     if 'observe_enabled' in data:
                         if not isinstance(data['observe_enabled'], bool):

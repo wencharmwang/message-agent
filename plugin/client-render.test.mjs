@@ -111,6 +111,28 @@ test('图标按钮够大、位置固定，文案不啰嗦', () => {
   assert.doesNotMatch(page, /＋ 加一条待办/);
 });
 
+test('消息页打开就停在最新一条，往上翻看历史', () => {
+  const view = source.slice(source.indexOf('function ConversationView('), source.indexOf('function MessageBubble('));
+  // 首次拿到正文后把滚动条钉到底：和聊天软件一样，进来先看最新的。
+  assert.match(view, /node\.scrollTop=node\.scrollHeight/);
+  assert.match(view, /pinnedRef/);
+  assert.match(view, /ref:boxRef/);
+  // 一次读满一窗（服务端上限 300），窗口用满时在顶部说明一句。
+  assert.match(source, /const CHAT_LIMIT=300/);
+  assert.match(view, /'&limit='\+CHAT_LIMIT/);
+  assert.match(view, /只显示了最近 '\+CHAT_LIMIT\+' 条/);
+});
+
+test('自动回复模型能选本地模型（按提供方分组，两个字段一起提交）', () => {
+  const settings = source.slice(source.indexOf('function SettingsPage('), source.indexOf('function parseBlock('));
+  assert.match(settings, /auto_provider/);
+  assert.match(settings, /entry\.provider\+'::'\+entry\.id/);
+  assert.match(settings, /h\('optgroup',\{key:group\.provider,label:group\.name\}/);
+  assert.match(settings, /api\('settings',\{auto_provider:provider,auto_model:model\}\)/);
+  // 当前选中的组合不在目录里时也要显示，不然下拉会跳回第一项。
+  assert.match(settings, /（当前）/);
+});
+
 test('已完成里每一行都有删除入口，两类回执也不例外', () => {
   const page = source.slice(source.indexOf('function TodayPage('), source.indexOf('function CustomersPage('));
   // 待办那条（真删）与回执那条（从清单移除）都要挂在第二行右侧。

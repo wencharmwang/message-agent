@@ -1260,8 +1260,11 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       flexDirection:narrow?'column':'row',overflowY:narrow?'auto':'hidden'}},left,chat);
   }
 
+  /** 一个会话一次读多少条正文。见 ConversationView 里"为什么不分批"的说明。 */
+  const CHAT_LIMIT=300;
+
   /**
-   * 一个会话：明文副本里的正文 + 它身上的待办 / 跟进。
+   * 一个会话：明文副本里的正文 + 它身上的待办。
    *
    * 这里**没有**「读取这条会话」按钮：旧版那一步要打开微信聊天，会挤走用户正在看的那个
    * 会话、清掉未读红点，而读到的只有屏幕上的那几行。读取随取随用，所以直接给结果。
@@ -1271,9 +1274,21 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     // with `key={username}`. Without that key React reuses the instance when the user picks
     // another contact and the fetched rows, errors and scroll position follow them around.
     const detail=usePoller(true,()=>api('home/conversation?username='+encodeURIComponent(username)
-      +'&title='+encodeURIComponent(title||'')),10000);
+      +'&title='+encodeURIComponent(title||'')+'&limit='+CHAT_LIMIT),10000);
     const data=detail.data,messages=data?.messages||[];
     const back=()=>store.set({contactKey:null,contactTitle:null,contactKind:null});
+    // 和聊天软件一样：打开就停在最新一条，往上翻才看历史。
+    //
+    // 一次把整窗读完（CHAT_LIMIT 条）而不是分批加载：本地读库本来就便宜，而分批会把
+    // 滚动位置管理变成一堆状态机（拉取后要保持视野、判到底、防抖）。窗口用满时在顶部
+    // 说明一句，用户就知道上面不是"卡住了"。
+    const boxRef=useRef(null),pinnedRef=useRef(false);
+    useEffect(()=>{
+      const node=boxRef.current;
+      if(!node||pinnedRef.current||!messages.length)return;
+      node.scrollTop=node.scrollHeight;
+      pinnedRef.current=true;
+    },[messages.length]);
     // 拆成命名变量再拼：这一段原来是 8 层嵌套的 h() 调用，一个括号数错就会让滚动容器
     // 被塞进"不可收缩的页头"里 —— 页面看着在，滚不动（实测踩到过）。
     const header=h('div',{style:{flexShrink:0,padding:'14px clamp(16px,3vw,32px) 12px',borderBottom:'1px solid '+C.border,
@@ -1283,9 +1298,11 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         data?.identity?.title||title||username),
       h('span',{style:{...pill(kind==='group'?C.text3:C.brand),fontSize:12,flexShrink:0}},kind==='group'?'群聊':'单聊'),
       h('span',{style:{fontSize:12,color:C.text3}},messages.length?('最近 '+messages.length+' 条'):''));
-    const body=h('div',{style:{flex:1,minHeight:0,overflowY:'auto'}},
+    const body=h('div',{ref:boxRef,style:{flex:1,minHeight:0,overflowY:'auto'}},
       h('div',{style:{maxWidth:840,margin:'0 auto',padding:narrow?'14px 14px 40px':'22px 32px 48px',boxSizing:'border-box'}},
         h(Notice,{error:detail.error,dev:detail.errorDev,code:detail.errorCode}),
+        // 读满一窗时在顶部说明一句：让用户知道"上面没有了"，而不是以为界面卡住。
+        messages.length>=CHAT_LIMIT&&h('p',{style:{...hint,textAlign:'center',margin:'0 0 10px'}},'只显示了最近 '+CHAT_LIMIT+' 条'),
         h('section',{style:card},
           h('h2',{style:{...h2,marginBottom:12}},'聊天记录'),
           !messages.length&&h('p',{style:{...hint,margin:0}},
@@ -2159,13 +2176,26 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const [savingModel,setSavingModel]=useState(false),[modelError,setModelError]=useState('');
     const ok=data&&!data.error;
     const autoModel=settings.data?.settings?.auto_model||data?.model||'';
-    const listedModels=catalog.data?.models||[];
-    const models=autoModel&&!listedModels.some(model=>model.id===autoModel)?[{id:autoModel,name:autoModel},...listedModels]:listedModels;
+    const autoProvider=settings.data?.settings?.auto_provider||'deepseek-official';
+    const listed=catalog.data?.models||[];
+    // 选中项用「provider::model」编码：不同提供方可能有同名模型，只用 id 会选错端点。
+    const modelKey=entry=>entry.provider+'::'+entry.id;
+    const current=listed.some(entry=>entry.provider===autoProvider&&entry.id===autoModel)
+      ? autoProvider+'::'+autoModel : '';
+    // 按提供方分组：官方模型和本地模型在同一张下拉里，用 optgroup 分开。
+    const groups=[];
+    for(const entry of listed){
+      let group=groups.find(item=>item.provider===entry.provider);
+      if(!group){group={provider:entry.provider,name:entry.providerName||entry.provider,models:[]};groups.push(group);}
+      group.models.push(entry);
+    }
     async function changeAutoModel(event){
-      const model=event.target.value;
-      if(!model||model===autoModel)return;
+      const value=event.target.value,split=value.indexOf('::');
+      if(split<0)return;
+      const provider=value.slice(0,split),model=value.slice(split+2);
+      if(provider===autoProvider&&model===autoModel)return;
       setSavingModel(true);setModelError('');
-      try{await api('settings',{auto_model:model});settings.refresh();status.refresh();}
+      try{await api('settings',{auto_provider:provider,auto_model:model});settings.refresh();status.refresh();}
       catch(e){setModelError(e.message);}finally{setSavingModel(false);}
     }
     return h('div',{style:{width:'100%',overflowY:'auto'}},
@@ -2184,10 +2214,16 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
            h('p',{style:{marginTop:16,color:C.text2,fontSize:14,lineHeight:1.8}},'自动回复规则和发送记录保存在这台电脑上。使用云端模型时，为了生成回复，相关聊天内容会发送给模型服务。')),
         h('section',{style:{...card,marginTop:16}},
           h('h3',h3,'自动回复模型'),
-          h('p',{style:{...hint,margin:'0 0 12px'}},'只影响后台自动消息任务，不会改变你在聊天页手动选择的模型。修改后从下一条新消息开始生效。'),
-          h('select',{value:autoModel,onChange:changeAutoModel,disabled:savingModel||!settings.data||!models.length,'aria-label':'自动回复模型',style:selectField},
-            !models.length&&h('option',{value:''},catalog.loading?'正在读取模型…':'暂无可用模型'),
-            models.map(model=>h('option',{key:model.id,value:model.id},model.name===model.id?model.id:(model.name+' · '+model.id)))),
+          h('p',{style:{...hint,margin:'0 0 12px'}},'管的是后台自动回复由谁来写。选本地模型（如「本地 Qwen」）时，那一轮回复的内容不会离开这台电脑。修改后从下一条新消息开始生效。'),
+          h('p',{style:{...hint,margin:'0 0 12px'}},'「整理消息」「起草回复」和首页对话仍用云端模型 —— 它们要读懂整段上下文，本地小模型容易读偏。'),
+          h('select',{value:current,onChange:changeAutoModel,disabled:savingModel||!settings.data||!listed.length,'aria-label':'自动回复模型',style:selectField},
+            !listed.length&&h('option',{value:''},catalog.loading?'正在读取模型…':'暂无可用模型'),
+            // 当前选中的组合不在目录里时（比如那个本地模型被删了），也要列出来 ——
+            // 否则下拉会跳回第一项，用户以为自己的设置被改掉了。
+            !current&&autoModel&&h('option',{value:autoProvider+'::'+autoModel},autoProvider+' · '+autoModel+'（当前）'),
+            groups.map(group=>h('optgroup',{key:group.provider,label:group.name},
+              group.models.map(entry=>h('option',{key:modelKey(entry),value:modelKey(entry)},
+                entry.name===entry.id?entry.id:(entry.name+' · '+entry.id)))))),
           savingModel&&h('p',{style:{...hint,margin:'8px 0 0'}},'正在保存…')),
         h('section',{style:{...card,marginTop:16}},
           h('h3',h3,'开发者模式'),

@@ -3,7 +3,11 @@ import { dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 
 export function automaticRequestConfig(proposed, settings) {
-  return {...proposed,model:settings.model,maxTokens:settings.max_tokens,
+  return {...proposed,
+    // provider 只在明确给了才覆盖：本地模型（Ollama 等）挂在别的 provider 下，不带它的话
+    // 请求会打到官方端点。旧配置里没有这个字段，所以缺省时保持原样。
+    ...(settings.provider ? {provider:settings.provider} : {}),
+    model:settings.model,maxTokens:settings.max_tokens,
     reasoningEffort:settings.auto_reasoning_effort ?? 'low'};
 }
 
