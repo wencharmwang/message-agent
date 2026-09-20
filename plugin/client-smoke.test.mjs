@@ -221,3 +221,16 @@ test('已完成条目带长文案时，删除入口仍然渲染出来', {skip: a
     assert.ok(html.length > 40, `${name}：渲染结果是空的`);
   }
 });
+
+test('未完成的待办渲染出「修改」入口，做完的没有', {skip: available ? false : '找不到宿主的 react，跳过渲染体检'}, () => {
+  const {React, ReactDOMServer, C} = ctx;
+  const h = React.createElement;
+  const open = ReactDOMServer.renderToStaticMarkup(h(C.TodoRow,
+    {todo: {id: 'o', title: '还没做', state: 'open', source: 'manual'}, onAction() {}}));
+  assert.match(open, /修改/, '没做完的要有编辑入口');
+  assert.match(open, /双击修改/, '标题要有悬停提示');
+
+  const done = ReactDOMServer.renderToStaticMarkup(h(C.TodoRow,
+    {todo: {id: 'd', title: '做完了', state: 'done', source: 'manual'}, onAction() {}}));
+  assert.doesNotMatch(done, /双击修改/, '做完的不该能编辑');
+});

@@ -149,6 +149,42 @@ test('消息时间精确到分钟，跨天有日期分隔', () => {
   assert.match(source, /h\(MessageDay,\{message,previous:messages\[index-1\]\}\)/);
 });
 
+test('未完成的待办可以双击改文案、改到期时间', () => {
+  const row = source.slice(source.indexOf('function TodoRow('), source.indexOf('function TodayPage('));
+  // 双击标题进入编辑；做完的不开放（已经是记录，改它没意义）。
+  assert.match(row, /onDoubleClick:done\?undefined:startEdit/);
+  // 编辑态：文案 + 到期时间 + 回车保存 / Esc 取消。
+  assert.match(row, /type:'date'/);
+  assert.match(row, /'aria-label':'到期时间'/);
+  assert.match(row, /if\(event\.key==='Enter'\)save\(\)/);
+  assert.match(row, /if\(event\.key==='Escape'\)setEditing\(false\)/);
+  // 空标题不提交（服务端也会拒）。
+  assert.match(row, /if\(!title\|\|busy\)return;/);
+  // 还有一个不依赖双击的入口：鼠标党不一定想得到要双击。
+  assert.match(row, /h\('button',\{onClick:startEdit/);
+  // 落库走 POST /api/todos/<id>（服务端按字段合并，只传这两个字段）。
+  const page = source.slice(source.indexOf('function TodayPage('), source.indexOf('function CustomersPage('));
+  assert.match(page, /action==='edit'\)await api\('todos\/'\+id,\{title:patch\.title,dueAt:patch\.dueAt\}\)/);
+  const todos = source.slice(source.indexOf('function ConversationTodos('), source.indexOf('function CrmSections('));
+  assert.match(todos, /action==='edit'\)return run\(\(\)=>api\('todos\/'\+todo\.id,\{title:patch\.title,dueAt:patch\.dueAt\}\)\)/);
+});
+
+test('自动回复页可以拖动重排、也能一键置顶', () => {
+  const page = source.slice(source.indexOf('function AutomationPage('), source.indexOf('function ProfileForm('));
+  // 拖动中只记状态，松手才落库（列表每 5 秒轮询，中途落库会写成中间态）。
+  assert.match(page, /draggable:true/);
+  assert.match(page, /onDragStart:/);
+  assert.match(page, /onDrop:event=>\{event\.preventDefault\(\);/);
+  assert.match(page, /function dropOn\(index\)/);
+  assert.match(page, /api\('rules\/order',\{ids:list\.map\(rule=>rule\.id\)\}\)/);
+  // 置顶：监听一多，拖到第一位要精准，一键置顶只要一下。
+  assert.match(page, /function moveToTop\(id\)/);
+  assert.match(page, /onTop:\(\)=>moveToTop\(rule\.id\)/);
+  assert.match(source, /onTop&&h\('button',\{disabled:busy,onClick:onTop/);
+  // 卡片外那层 wrapper 要能被 grid 拉满，否则同排卡片高矮不齐。
+  assert.match(page, /alignItems:'stretch'/);
+});
+
 test('两个任务各配各的模型（自动回复 / 整理消息），都支持本地模型', () => {
   const picker = source.slice(source.indexOf('function TaskModelPicker('), source.indexOf('function SettingsPage('));
   const settings = source.slice(source.indexOf('function SettingsPage('), source.indexOf('function parseBlock('));

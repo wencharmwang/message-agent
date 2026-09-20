@@ -314,6 +314,18 @@ async function importKnowledge(context, workspaceId, payload = {}) {
  * 自动回复真正卡住、需要人处理的那种情况不属于"分类"，它仍然要能看见 —— 但不再占一块
  * 分类区，只由界面用一行指路（counts.automation）。
  */
+/**
+ * 按用户拖出来的顺序排规则。纯函数，方便单独测。
+ *
+ * 清单里没有的规则（新加的）排到**后面**，而不是被丢掉或跑到最前 —— 新加的监听默认是
+ * 暂停状态，不该抢走用户刻意排定的位置。
+ */
+export function orderRules(rules, order) {
+  if (!Array.isArray(order) || !order.length) return rules;
+  const rank = new Map(order.map((id, index) => [id, index]));
+  return [...rules].sort((a, b) => (rank.get(a.id) ?? order.length) - (rank.get(b.id) ?? order.length));
+}
+
 export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [], today: [], later: [], someday: []}, jobs = [], completed = [], doneTodos = [], dismissed = [], now = Date.now() / 1000} = {}) {
   const confirm = drafts.filter(d => d.state === 'awaiting_confirmation').map(d => ({
     id: 'draft:' + d.id, kind: 'draft', draftId: d.id, revision: d.revision,
@@ -458,6 +470,20 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
       .filter(job => job.rule_id === ruleId && (job.state === 'failed' || job.state === 'uncertain'))
       .map(job => job.id));
   }
+
+  /**
+   * 规则的展示顺序（用户拖出来的）。
+   *
+   * 放在 Host 侧一份纯 id 清单：Worker 的 rules 表不需要为"展示顺序"多一个字段，规则的
+   * 增删也不受影响（不在清单里的规则按原顺序排到后面）。没拖过就是空清单，顺序不变。
+   */
+  const ruleOrderPath = join(dirname(config.database), 'rule-order.json');
+  const readRuleOrder = () => {
+    try { const list = JSON.parse(readFileSync(ruleOrderPath, 'utf8')); return Array.isArray(list) ? list : []; }
+    catch { return []; }
+  };
+  const saveRuleOrder = ids => writeFileSync(ruleOrderPath, JSON.stringify(ids));
+  const orderedRules = rules => orderRules(rules, readRuleOrder());
 
   // ---- developer diagnostics -------------------------------------------------
   const devEnabled = devDiagnosticsEnabled(config);
@@ -1005,9 +1031,20 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
         const status = await runtime.status();
         respond(res, 200, {
           ...status,
-          rules: (status.rules ?? []).map(rule => ({...rule, detail: humanizeDetail(rule.detail)})),
+          // 规则的顺序由用户自己拖出来（监听一多，没法定出"最重要的"就没法用）。
+          // 排序在 Host 侧做：Worker 的 rules 表不需要为"展示顺序"多一个字段。
+          rules: orderedRules(status.rules ?? []).map(rule => ({...rule, detail: humanizeDetail(rule.detail)})),
           jobs: (status.jobs ?? []).map(job => ({...job, detail: humanizeDetail(job.detail)}))
         });
+        return true;
+      }
+      // 拖拽/置顶之后的顺序。只存 id 顺序，不碰规则本身。
+      if (path === '/message-agent/api/rules/order' && req.method === 'POST') {
+        const payload = await readBody(req);
+        const ids = Array.isArray(payload.ids) ? payload.ids.filter(id => typeof id === 'string' && id) : null;
+        if (!ids) throw Object.assign(new Error('缺少规则顺序'), {code: 'CONTEXT_INVALID'});
+        saveRuleOrder(ids.slice(0, 500));
+        respond(res, 200, {ok: true, order: ids.slice(0, 500)});
         return true;
       }
       if (path === '/message-agent/api/inbox' && req.method === 'GET') {

@@ -1406,8 +1406,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       setBusy(true);setError('');
       try{await fn();onChanged();}catch(e){setError(e.message);}finally{setBusy(false);}
     }
-    function todoAction(action,todo){
+    function todoAction(action,todo,patch){
       if(action==='delete')return run(()=>api('todos/'+todo.id+'/delete',{}));
+      // 改文案 / 改到期时间走同一条 PATCH 语义的路由（POST /api/todos/<id>）。
+      if(action==='edit')return run(()=>api('todos/'+todo.id,{title:patch.title,dueAt:patch.dueAt}));
       if(action==='tomorrow')return run(()=>api('todos/'+todo.id+'/reopen',
         {dueAt:fromDateInput(toDateInput(dayStart(1))).toISOString()}));
       if(action==='reopen')return run(()=>api('todos/'+todo.id+'/reopen',{}));
@@ -1505,7 +1507,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   }
 
 
-  function RuleCard({rule,onAction}){
+  function RuleCard({rule,onAction,onTop}){
     const [editing,setEditing]=useState(false),[prompt,setPrompt]=useState(rule.prompt),[busy,setBusy]=useState(false),[error,setError]=useState('');
     useEffect(()=>{if(!editing)setPrompt(rule.prompt);},[rule.prompt,editing]);
     async function run(path,data){setBusy(true);setError('');try{await onAction(path,data);if(path==='edit')setEditing(false);}catch(e){setError(e.message);}finally{setBusy(false);}}
@@ -1536,6 +1538,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           h('p',{title:rule.prompt,style:{margin:0,color:C.text2,fontSize:13,lineHeight:1.75,whiteSpace:'pre-wrap',display:'-webkit-box',WebkitBoxOrient:'vertical',WebkitLineClamp:5,overflow:'hidden'}},rule.prompt)),
         rule.detail&&h('p',{style:{margin:'0 20px 14px',padding:'9px 11px',borderRadius:'var(--lg-r-sm)',background:'var(--ma-warning-soft)',color:C.warn,fontSize:12,lineHeight:1.65}},rule.detail),
         h('div',{style:{display:'flex',gap:8,flexWrap:'wrap',padding:'12px 20px',borderTop:'1px solid var(--lg-card-line)',marginTop:'auto'}},
+          // 置顶：监听一多，把最重要的那条顶上去比拖拽准得多，也快得多。
+          onTop&&h('button',{disabled:busy,onClick:onTop,style:small(false),title:'放到最前面'},'置顶'),
           h('button',{disabled:busy,onClick:()=>setEditing(true),style:small(false)},'编辑规则'),
           h('button',{disabled:busy,onClick:remove,style:{...small(false,true),marginLeft:'auto'}},'删除'))));
   }
@@ -1615,11 +1619,42 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const due=dueInfo(todo.dueAt),done=todo.state==='done',doing=todo.state==='doing';
     const fromAssistant=todo.source==='assistant';
     const sourceTitle=fromAssistant?'助手记的':'自己记的';
+    // 双击改文案与到期时间。只对**没做完**的开放 —— 做完的已经是记录，改它没有意义。
+    const [editing,setEditing]=useState(false),[draft,setDraft]=useState(''),[dueDraft,setDueDraft]=useState('');
+    function startEdit(){
+      setDraft(todo.title);setDueDraft(todo.dueAt?toDateInput(new Date(todo.dueAt*1000)):'');
+      setEditing(true);
+    }
+    function save(){
+      const title=draft.trim();
+      if(!title||busy)return;   // 空标题不提交（服务端也会拒），免得存出一条没名字的事
+      // 空的日期 = 清掉到期时间（服务端把 '' 归一成 null）。
+      onAction('edit',todo,{title,dueAt:dueDraft?fromDateInput(dueDraft).toISOString():''});
+      setEditing(false);
+    }
+    if(editing){
+      return h('div',{style:{padding:'13px 15px',borderBottom:'1px solid '+C.border}},
+        h('div',{style:{display:'flex',gap:8,alignItems:'center'}},
+          h('input',{value:draft,autoFocus:true,onChange:event=>setDraft(event.target.value),
+            onKeyDown:event=>{if(event.key==='Enter')save();if(event.key==='Escape')setEditing(false);},
+            'aria-label':'待办文案',style:{...field,flex:1,minWidth:0}}),
+          h('button',{onClick:save,disabled:busy||!draft.trim(),style:small(true)},'保存'),
+          h('button',{onClick:()=>setEditing(false),disabled:busy,style:small(false)},'取消')),
+        h('div',{style:{display:'flex',gap:8,alignItems:'center',marginTop:9,flexWrap:'wrap'}},
+          h('span',{style:{fontSize:13,color:C.text2}},'到期时间'),
+          h('input',{type:'date',value:dueDraft,onChange:event=>setDueDraft(event.target.value),
+            'aria-label':'到期时间',style:{...field,width:'auto'}}),
+          dueDraft&&h('button',{onClick:()=>setDueDraft(''),disabled:busy,style:small(false)},'清除'),
+          h('span',{style:{fontSize:12,color:C.text3}},'回车保存，Esc 取消')));
+    }
     return h('div',{style:{display:'flex',gap:12,alignItems:'flex-start',padding:'13px 15px',borderBottom:'1px solid '+C.border}},
       h(Checkbox,{checked:done,disabled:busy,label:done?'重新打开：「'+firstLine(todo.title,20)+'」':'标记完成：「'+firstLine(todo.title,20)+'」',
         onChange:()=>onAction(done?'reopen':'done',todo),style:{marginTop:3}}),
       h('div',{style:{flex:1,minWidth:0}},
-        h('div',{style:{fontSize:15,color:done?C.text2:C.text,lineHeight:1.6,wordBreak:'break-word'}},todo.title),
+        // 双击改文案：这是待办页最常做的一件事（助手记的那条总要自己顺一遍语句），
+        // 不该为此打开一个弹窗。做完的不可双击。
+        h('div',{onDoubleClick:done?undefined:startEdit,title:done?undefined:'双击修改',
+          style:{fontSize:15,color:done?C.text2:C.text,lineHeight:1.6,wordBreak:'break-word',cursor:done?'default':'text'}},todo.title),
         todo.detail&&todo.detail!==todo.title&&h('p',{style:{margin:'5px 0 0',fontSize:13,color:C.text2,lineHeight:1.7,whiteSpace:'pre-wrap',maxHeight:60,overflow:'hidden'}},todo.detail),
         // 第二行拆成两栏：左边是标签与来源，**右边固定放删除**。
         // 这样无论标题多长、detail 有几行、标签有多少个，删除入口都在同一位置、不会被挤掉
@@ -1636,6 +1671,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           done&&h('button',{onClick:()=>onAction('delete',todo),disabled:busy,className:'ma-iconbtn',
             title:'删除这条待办','aria-label':'删除这条待办',style:iconButton},h(Icon,{name:'trash',size:16})))),
       !done&&h('div',{style:{display:'flex',gap:6,flexShrink:0}},
+        h('button',{onClick:startEdit,disabled:busy,style:small(false),title:'修改文案和到期时间'},'修改'),
         h('button',{onClick:()=>onAction(doing?'reopen':'doing',todo),disabled:busy,style:small(false)},doing?'放回待办':'在做'),
         h('button',{onClick:()=>onAction('tomorrow',todo),disabled:busy,style:small(false)},'明天'),
         h('button',{onClick:()=>onAction('delete',todo),disabled:busy,style:small(false,true)},'删除')));
@@ -1648,7 +1684,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     // 这一份本地遮盖在 refresh() 真正回来之后清掉，服务端永远是最终依据。
     const [gone,setGone]=useState({});
     const data=today.data,counts=data?.counts||{todos:0,confirm:0,overdue:0,attention:0,automation:0};
-    async function act(action,entry){
+    async function act(action,entry,patch){
       setBusy(true);setError('');
       const id=entry.todoId;
       if(action==='done'||action==='delete')setGone(old=>({...old,[id]:true}));
@@ -1658,6 +1694,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         else if(action==='reopen')await api('todos/'+id+'/reopen',{});
         else if(action==='tomorrow')await api('todos/'+id+'/reopen',{dueAt:fromDateInput(toDateInput(dayStart(1))).toISOString()});
         else if(action==='delete')await api('todos/'+id+'/delete',{});
+        // 改文案 / 改到期时间：POST /api/todos/<id>（同一条路由，服务端按字段合并）。
+        else if(action==='edit')await api('todos/'+id,{title:patch.title,dueAt:patch.dueAt});
         // 侧边栏那个红点也要当场少一个，否则"处理完了"之后它还挂着。
         if(action==='done'||action==='delete')store.set({pending:Math.max(0,(store.get().pending||0)-1)});
         await today.refresh();
@@ -1832,6 +1870,32 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const rules=status.data?.rules||[];
     const activeRules=rules.filter(rule=>rule.enabled).length;
     const attentionJobs=rules.filter(rule=>rule.enabled&&['blocked','needs_user','waiting_connection'].includes(rule.status)).length;
+    /**
+     * 拖拽排序。
+     *
+     * 拖动过程中只记"谁在拖、拖到谁身上"，**松手才落库** —— 每经过一格都发一次请求会把
+     * 顺序写成一堆中间态，而列表每 5 秒轮询一次，中途刷新就白拖了。
+     * 「置顶」是给"监听很多"时的另一条路：拖到第一位要精准，置顶只需要一次点击。
+     */
+    const [dragIndex,setDragIndex]=useState(null),[dropIndex,setDropIndex]=useState(null);
+    async function saveOrder(list){
+      try{await api('rules/order',{ids:list.map(rule=>rule.id)});await status.refresh();}
+      catch(e){setSettingError(e.message);}
+    }
+    function dropOn(index){
+      const dragged=rules[dragIndex];
+      if(!dragged||index===dragIndex){setDragIndex(null);setDropIndex(null);return;}
+      const next=[...rules];
+      next.splice(dragIndex,1);
+      next.splice(index,0,dragged);
+      setDragIndex(null);setDropIndex(null);
+      saveOrder(next);
+    }
+    function moveToTop(id){
+      const first=rules.find(rule=>rule.id===id);
+      if(!first||rules[0]?.id===id)return;
+      saveOrder([first,...rules.filter(rule=>rule.id!==id)]);
+    }
     // 「我知道了」：把这条规则上没确认的记录标成已看过，提醒就不再出现。
     // 首页那张「自动回复需要你看一眼」的卡片点进来之后，这里也得能处理 —— 否则跳过来
     // 什么都点不了，等于把提醒永久挂着（用户实测报的就是这个）。
@@ -1885,7 +1949,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         // 折射是享受不是信息，代价这么大就不值得 —— 它只留给静止不动的导航轨。
         h('div',{className:'lg-glass ma-pagebar'},
           h('div',null,h('h2',{style:{...h2,fontSize:18,marginBottom:3}},'回复对象'),
-            h('p',{style:{...hint,margin:0}},'添加后默认暂停，确认规则再开启。')),
+            h('p',{style:{...hint,margin:0}},'添加后默认暂停，确认规则再开启。拖动卡片可以调整顺序，最重要的放最上面。')),
           h(AddContactTrigger,{onOpen:()=>setAdding(true)})),
         // 表单渲染在内容流里：标题在上、字段在下。它不再长在操作条内部（那样会挤出一片空白）。
         // 只在展开时渲染 —— 关闭态下 AddContact 会返回触发按钮，留着就会和操作条里那个重复。
@@ -1896,7 +1960,17 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           h('strong',{style:{display:'block',fontSize:16,color:C.text,marginBottom:6}},'还没有自动回复规则'),
           h('span',{style:{fontSize:13,color:C.text3}},'从一个重复咨询最多的联系人或群聊开始。')),
         !!rules.length&&h('div',{className:'ma-rule-grid',style:{display:'grid',gridTemplateColumns:'repeat(2,minmax(0,1fr))',gap:16,alignItems:'stretch'}},
-          rules.map(rule=>h(RuleCard,{key:rule.id,rule,onAction:action}))),
+          rules.map((rule,index)=>h('div',{
+            key:rule.id,draggable:true,
+            onDragStart:event=>{setDragIndex(index);event.dataTransfer.effectAllowed='move';
+              try{event.dataTransfer.setData('text/plain',rule.id);}catch{/* 老浏览器不支持就算了 */}},
+            onDragOver:event=>{if(dragIndex===null)return;event.preventDefault();if(dropIndex!==index)setDropIndex(index);},
+            onDragLeave:()=>{if(dropIndex===index)setDropIndex(null);},
+            onDrop:event=>{event.preventDefault();dropOn(index);},
+            onDragEnd:()=>{setDragIndex(null);setDropIndex(null);},
+            style:{...(dragIndex===index?{opacity:.4}:null),
+              ...(dropIndex===index&&dragIndex!==null?{outline:'2px dashed '+C.brand,outlineOffset:3,borderRadius:'var(--lg-r-lg)'}:null)}},
+            h(RuleCard,{rule,onAction:action,onTop:()=>moveToTop(rule.id)})))),
         h('section',{style:{...card,display:'flex',justifyContent:'space-between',alignItems:'center',gap:16,flexWrap:'wrap',marginTop:22,boxShadow:'none'}},
           h('div',{style:{display:'flex',gap:12,alignItems:'center',minWidth:240,flex:1}},
             h('span',{style:{width:38,height:38,borderRadius:12,display:'flex',alignItems:'center',justifyContent:'center',background:'var(--ma-warning-soft)',color:C.warn}},h(Icon,{name:'settings',size:18})),

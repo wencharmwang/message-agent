@@ -4,7 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Drafts, DRAFT_TTL_SECONDS, validateDraftText } from './storage.mjs';
-import { identityKey, projectInbox, pageInbox, projectToday, RUNTIME_MESSAGES, devDiagnosticsEnabled, DEV_LOG_FILE } from './product.mjs';
+import { identityKey, projectInbox, pageInbox, projectToday, orderRules, RUNTIME_MESSAGES, devDiagnosticsEnabled, DEV_LOG_FILE } from './product.mjs';
 
 // Development fixtures only: no real WeChat data, no real contact names.
 
@@ -210,6 +210,21 @@ test('「今天要做的」只有待办、等你确认的发送和已完成', ()
   // 草稿这一行的标题仍要带联系人名字：按钮那一行已经不渲染它了。
   const draftRow = page.groups.find(group => group.key === 'confirm').items[0];
   assert.match(draftRow.title, /长江证券孙盛/);
+});
+
+test('规则按用户拖出来的顺序排；新加的排到最后', () => {
+  const rules = [{id: 'a'}, {id: 'b'}, {id: 'c'}];
+  // 没拖过：原样返回（Worker 那边的顺序不动）。
+  assert.deepEqual(orderRules(rules, []).map(r => r.id), ['a', 'b', 'c']);
+  assert.deepEqual(orderRules(rules, null).map(r => r.id), ['a', 'b', 'c']);
+  // 拖过：按清单排。
+  assert.deepEqual(orderRules(rules, ['c', 'a', 'b']).map(r => r.id), ['c', 'a', 'b']);
+  // 清单里没有的（新加的规则）排到后面，不抢用户刻意排定的位置，也不能被丢掉。
+  assert.deepEqual(orderRules(rules, ['c', 'a']).map(r => r.id), ['c', 'a', 'b']);
+  // 清单里的 id 已经不存在了（规则被删）也不能影响其它规则的相对顺序。
+  assert.deepEqual(orderRules(rules, ['gone', 'b', 'a', 'c']).map(r => r.id), ['b', 'a', 'c']);
+  // 不能改到原数组。
+  assert.deepEqual(rules.map(r => r.id), ['a', 'b', 'c']);
 });
 
 test('已完成里被移除的回执不再出现，但事实数据不动', () => {
