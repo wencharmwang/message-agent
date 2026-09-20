@@ -153,9 +153,11 @@ test('未完成的待办可以双击改文案、改到期时间', () => {
   const row = source.slice(source.indexOf('function TodoRow('), source.indexOf('function TodayPage('));
   // 双击标题进入编辑；做完的不开放（已经是记录，改它没意义）。
   assert.match(row, /onDoubleClick:done\?undefined:startEdit/);
-  // 编辑态：文案 + 到期时间 + 回车保存 / Esc 取消。
-  assert.match(row, /type:'date'/);
+  // 编辑态：文案 + 到期时间（**要能定到几点**）+ 回车保存 / Esc 取消。
+  assert.match(row, /type:'datetime-local'/);
   assert.match(row, /'aria-label':'到期时间'/);
+  assert.match(row, /toDateTimeInput\(new Date\(todo\.dueAt\*1000\)\)/);
+  assert.match(row, /fromDateTimeInput\(dueDraft\)\.toISOString\(\)/);
   // Esc / 回车都要**拦住冒泡**：全局那个 Esc 监听会顺手收起整个面板
   // （实测："修改时按 Esc 直接退出了消息助手"）。
   assert.match(row, /if\(event\.key==='Escape'\)\{event\.stopPropagation\(\);setEditing\(false\);\}/);
@@ -169,6 +171,26 @@ test('未完成的待办可以双击改文案、改到期时间', () => {
   assert.match(page, /action==='edit'\)await api\('todos\/'\+id,\{title:patch\.title,dueAt:patch\.dueAt\}\)/);
   const todos = source.slice(source.indexOf('function ConversationTodos('), source.indexOf('function CrmSections('));
   assert.match(todos, /action==='edit'\)return run\(\(\)=>api\('todos\/'\+todo\.id,\{title:patch\.title,dueAt:patch\.dueAt\}\)\)/);
+});
+
+test('到期时间能定到几点', () => {
+  // 只有日期的话服务端只能按"当天 9 点"兜底，而"几点做/几点提醒"正是这类任务的关键信息。
+  assert.match(source, /function toDateTimeInput\(date\)\{return toDateInput\(date\)\+'T'\+pad2\(date\.getHours\(\)\)\+':'\+pad2\(date\.getMinutes\(\)\);\}/);
+  // 解析不能自己拼 Z：不带时区的"日期+时间"串，规范规定按本地时间解释（纯日期串才是 UTC）。
+  assert.match(source, /function fromDateTimeInput\(value\)\{return value\?new Date\(value\):null;\}/);
+  // 两处到期控件都换成能选小时的（新建表单与待办编辑）。
+  const composer = source.slice(source.indexOf('function Composer('), source.indexOf('function ContextRow('));
+  assert.match(composer, /type:'datetime-local'/);
+  assert.match(composer, /toDateTimeInput\(dayStart\(0\)\)/, '「今天」要连带时间一起填');
+  assert.match(composer, /fromDateTimeInput\(due\)\.toISOString\(\)/);
+  const row = source.slice(source.indexOf('function TodoRow('), source.indexOf('function TodayPage('));
+  assert.match(row, /type:'datetime-local'/);
+  // 列表上的到期提示也要带几点，否则刚填的小时等于白填。
+  const due = source.slice(source.indexOf('function dueInfo('), source.indexOf('function firstLine('));
+  assert.match(due, /pad2\(due\.getHours\(\)\)\+':'\+pad2\(due\.getMinutes\(\)\)/);
+  assert.match(due, /'今天 '\+clock/);
+  // 原生控件要留够宽度，不然时间部分被压成省略号。
+  assert.match(source, /const dateField=\{\.\.\.field,minHeight:44,minWidth:18\d/);
 });
 
 test('自动回复页可以拖动重排、也能一键置顶', () => {

@@ -634,7 +634,9 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   // 输入框 / 文本域。用 backgroundColor 而不是 background —— 下拉要在外面叠背景图（自绘箭头），
   // 而 background 简写会把背景图一起清掉。
   const field={width:'100%',boxSizing:'border-box',minHeight:42,padding:'9px 13px',border:'1px solid '+FIELD_BORDER,borderRadius:'var(--lg-r-sm)',backgroundColor:FIELD_BG,color:C.text,fontSize:14,outline:'none'};
-  const dateField={...field,minHeight:44,minWidth:150,fontSize:14};
+  // 到期控件用 datetime-local：日期+几点。min-width 要留够，否则原生控件里的时间部分
+  // 会被压成省略号（用户填的小时就看不见了）。
+  const dateField={...field,minHeight:44,minWidth:186,fontSize:14};
   // 下拉：原生箭头每个平台长得都不一样，是这套界面里最显眼的「没设计」信号。
   // 关掉原生外观，自己画一个和图标同粗细的箭头。灰色取两档主题都成立的中性值。
   const selectField={...field,cursor:'pointer',paddingRight:36,appearance:'none',WebkitAppearance:'none',
@@ -767,16 +769,35 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   }
   function pad2(value){return String(value).padStart(2,'0');}
   function toDateInput(date){return date.getFullYear()+'-'+pad2(date.getMonth()+1)+'-'+pad2(date.getDate());}
+  /**
+   * `datetime-local` 控件的取值格式：`YYYY-MM-DDTHH:mm`（**本地时区**，不带 Z）。
+   *
+   * 到期时间必须能定到几点：只给日期的话，服务端只能按"当天 9 点"兜底，而"几点提醒/几点做"
+   * 正是这类任务的关键信息（用户提的）。
+   */
+  function toDateTimeInput(date){return toDateInput(date)+'T'+pad2(date.getHours())+':'+pad2(date.getMinutes());}
   function dayStart(offset){const date=new Date();date.setHours(9,0,0,0);date.setDate(date.getDate()+offset);return date;}
   function fromDateInput(value){return value?new Date(value+'T09:00:00'):null;}
+  /**
+   * 解析 `datetime-local` 的值。
+   *
+   * `new Date('2026-09-25T14:30')` 这种"日期+时间但无时区"的串，规范规定按**本地时间**解释
+   * （只有纯日期串 `2026-09-25` 才被当成 UTC）—— 正是我们要的。所以不能自己拼 `Z`。
+   */
+  function fromDateTimeInput(value){return value?new Date(value):null;}
   function sameDay(a,b){return a.getFullYear()===b.getFullYear()&&a.getMonth()===b.getMonth()&&a.getDate()===b.getDate();}
+  /**
+   * 到期提示。**要带上几点** —— 既然到期时间能定到分钟，只显示"今天到期"等于把刚填的
+   * 小时藏起来（用户提的"任务需要精确到几点"）。
+   */
   function dueInfo(dueAt){
     if(!dueAt)return null;
     const due=new Date(dueAt*1000),now=Date.now()/1000,today=new Date(),tomorrow=dayStart(1);
-    if(dueAt<now&&!sameDay(due,today))return{text:'已逾期 '+(due.getMonth()+1)+'月'+due.getDate()+'日',color:C.error};
-    if(sameDay(due,today))return{text:'今天到期',color:C.warn};
-    if(sameDay(due,tomorrow))return{text:'明天到期',color:C.text2};
-    return{text:(due.getMonth()+1)+'月'+due.getDate()+'日',color:C.text3};
+    const clock=pad2(due.getHours())+':'+pad2(due.getMinutes());
+    if(dueAt<now&&!sameDay(due,today))return{text:'已逾期 '+(due.getMonth()+1)+'月'+due.getDate()+'日 '+clock,color:C.error};
+    if(sameDay(due,today))return{text:'今天 '+clock,color:C.warn};
+    if(sameDay(due,tomorrow))return{text:'明天 '+clock,color:C.text2};
+    return{text:(due.getMonth()+1)+'月'+due.getDate()+'日 '+clock,color:C.text3};
   }
   function firstLine(text,limit){const line=String(text||'').split('\n').map(part=>part.trim()).filter(Boolean)[0]||'';return line.length>limit?line.slice(0,limit)+'…':line;}
 
@@ -885,7 +906,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     async function submit(){
       if(!text.trim()){setError('先写点内容再保存');return;}
       setError('');
-      try{await onSubmit(mode,text.trim(),due?fromDateInput(due).toISOString():null);setText('');setDue('');}catch(e){setError(e.message);}
+      try{await onSubmit(mode,text.trim(),due?fromDateTimeInput(due).toISOString():null);setText('');setDue('');}catch(e){setError(e.message);}
     }
     const isTodo=mode==='todo';
     return h('div',{style:{border:'1px solid '+C.border,borderRadius:12,padding:14,background:C.panel}},
@@ -895,10 +916,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       h('textarea',{value:text,onChange:event=>setText(event.target.value),rows:isTodo?2:3,placeholder:isTodo?'要做什么？例如：周五前回张伟的报价':'这次沟通说了什么？例如：电话确认了报价，等他周五回复','aria-label':isTodo?'待办内容':'跟进内容',style:{...field,resize:'vertical',lineHeight:1.7}}),
       isTodo&&h('div',{style:{display:'flex',gap:8,alignItems:'center',marginTop:10,flexWrap:'wrap'}},
         h('span',{style:{fontSize:13,color:C.text2}},'什么时候做'),
-        h('button',{onClick:()=>setDue(toDateInput(dayStart(0))),style:{...small(false),borderRadius:99}},'今天'),
-        h('button',{onClick:()=>setDue(toDateInput(dayStart(1))),style:{...small(false),borderRadius:99}},'明天'),
-        h('input',{type:'date',value:due,onChange:event=>setDue(event.target.value),'aria-label':'到期日',style:dateField}),
-        due&&h('button',{onClick:()=>setDue(''),style:{...small(false,false,true),borderRadius:99}},'清除日期')),
+        h('button',{onClick:()=>setDue(toDateTimeInput(dayStart(0))),style:{...small(false),borderRadius:99}},'今天'),
+        h('button',{onClick:()=>setDue(toDateTimeInput(dayStart(1))),style:{...small(false),borderRadius:99}},'明天'),
+        h('input',{type:'datetime-local',value:due,onChange:event=>setDue(event.target.value),'aria-label':'到期时间',style:dateField}),
+        due&&h('button',{onClick:()=>setDue(''),style:{...small(false,false,true),borderRadius:99}},'清除时间')),
       h(Notice,{error}),
       h('div',{style:{display:'flex',gap:10,alignItems:'center',marginTop:12,flexWrap:'wrap'}},
         h('button',{onClick:submit,disabled:busy,style:button(true)},busy?'正在保存…':(isTodo?'添加待办':'保存这条跟进')),
@@ -1622,14 +1643,14 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     // 双击改文案与到期时间。只对**没做完**的开放 —— 做完的已经是记录，改它没有意义。
     const [editing,setEditing]=useState(false),[draft,setDraft]=useState(''),[dueDraft,setDueDraft]=useState('');
     function startEdit(){
-      setDraft(todo.title);setDueDraft(todo.dueAt?toDateInput(new Date(todo.dueAt*1000)):'');
+      setDraft(todo.title);setDueDraft(todo.dueAt?toDateTimeInput(new Date(todo.dueAt*1000)):'');
       setEditing(true);
     }
     function save(){
       const title=draft.trim();
       if(!title||busy)return;   // 空标题不提交（服务端也会拒），免得存出一条没名字的事
       // 空的日期 = 清掉到期时间（服务端把 '' 归一成 null）。
-      onAction('edit',todo,{title,dueAt:dueDraft?fromDateInput(dueDraft).toISOString():''});
+      onAction('edit',todo,{title,dueAt:dueDraft?fromDateTimeInput(dueDraft).toISOString():''});
       setEditing(false);
     }
     if(editing){
@@ -1647,7 +1668,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           h('button',{onClick:()=>setEditing(false),disabled:busy,style:small(false)},'取消')),
         h('div',{style:{display:'flex',gap:8,alignItems:'center',marginTop:9,flexWrap:'wrap'}},
           h('span',{style:{fontSize:13,color:C.text2}},'到期时间'),
-          h('input',{type:'date',value:dueDraft,onChange:event=>setDueDraft(event.target.value),
+          h('input',{type:'datetime-local',value:dueDraft,onChange:event=>setDueDraft(event.target.value),
             'aria-label':'到期时间',style:{...field,width:'auto'}}),
           dueDraft&&h('button',{onClick:()=>setDueDraft(''),disabled:busy,style:small(false)},'清除'),
           h('span',{style:{fontSize:12,color:C.text3}},'回车保存，Esc 取消')));
