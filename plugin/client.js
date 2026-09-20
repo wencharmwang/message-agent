@@ -659,8 +659,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
    *
    * 图标和文字按钮不同，它没有可点的面积感，所以外面必须留一圈留白 —— 用户实测
    * 「太小了，看不清，操作不方便」。6px 内边距 + 16px 图标 ≈ 28px 的点击区域。
+   *
+   * 颜色不写在这里，交给 `.ma-iconbtn`：悬停时变色才需要 CSS（行内样式会把它盖掉）。
    */
-  const iconButton={border:'none',background:'transparent',color:C.text3,cursor:'pointer',
+  const iconButton={border:'none',background:'transparent',
     padding:6,lineHeight:0,display:'inline-flex',alignItems:'center',justifyContent:'center',flexShrink:0};
 
   // Every label answers "what does this mean for me", never which subsystem produced it.
@@ -767,9 +769,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   const ICONS={
     // 导航图标。四条要求都来自用户逐条指认：消息要"一个消息样子"、待办要一个勾、
     // 回复配置沿用原来设置那颗（圆盘 + 辐条）、设置换成通用齿轮。
-    // 消息沿用原来「待办」那个圆角方框的外形（用户要的就是这个形状），里面换成两行消息线 ——
-    // 原样搬过来框里是个勾，会和待办撞脸。
-    home:'M4.2 4.5h11.6a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4.2a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1ZM6.7 8.6h6.6M6.7 11.5h4.3',
+    // 消息 = 原来「待办」用的那个图标，原样搬过来（用户要的就是它）。
+    home:'M4.2 4.5h11.6a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4.2a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Zm2.5 5.7 1.5 1.5 2.9-2.9',
     // 待办：一个勾，不带框。
     check:'M4.8 10.7 8.4 14.3 15.4 7.1',
     // 设置：通用齿轮（外齿 + 内圆）。
@@ -858,7 +859,9 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       'data-inbox-item':inboxItem?'true':undefined,
       onKeyDown:onClick?event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();onClick();}}:undefined,
       style:{padding:'13px 15px',borderBottom:'1px solid '+C.border,borderLeft:active?'4px solid '+C.brand:'4px solid transparent',background:active?C.hover:'transparent',cursor:onClick?'pointer':'default',color:C.text}},
-      h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline'}},h('strong',{style:{fontSize:15,fontWeight:600}},title),right&&h('span',{style:{fontSize:13,color:C.text3,flexShrink:0}},right)),
+      // 标题加 minWidth:0 + break-word：没有它，一个超长的连续串（长英文、长链接）会把
+      // 右边的文字挤出这一行。中文会自己换行，所以平时看不出来。
+      h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline'}},h('strong',{style:{fontSize:15,fontWeight:600,minWidth:0,wordBreak:'break-word'}},title),right&&h('span',{style:{fontSize:13,color:C.text3,flexShrink:0}},right)),
       meta&&h('div',{style:{margin:'5px 0 0',fontSize:13,color:C.text3,lineHeight:1.6}},meta),
       children);
   }
@@ -1542,18 +1545,20 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       h('div',{style:{flex:1,minWidth:0}},
         h('div',{style:{fontSize:15,color:done?C.text2:C.text,lineHeight:1.6,wordBreak:'break-word'}},todo.title),
         todo.detail&&todo.detail!==todo.title&&h('p',{style:{margin:'5px 0 0',fontSize:13,color:C.text2,lineHeight:1.7,whiteSpace:'pre-wrap',maxHeight:60,overflow:'hidden'}},todo.detail),
-        h('div',{style:{display:'flex',gap:8,alignItems:'center',marginTop:6,flexWrap:'wrap'}},
-          showState&&done&&h('span',{style:pill(C.ok)},'已完成'),
-          doing&&h('span',{style:pill(C.brand)},'在做'),
-          !done&&due&&h('span',{style:pill(due.color)},due.text),
-          todo.identity&&h('span',{style:{fontSize:13,color:C.text3}},'来自 '+todo.identity.title),
-          // 来源与删除都放在这一行、同一个尺寸。13px 的时候用户看不清也点不准
-          // （原话「太小了，看不清，操作不方便」），所以图标本身放大，外面再给一圈点击留白。
-          h('span',{style:{display:'inline-flex',alignItems:'center',gap:14,marginLeft:2}},
+        // 第二行拆成两栏：左边是标签与来源，**右边固定放删除**。
+        // 这样无论标题多长、detail 有几行、标签有多少个，删除入口都在同一位置、不会被挤掉
+        // （用户实测：有第二行文案时，来源图标和删除都看不见了）。
+        h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,marginTop:6}},
+          h('div',{style:{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',minWidth:0}},
+            showState&&done&&h('span',{style:pill(C.ok)},'已完成'),
+            doing&&h('span',{style:pill(C.brand)},'在做'),
+            !done&&due&&h('span',{style:pill(due.color)},due.text),
+            todo.identity&&h('span',{style:{fontSize:13,color:C.text3}},'来自 '+todo.identity.title),
+            // 来源只给图标：13px 时用户看不清，现在 16px。
             h('span',{title:sourceTitle,'aria-label':sourceTitle,style:{display:'inline-flex',alignItems:'center',color:C.text3}},
-              h(Icon,{name:fromAssistant?'spark':'person',size:16})),
-            done&&h('button',{onClick:()=>onAction('delete',todo),disabled:busy,title:'删除这条待办','aria-label':'删除这条待办',
-              style:iconButton},h(Icon,{name:'trash',size:16}))))),
+              h(Icon,{name:fromAssistant?'spark':'person',size:16}))),
+          done&&h('button',{onClick:()=>onAction('delete',todo),disabled:busy,className:'ma-iconbtn',
+            title:'删除这条待办','aria-label':'删除这条待办',style:iconButton},h(Icon,{name:'trash',size:16})))),
       !done&&h('div',{style:{display:'flex',gap:6,flexShrink:0}},
         h('button',{onClick:()=>onAction(doing?'reopen':'doing',todo),disabled:busy,style:small(false)},doing?'放回待办':'在做'),
         h('button',{onClick:()=>onAction('tomorrow',todo),disabled:busy,style:small(false)},'明天'),
@@ -1660,15 +1665,15 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
               const title=(entry.identity&&entry.identity.title)||entry.title||'（未命名）';
               if(entry.todo){
                 // 做完了的待办：**不再标一次「已完成」**（它就列在这一组里，状态本来就清楚），
-                // 也不再写"你自己记下的一件待办"（啰嗦）。来源和删除都放在第二行、同一个尺寸 ——
-                // 用户实测：13px 的图标看不清也点不准。
+                // 也不再写"你自己记下的一件待办"（啰嗦）。第二行两栏：左来源、右删除。
+                // 删除固定在右侧，标题再长也不会把它挤没。
                 const fromAssistant=entry.source==='assistant',sourceTitle=fromAssistant?'助手记的':'自己记的';
                 return h(Row,{key:entry.id,title,right:relativeTime(entry.updatedAt),
-                  meta:h('span',{style:{display:'inline-flex',alignItems:'center',gap:14}},
+                  meta:h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}},
                     h('span',{title:sourceTitle,'aria-label':sourceTitle,style:{display:'inline-flex',alignItems:'center',color:C.text3}},
                       h(Icon,{name:fromAssistant?'spark':'person',size:16})),
-                    h('button',{onClick:()=>deleteDoneTodo(entry),disabled:busy,title:'删除这条待办','aria-label':'删除这条待办',
-                      style:iconButton},h(Icon,{name:'trash',size:16})))});
+                    h('button',{onClick:()=>deleteDoneTodo(entry),disabled:busy,className:'ma-iconbtn',
+                      title:'删除这条待办','aria-label':'删除这条待办',style:iconButton},h(Icon,{name:'trash',size:16})))});
               }
               return h(Row,{key:entry.id,title,right:relativeTime(entry.updatedAt),
                 // 写清是谁处理掉的、处理成了什么样。「已处理」三个字既没说人也没说事，
@@ -2299,7 +2304,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       // 底层刻意不写 background：画布的环境色团与颗粒在 liquid 样式表里定义。
       // 行内样式权重最高，一旦写死就会把玻璃可折射的背景盖掉。
       style:{position:'fixed',inset:0,zIndex:60,display:'flex',pointerEvents:'auto',color:C.text,fontFamily:'Inter, ui-sans-serif, "Segoe UI", "Microsoft YaHei", sans-serif'}},
-      h('style',null,'[data-ma] button{transition:background var(--lg-dur-1) var(--lg-ease-smooth),border-color var(--lg-dur-1) var(--lg-ease-smooth),color var(--lg-dur-1) var(--lg-ease-smooth),box-shadow var(--lg-dur-1) var(--lg-ease-smooth),transform var(--lg-dur-1) var(--lg-ease-interactive),filter var(--lg-dur-1) var(--lg-ease-smooth)}[data-ma] button:not(:disabled):hover{filter:brightness(1.04)}[data-ma] button:not(:disabled):active{transform:scale(.975)}[data-ma] button:focus-visible,[data-ma] input:focus-visible,[data-ma] textarea:focus-visible,[data-ma] select:focus-visible{outline:3px solid var(--ma-primary);outline-offset:2px}[data-ma] button:disabled{opacity:.55;cursor:not-allowed}[data-ma] summary{cursor:pointer}[data-ma] input[type="checkbox"]{accent-color:var(--ma-primary)}[data-ma] .ma-pulse{animation:ma-pulse 1.3s ease-in-out infinite}@keyframes ma-pulse{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}[data-ma] .ma-spin{animation:ma-spin .8s linear infinite}@keyframes ma-spin{to{transform:rotate(360deg)}}[data-ma] .ma-track-fill{animation:ma-track 1.6s ease-in-out infinite}@keyframes ma-track{0%{transform:translateX(-110%)}100%{transform:translateX(320%)}}@media(max-width:1100px){[data-ma] .ma-rule-grid{grid-template-columns:1fr!important}}@media (prefers-reduced-motion: reduce){[data-ma] .ma-pulse,[data-ma] .ma-spin,[data-ma] .ma-track-fill{animation:none}[data-ma] .ma-track-fill{width:100%;opacity:.5}[data-ma] button:not(:disabled):active{transform:none!important}}'),
+      h('style',null,'[data-ma] .ma-iconbtn{color:var(--ma-muted);border-radius:8px;cursor:pointer;transition:background var(--lg-dur-1) var(--lg-ease-smooth),color var(--lg-dur-1) var(--lg-ease-smooth)}[data-ma] .ma-iconbtn:not(:disabled):hover{background:var(--lg-tint);color:var(--ma-danger)}[data-ma] .ma-iconbtn:disabled{opacity:.45;cursor:default}[data-ma] button{transition:background var(--lg-dur-1) var(--lg-ease-smooth),border-color var(--lg-dur-1) var(--lg-ease-smooth),color var(--lg-dur-1) var(--lg-ease-smooth),box-shadow var(--lg-dur-1) var(--lg-ease-smooth),transform var(--lg-dur-1) var(--lg-ease-interactive),filter var(--lg-dur-1) var(--lg-ease-smooth)}[data-ma] button:not(:disabled):hover{filter:brightness(1.04)}[data-ma] button:not(:disabled):active{transform:scale(.975)}[data-ma] button:focus-visible,[data-ma] input:focus-visible,[data-ma] textarea:focus-visible,[data-ma] select:focus-visible{outline:3px solid var(--ma-primary);outline-offset:2px}[data-ma] button:disabled{opacity:.55;cursor:not-allowed}[data-ma] summary{cursor:pointer}[data-ma] input[type="checkbox"]{accent-color:var(--ma-primary)}[data-ma] .ma-pulse{animation:ma-pulse 1.3s ease-in-out infinite}@keyframes ma-pulse{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}[data-ma] .ma-spin{animation:ma-spin .8s linear infinite}@keyframes ma-spin{to{transform:rotate(360deg)}}[data-ma] .ma-track-fill{animation:ma-track 1.6s ease-in-out infinite}@keyframes ma-track{0%{transform:translateX(-110%)}100%{transform:translateX(320%)}}@media(max-width:1100px){[data-ma] .ma-rule-grid{grid-template-columns:1fr!important}}@media (prefers-reduced-motion: reduce){[data-ma] .ma-pulse,[data-ma] .ma-spin,[data-ma] .ma-track-fill{animation:none}[data-ma] .ma-track-fill{width:100%;opacity:.5}[data-ma] button:not(:disabled):active{transform:none!important}}'),
       h('nav',{'data-ma':'nav','aria-label':'主要功能',className:'lg-glass','data-compact':narrow?'':undefined,
         // 功能层：悬浮玻璃轨。padding / 描边 / 底色 / 材质全在样式表的 nav[data-ma="nav"] 里；
         // 行内只留布局 —— 宽度随窄屏变，是动态值，只能写在这。

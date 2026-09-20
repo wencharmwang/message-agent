@@ -62,7 +62,7 @@ function build() {
   const patched = source.replace(marker,
     '  globalThis.__MA_COMPONENTS__={SessionRow,HomeCard,StatStrip,OrganizeResult,ChatBubble,'
     + 'HomeChat,HomePage,ConversationView,ConversationTodos,MessageBubble,RailFoot,Cover,TodayPage,'
-    + 'AutomationPage,ContextPage,SettingsPage};\n' + marker);
+    + 'AutomationPage,ContextPage,SettingsPage,TodoRow,Row};\n' + marker);
 
   let factory = null;
   globalThis.window.__ModuleLoader__ = {load({factory: register}) { factory = register; }};
@@ -160,8 +160,7 @@ test('会话页的滚动区是页面的兄弟节点，没有被塞进页头', {s
     '滚动区被塞进页头里了：页头不收缩，内容会溢出被裁，页面就滚不动');
 });
 
-test('会话页底部只剩待办，空的时候不摆空壳', {skip: available ? false : '找不到宿主的 react，跳过渲染体检'}, () => {
-  const {React, ReactDOMServer, C} = ctx;
+test('会话页底部只剩待办，空的时候不摆空壳', {skip: available ? false : '找不到宿主的 react，跳过渲染体检'}, () => {  const {React, ReactDOMServer, C} = ctx;
   const h = React.createElement;
   const empty = ReactDOMServer.renderToStaticMarkup(h(C.ConversationTodos,
     {conversationKey: 'k', todos: [], onChanged() {}}));
@@ -181,5 +180,36 @@ test('会话页底部只剩待办，空的时候不摆空壳', {skip: available 
     const total = [...filled.matchAll(new RegExp(word, 'g'))].length;
     const asAttribute = [...filled.matchAll(new RegExp(`(?:title|aria-label)="${word}"`, 'g'))].length;
     assert.equal(total, asAttribute, `${word} 只能出现在 title/aria-label 里，不能是可见文字`);
+  }
+});
+
+test('已完成条目带长文案时，删除入口仍然渲染出来', {skip: available ? false : '找不到宿主的 react，跳过渲染体检'}, () => {
+  const {React, ReactDOMServer, C} = ctx;
+  const h = React.createElement;
+  const TRASH = 'M4.6 5.8h10.8';   // 垃圾桶路径的前缀
+  const SOURCE = ['M10 3.4l1.55', 'M10 9.3a3 3'];  // 星 / 人形
+  const worst = {
+    id: 't', state: 'done', source: 'assistant',
+    title: '问一下管家电梯排查进展，并把结果回一句给群里等消息的邻居',
+    detail: '对方再次催转账200元，涉及资金支付与本人授权，属 payment 人工处理范围，需本人决定。'
+      + '这条文案故意写得很长，用来模拟"有很多行文案"的情况。'
+  };
+  const cases = {
+    'TodoRow 已完成 + 长详情': h(C.TodoRow, {todo: worst, onAction() {}}),
+    'TodoRow 已完成 + 无详情': h(C.TodoRow, {todo: {...worst, detail: ''}, onAction() {}}),
+    'Row 已完成 + 长标题': h(C.Row, {title: worst.title, right: '3分钟前',
+      meta: h('div', {style: {display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12}},
+        h('span', null, h('span', null, 'src')),
+        h('button', {className: 'ma-iconbtn', title: '删除这条待办'}, 'x'))})
+  };
+  for (const [name, element] of Object.entries(cases)) {
+    const html = ReactDOMServer.renderToStaticMarkup(element);
+    if (name.startsWith('TodoRow')) {
+      assert.ok(html.includes(TRASH), `${name}：删除图标没渲染出来`);
+      assert.ok(SOURCE.some(path => html.includes(path)), `${name}：来源图标没渲染出来`);
+      // 删除入口要在第二行的右侧栏里 —— 结构上不可能被文案挤掉。
+      assert.match(html, /justify-content:space-between/, `${name}：第二行没有拆成两栏`);
+    }
+    assert.ok(html.length > 40, `${name}：渲染结果是空的`);
   }
 });
