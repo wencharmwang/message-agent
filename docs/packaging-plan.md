@@ -389,7 +389,7 @@ MessageAgent.exe / 计划任务
 | 用户入口 | `packaging/MessageAgent.cmd` + 桌面快捷方式 | 双击 = 启动（没在跑才起）+ 打开页面 |
 | 起停重启 | `packaging/start.ps1` / `stop.ps1` / `restart.ps1` | 停的时候同时清残留进程（见 13.3） |
 | 卸载 | `packaging/uninstall.ps1` | 默认保留数据，删数据要输入 DELETE |
-| 用户文档 | `packaging/安装说明.md` | 给普通用户，含隐私说明与常见问题 |
+| 用户文档 | `packaging/README-install.md` | 给普通用户，含隐私说明、模型配置与常见问题。**文件名必须是英文**：zip 里的中文名会以 GBK 存放（不带 UTF-8 标志），在非中文系统上就是乱码 |
 | 自带运行时 | 包内 `runtimes\node`（官方 v22.23.0）、`runtimes\python`（官方 3.13.12 embeddable） | 实测 node/python/sqlite3 均可用 |
 | 密钥保管 | `agent_worker/secrets_store.py`（DPAPI，`ctypes` 调 `crypt32`） | 实测往返一致；密文改 1 字节即拒绝解密 |
 | 启动注入 | `launch.py` | DPAPI 里的模型 key 注入子进程；日志落到数据目录并做 5 MB 轮转 |

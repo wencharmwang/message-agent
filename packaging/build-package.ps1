@@ -7,7 +7,7 @@
     runtimes\python\     自带 Python（用户不需要自己装）
     components\wechat-db-lab\src\   取密钥/解密组件
     engine\harness\      消息引擎（默认整包带走；-SkipEngine 可跳过）
-    install.ps1 等脚本 + config.template.json + 安装说明.md
+    install.ps1 等脚本 + config.template.json + README-install.md
     manifest.json        版本与文件哈希清单
 
   用法：
