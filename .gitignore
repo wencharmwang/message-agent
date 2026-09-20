@@ -22,6 +22,8 @@ node_modules/
 dist/
 plugin/dist/
 artifacts/
+# 打包产物（体积大，可重新生成）
+packaging/out/
 
 # Local client backups
 plugin/backups-*.js

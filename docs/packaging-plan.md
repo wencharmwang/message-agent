@@ -374,6 +374,64 @@ MessageAgent.exe / 计划任务
 
 ---
 
+## 13. 已执行到这里（2026-09-20）
+
+已按 §12 的决定落地第一批：安装目录 `%LOCALAPPDATA%\Programs\MessageAgent`、运行时**自带**、
+云端 key 允许"稍后再配"、首次密钥扫描**必须用户点击**、`deploy-runtime.py` 待迁往 runtime 仓库。
+
+### 13.1 已经能跑的东西
+
+| 产物 | 位置 | 状态 |
+| --- | --- | --- |
+| 安装程序 | `packaging/install.ps1` | 8 步全流程，**沙箱实测 exit=0** |
+| 打包器 | `packaging/build-package.ps1` | **实测产出 116.7 MB / 2147 文件**，含逐文件 sha256 的 `manifest.json` |
+| 配置生成 | `packaging/make_config.py` | 由模板 + 替换值生成，自检关键字段非空 |
+| 用户入口 | `packaging/MessageAgent.cmd` + 桌面快捷方式 | 双击 = 启动（没在跑才起）+ 打开页面 |
+| 起停重启 | `packaging/start.ps1` / `stop.ps1` / `restart.ps1` | 停的时候同时清残留进程（见 13.3） |
+| 卸载 | `packaging/uninstall.ps1` | 默认保留数据，删数据要输入 DELETE |
+| 用户文档 | `packaging/安装说明.md` | 给普通用户，含隐私说明与常见问题 |
+| 自带运行时 | 包内 `runtimes\node`（官方 v22.23.0）、`runtimes\python`（官方 3.13.12 embeddable） | 实测 node/python/sqlite3 均可用 |
+| 密钥保管 | `agent_worker/secrets_store.py`（DPAPI，`ctypes` 调 `crypt32`） | 实测往返一致；密文改 1 字节即拒绝解密 |
+| 启动注入 | `launch.py` | DPAPI 里的模型 key 注入子进程；日志落到数据目录并做 5 MB 轮转 |
+
+安装完成后这台机器上**不再有明文模型 key**（`.env` 里的那一份改由 DPAPI 存储接管，见 13.4）。
+
+### 13.2 还没做（P0，且是发给外人的最后一道坎）
+
+**引擎仍是"源码 + node_modules"**。`build-package.ps1` 默认不打引擎（`engine/README-引擎未打包.txt`），
+要打必须显式 `-IncludeEngine`，而且那是 1.4 GB 量级、还不是最终形态。要给普通用户一个"双击就好"的
+包，必须先做出可分发的引擎构建产物 —— 这是本方案 §11 里风险最高的一项，本次没有动它。
+
+另外 Runtime（8766）是独立产品：安装器目前只**检测**它，没装就提示"发送会失败"，包内不带它。
+
+### 13.3 本轮踩到的坑（都已在代码里留注释）
+
+1. **`.ps1` 必须带 UTF-8 BOM**。PowerShell 5.1 没有 BOM 就按 GBK 读，脚本里的中文会直接把语法
+   搞坏（报错信息还是乱码，完全看不懂）。现在 `build-package.ps1` 会在打包时统一补 BOM，不再
+   依赖编辑器行为。
+2. **`param()` 默认值里不能用 `$PSScriptRoot`**（PS 5.1 那时还是空的，报"参数为空字符串"）。
+3. **配置不能用字符串替换生成**。Windows 路径的反斜杠在 JSON 里要转义，替换出来的文件是**非法
+   JSON**，装完必然启动失败。现在由 `make_config.py` 先解析模板、再在已解析的字符串里替换。
+4. **`Copy-Item -Destination <同名目录>` 会再嵌一层**（`runtimes\python\python\pythonw.exe`）。
+   安装器改成传父目录 + 复制后**验证落地文件**，复制失败不再静默。
+5. **`Get-ChildItem -File -Include` 在 PS 5.1 会返回目录**，配合 `Remove-Item` 会删错东西
+   （第一次打出空包就是这么来的）。改成显式按名字判断。
+6. **⚠️ 最严重的一次**：安装器清理旧进程时写了 `-match 'agent_worker'`，装**测试实例**时把
+   **正在运行的生产实例的 worker 一起杀了**，连带它的监护进程自毁，用户的服务直接停掉。
+   教训已经写死在两处注释里：**任何"按模块名匹配进程"的写法都不允许**，只能按"本安装目录 /
+   本安装的配置路径 / 本安装的 harness home"匹配。已恢复服务并修正。
+
+### 13.4 下一步
+
+| # | 事项 | 说明 |
+| --- | --- | --- |
+| 1 | 引擎构建产物（P0） | 决定用 esbuild/tsup 打成 bundle，还是 `pnpm install --prod` 收敛依赖树 |
+| 2 | 打包实例的启动验证 | 本轮受限于"会话里起的进程会被回收"，只能靠计划任务；测试任务注册了但没等出结果就收了。**正式安装（真计划任务）的启动尚未端到端验证** |
+| 3 | 微信密钥迁到 DPAPI | `secrets_store` 已就绪，但 `wechat-db-lab` 的 `keys/*.json` 迁移 + 运行时只解到临时目录，还没接上 |
+| 4 | 首次密钥扫描的按钮 | 界面侧还没做（要求：必须用户点击、绝不自动作） |
+| 5 | `deploy-runtime.py` 迁往 runtime 仓库 | 已确认要做，未执行 |
+| 6 | 真机安装 | 装到 `%LOCALAPPDATA%\Programs\MessageAgent` 并迁移现有数据（保留旧目录做回退） |
+
 ## 附：本次清理记录（与本文同期执行）
 
 | 动作 | 对象 | 理由 |
