@@ -124,6 +124,16 @@ def main():
         worker_env.pop('WECHAT_DB_LAB_KEYS_DIR', None)
     if not allow_memory_scan(credentials):
         worker_env[NO_SCAN_ENV] = '1'
+    # 保险：启动时清掉 wechat-db-lab 默认目录里的明文密钥缓存。
+    # 我们的密钥只存在于 DPAPI 存储 + 本次运行的临时副本里；上游工具历史上会在
+    # %LOCALAPPDATA%\wechat-db-lab\keys 留一份（新版本已经不在那儿写了，见 cache_dirs 的注释），
+    # 但用户机器上可能有旧版本留下的。
+    for stale_dir in [Path(os.environ.get('LOCALAPPDATA', '')) / 'wechat-db-lab' / 'keys']:
+        try:
+            for stale in stale_dir.glob('*.json*'):
+                stale.unlink()
+        except OSError:
+            pass
     worker = subprocess.Popen([sys.executable,'-m','agent_worker','--config',str(config_path)],cwd=ROOT,
                               env=worker_env, stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW)
     try:

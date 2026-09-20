@@ -5,6 +5,7 @@ backups/
 data/
 workspace/
 config.json
+config.json.*
 *.token
 .env
 .env.*
