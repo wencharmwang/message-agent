@@ -196,8 +196,11 @@ export function homeOverview({bundle = [], todos = [], automation = [], account 
       conversationKey: todo.conversationKey ?? null,
       who: todo.identity?.title ?? null
     })),
-    automation: automation.slice(0, 3).map(item => ({
-      key: item.key, title: item.identity?.title ?? '', reason: item.attentionReason ?? ''
+    automation: automation.slice(0, 6).map(item => ({
+      key: item.key, ruleId: item.rule?.id ?? null, title: item.identity?.title ?? '',
+      reason: item.attentionReason ?? '',
+      // 只有"某条记录没确认"这种能靠"我知道了"消掉；规则自己被拦住的不给按钮。
+      acknowledgeable: item.acknowledgeable === true
     })),
     lastOrganize
   };

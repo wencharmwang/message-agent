@@ -941,10 +941,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         cursor:disabled?'default':'pointer',...style}});
   }
 
-  // ---- 首页：消息（数据全部来自本机数据库）------------------------------------
+  // ---- 首页：消息（数据全部来自 wechat-db-lab 的明文副本）------------------------------------
   //
   // 这一页回答三个问题：**现在有什么**（关键信息）、**能做什么**（关键操作）、
-  // **还想知道什么**（对话）。三块都建立在本地解密数据库上，点开就是结果，不碰微信窗口。
+  // **还想知道什么**（对话）。三块都建立在明文副本上，点开就是结果，不碰微信窗口。
   //
   // 和旧版「消息整理」页的区别：旧版整条链路是 OCR —— 先刷新可见列表拿到候选名，再让
   // 模型按名字逐个打开会话去读。一次整理要动好几回微信窗口，抢走用户正在看的会话、
@@ -1041,7 +1041,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('button',{onClick:onAdd,disabled:busy||!chosen.length,style:{...small(true),marginTop:12}},
           busy?'正在记…':(chosen.length?('加入选中的 '+chosen.length+' 件'):'没有选中任何条目'))),
       !todos.length&&!focus.length&&h('p',{style:{margin:0,fontSize:14,color:C.text2,lineHeight:1.8}},'这次整理没有给出可执行的事项。'),
-      h('p',{style:{...hint,margin:'12px 0 0'}},'整理只读本机数据库；不会打开微信窗口，也不会发送任何消息。'));
+      h('p',{style:{...hint,margin:'12px 0 0'}},'整理只看消息本身；不会打开微信窗口，也不会发送任何消息。'));
   }
 
   /** 对话里的一条。用户的靠右、助手的靠左；助手答案里的「- [ ] 」可以一键记成待办。 */
@@ -1064,7 +1064,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
    *
    * 服务端固定用一个 harness session（messaging-home），所以模型记得住上下文；这里渲染的
    * items 来自 data/chat-log.json，只为"刷新之后还能看见刚才那几轮"。
-   * 每次提问，服务端都会把一份本地数据库快照拼进提示词 —— 助手不需要打开微信窗口读消息。
+   * 每次提问，服务端都会把一份消息快照拼进提示词 —— 助手不需要打开微信窗口读消息。
    */
   function HomeChat({narrow}){
     const [items,setItems]=useState([]),[text,setText]=useState('');
@@ -1105,7 +1105,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,padding:'14px 18px 10px',flexShrink:0}},
         h('div',{style:{minWidth:0}},
           h('strong',{style:{fontSize:15,color:C.text}},'问助手'),
-          h('span',{style:{display:'block',fontSize:12,color:C.text3,marginTop:2}},'读本机数据库，不打开微信窗口')),
+          h('span',{style:{display:'block',fontSize:12,color:C.text3,marginTop:2}},'不打开微信窗口，不会打扰你')),
         items.length?h('button',{onClick:clear,style:small(false,false,true)},'清空'):null),
       h('div',{ref:boxRef,style:{flex:1,minHeight:0,overflowY:'auto',padding:'4px 18px 12px'}},
         loading&&h('p',{style:hint},'正在读取对话…'),
@@ -1170,7 +1170,23 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       try{await api('todos/'+todo.id+'/done',{});await home.refresh();}
       catch(e){setError(e.message);}finally{setBusy(false);}
     }
-    if(home.loading&&!data)return h(Empty,{title:'正在打开消息',text:'正在读取本机微信数据库，请稍等一下…'});
+    /**
+     * 「我知道了」：把这条提醒收起来。
+     *
+     * 以前这里只有「去处理」这个跳转，跳过去也点不了任何东西，于是提醒永远消不掉
+     * （用户实测报的就是这个）。这是**看过**、不是**重试** —— 发送结果不确定的那条
+     * 永远不会自动重发，这一点必须写在按钮旁边。
+     */
+    async function ackAutomation(item){
+      if(busy||!item.ruleId)return;
+      setBusy(true);setError('');setNote('');
+      try{
+        await api('automation/ack',{ruleId:item.ruleId});
+        setNote('「'+(item.title||'这条')+'」的提醒已经收起来了。');
+        await home.refresh();
+      }catch(e){setError(e.message);}finally{setBusy(false);}
+    }
+    if(home.loading&&!data)return h(Empty,{title:'正在打开消息',text:'正在读取消息，请稍等一下…'});
     const waiting=data?.waiting||[],recent=data?.recent||[],todos=data?.todos||[],automation=data?.automation||[];
     const opened=new Set(waiting.map(session=>session.username));
     const others=recent.filter(session=>!opened.has(session.username));
@@ -1180,7 +1196,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const pagebar=h('div',{className:'lg-glass ma-pagebar'},
       h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',minWidth:0}},
         h('h1',{style:{...h1,fontSize:20,margin:0}},'消息'),
-        data?.scanAt?h('span',{style:{fontSize:12,color:C.text3}},'数据库更新于 '+relativeTime(data.scanAt)):null),
+        data?.scanAt?h('span',{style:{fontSize:12,color:C.text3}},'更新于 '+relativeTime(data.scanAt)):null),
       h('button',{onClick:organize,disabled:organizing,
         style:{...button(true),display:'inline-flex',alignItems:'center',justifyContent:'center',gap:8}},
         organizing?h(Spinner,{size:14}):null,organizing?'正在整理…':'整理消息'));
@@ -1194,11 +1210,16 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
             h('div',{style:{fontSize:14,color:C.text,lineHeight:1.6,wordBreak:'break-word'}},todo.title),
             todo.who&&h('div',{style:{fontSize:12,color:C.text3,marginTop:3}},'来自 '+todo.who))))));
     const automationCard=h(HomeCard,{title:'自动回复需要你看一眼',
-      action:h('button',{onClick:()=>store.set({tab:'automation'}),style:small(false)},'去处理')},
+      action:h('button',{onClick:()=>store.set({tab:'automation'}),style:small(false,false,true)},'自动回复设置')},
       h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
-        automation.map((item,index)=>h('div',{key:item.key||index,style:{padding:'11px 14px',borderTop:index?'1px solid '+C.border:'none'}},
+        automation.map((item,index)=>h('div',{key:item.key||index,style:{padding:'12px 14px',borderTop:index?'1px solid '+C.border:'none'}},
           h('strong',{style:{fontSize:14,color:C.text}},item.title||'（未命名会话）'),
-          item.reason&&h('div',{style:{fontSize:13,color:C.text2,marginTop:4,lineHeight:1.7}},item.reason)))));
+          item.reason&&h('div',{style:{fontSize:13,color:C.text2,marginTop:4,lineHeight:1.7}},item.reason),
+          // 只有"某条记录没确认"这种才给按钮：规则自己被拦住是状态问题，标一句"看过了"
+          // 也解决不了，那种情况给按钮只会让人点了没反应。
+          item.acknowledgeable&&h('button',{onClick:()=>ackAutomation(item),disabled:busy,
+            style:{...small(false),marginTop:9}},busy?'正在记…':'我知道了')))),
+      h('p',{style:{...hint,margin:'10px 0 0'}},'「我知道了」只是把提醒收起来。没有确认发出的那条不会自动重发。'));
     const left=h('div',{style:{flex:narrow?'0 0 auto':'1 1 auto',minWidth:0,overflowY:narrow?'visible':'auto'}},
       h('div',{style:{padding:narrow?'18px 16px 26px':'24px clamp(18px,3vw,40px) 48px',maxWidth:940,margin:'0 auto',boxSizing:'border-box'}},
         pagebar,
@@ -1206,7 +1227,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h(Result,{text:note}),
         h(StatStrip,{totals}),
         !totals.conversations&&h(HomeCard,{title:'还没有读到会话'},
-          h('p',{style:{...hint,margin:0}},'本机微信数据库里暂时没有可读的会话。确认微信登录过、数据库已解锁后，这一页会自动出现内容。')),
+          h('p',{style:{...hint,margin:0}},'现在没有读到聊天。确认微信已登录，稍等片刻这一页会自动出现内容。')),
         result?h(OrganizeResult,{result,busy:busy||organizing,picked,added,
           onCheck:(index,on)=>setPicked(old=>({...old,[index]:on})),
           onAdd:addPicked,onOpen:openConversation}):null,
@@ -1222,10 +1243,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   }
 
   /**
-   * 一个会话：本地数据库里的正文 + 它身上的待办 / 跟进。
+   * 一个会话：明文副本里的正文 + 它身上的待办 / 跟进。
    *
    * 这里**没有**「读取这条会话」按钮：旧版那一步要打开微信聊天，会挤走用户正在看的那个
-   * 会话、清掉未读红点，而读到的只有屏幕上的那几行。数据库读取随取随用，所以直接给结果。
+   * 会话、清掉未读红点，而读到的只有屏幕上的那几行。读取随取随用，所以直接给结果。
    */
   function ConversationView({store,username,title,kind,narrow}){
     // This state belongs to ONE conversation, which is why the caller renders this component
@@ -1242,14 +1263,14 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('h1',{style:{...h1,fontSize:19,margin:0,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},
           data?.identity?.title||title||username),
         h('span',{style:{...pill(kind==='group'?C.text3:C.brand),fontSize:12,flexShrink:0}},kind==='group'?'群聊':'单聊'),
-        h('span',{style:{fontSize:12,color:C.text3}},messages.length?('本地数据库里最近 '+messages.length+' 条'):'')),
+        h('span',{style:{fontSize:12,color:C.text3}},messages.length?('最近 '+messages.length+' 条'):''),
       h('div',{style:{flex:1,minHeight:0,overflowY:'auto'}},
         h('div',{style:{maxWidth:840,margin:'0 auto',padding:narrow?'14px 14px 40px':'22px 32px 48px',boxSizing:'border-box'}},
           h(Notice,{error:detail.error,dev:detail.errorDev,code:detail.errorCode}),
           h('section',{style:card},
             h('h2',{style:{...h2,marginBottom:12}},'聊天记录'),
             !messages.length&&h('p',{style:{...hint,margin:0}},
-              detail.loading?'正在读取…':'本地数据库里没有可读的文本消息（可能都是图片、语音这类内容）。'),
+              detail.loading?'正在读取…':'这段时间没有文字消息（可能都是图片、语音这类内容）。'),
             messages.map((message,index)=>h('div',{key:index,style:{display:'flex',
               justifyContent:message.direction==='outgoing'?'flex-end':'flex-start',marginBottom:8}},
               h('div',{style:{maxWidth:'78%',minWidth:0,padding:'9px 12px',borderRadius:'var(--lg-r-lg)',
@@ -1257,10 +1278,86 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
                 border:'1px solid '+(message.direction==='outgoing'?'transparent':'var(--lg-card-line)'),
                 backgroundColor:message.direction==='outgoing'?'var(--ma-primary-soft)':FIELD_BG,color:C.text}},
                 message.content,
-                h('span',{style:{display:'block',fontSize:11,color:C.text3,marginTop:4}},relativeTime(message.at))))))),
-          data&&h(CrmSections,{key:data.conversationKey,customerKey:data.conversationKey,identity:data.identity,
+                h('span',{style:{display:'block',fontSize:11,color:C.text3,marginTop:4}},relativeTime(message.at)))))),
+          data&&h(ConversationExtras,{key:data.conversationKey,conversationKey:data.conversationKey,
             data:{customer:data.customer,todos:data.todos,followups:data.followups},
-            loading:detail.loading,error:'',onChanged:detail.refresh})));
+            loading:detail.loading,onChanged:detail.refresh})))));
+  }
+
+  /**
+   * 会话页底部：这个人的待办与跟进。
+   *
+   * 刻意**不**复用「联系人」页那套 CrmSections。那套是给"管理资料"用的，它会无条件摆出
+   * 「待办 · 没有未完成的待办」「跟进记录 · 还没有记录」「联系人资料 · 还没有填写」三块空壳。
+   * 用户从「最近有动静」点一个人进来，想看的是聊天记录，结果下面全是"没有内容"（实测被抱怨过）。
+   *
+   * 这里的原则很简单：**有东西才铺开，没东西就只留一排按钮**。
+   */
+  function ConversationExtras({conversationKey,data,loading,onChanged}){
+    const [open,setOpen]=useState('');
+    const [busy,setBusy]=useState(false),[error,setError]=useState('');
+    const customer=data?.customer;
+    const todos=(data?.todos||[]).filter(todo=>todo.state!=='done');
+    const doneTodos=(data?.todos||[]).filter(todo=>todo.state==='done');
+    const followups=data?.followups||[];
+    const [stage,setStage]=useState(''),[nextStep,setNextStep]=useState(''),[note,setNote]=useState('');
+    useEffect(()=>{
+      if(!customer)return;
+      setStage(customer.stage||'');setNextStep(customer.nextStep||'');setNote(customer.note||'');
+    },[customer&&customer.updatedAt,conversationKey]);
+    const dirty=customer&&(stage!==(customer.stage||'')||nextStep!==(customer.nextStep||'')||note!==(customer.note||''));
+    const toggle=name=>setOpen(current=>current===name?'':name);
+    async function run(fn){
+      setBusy(true);setError('');
+      try{await fn();onChanged();}catch(e){setError(e.message);}finally{setBusy(false);}
+    }
+    function todoAction(action,todo){
+      if(action==='delete')return run(()=>api('todos/'+todo.id+'/delete',{}));
+      if(action==='tomorrow')return run(()=>api('todos/'+todo.id+'/reopen',
+        {dueAt:fromDateInput(toDateInput(dayStart(1))).toISOString()}));
+      if(action==='reopen')return run(()=>api('todos/'+todo.id+'/reopen',{}));
+      return run(()=>api('todos/'+todo.id+'/'+action,{}));
+    }
+    if(loading&&!data)return h('p',{style:hint},'正在读取…');
+    const label={display:'block',fontSize:13,color:C.text2,marginBottom:5};
+    return h('section',{style:card},
+      h(Notice,{error}),
+      h('div',{style:{display:'flex',gap:8,flexWrap:'wrap'}},
+        h('button',{onClick:()=>toggle('todo'),disabled:busy,style:small(open==='todo')},open==='todo'?'收起':'＋ 待办'),
+        h('button',{onClick:()=>toggle('followup'),disabled:busy,style:small(open==='followup')},open==='followup'?'收起':'＋ 跟进'),
+        h('button',{onClick:()=>toggle('profile'),disabled:busy,style:small(open==='profile')},open==='profile'?'收起':'联系人资料')),
+      open==='todo'&&h('div',{style:{marginTop:12}},
+        h(Composer,{mode:'todo',fixedMode:true,setMode:()=>{},busy,
+          onSubmit:(_,text,dueAt)=>run(()=>api('todos',{conversationKey,title:text,dueAt,source:'manual'}))})),
+      open==='followup'&&h('div',{style:{marginTop:12}},
+        h(Composer,{mode:'followup',fixedMode:true,setMode:()=>{},busy,
+          onSubmit:(_,text)=>run(()=>api('customers/'+conversationKey+'/followups',{kind:'记录',note:text}))})),
+      open==='profile'&&h('div',{style:{display:'grid',gap:10,marginTop:14}},
+        h('div',null,h('label',{style:label},'现在是什么关系/阶段'),
+          h('input',{value:stage,onChange:event=>setStage(event.target.value),placeholder:'例如：朋友、家人、已报价、等回款',style:field})),
+        h('div',null,h('label',{style:label},'下一步'),
+          h('input',{value:nextStep,onChange:event=>setNextStep(event.target.value),placeholder:'例如：周五前回他电话',style:field})),
+        h('div',null,h('label',{style:label},'备注'),
+          h('textarea',{value:note,onChange:event=>setNote(event.target.value),rows:2,placeholder:'只有你自己看得到',style:{...field,resize:'vertical',lineHeight:1.7}})),
+        h('div',null,h('button',{onClick:()=>run(()=>api('customers/'+conversationKey,{stage,nextStep,note})),
+          disabled:busy||!dirty,style:small(true)},busy?'正在保存…':(dirty?'保存':'已保存')))),
+      // 下面两块只有真的有内容才出现。空的时候只有上面那排按钮，不再摆三个"还没有"。
+      !!todos.length&&h('div',{style:{marginTop:16}},
+        h('p',{style:{...hint,margin:'0 0 8px'}},'这个人的待办 · 还没做完 '+todos.length+' 件'),
+        h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
+          todos.map(todo=>h(TodoRow,{key:todo.id,todo,onAction:todoAction,busy})))),
+      !!doneTodos.length&&h('details',{style:{marginTop:12}},
+        h('summary',{style:{cursor:'pointer',fontSize:13,color:C.text3}},'已完成 '+doneTodos.length+' 件'),
+        h('div',{style:{marginTop:8,border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
+          doneTodos.slice(0,8).map(todo=>h(TodoRow,{key:todo.id,todo,onAction:todoAction,busy})))),
+      !!followups.length&&h('div',{style:{marginTop:16}},
+        h('p',{style:{...hint,margin:'0 0 8px'}},'跟进记录'),
+        h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
+          followups.slice(0,5).map((item,index)=>h('div',{key:item.id,style:{padding:'12px 14px',borderTop:index?'1px solid '+C.border:'none'}},
+            h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline'}},
+              h('strong',{style:{fontSize:14,color:C.text}},item.kind==='助手摘要'?'助手总结':'跟进'),
+              h('span',{style:{fontSize:13,color:C.text3}},relativeTime(item.createdAt))),
+            h(LongText,{text:item.note}))))));
   }
   function CrmSections({customerKey,identity,data,loading,error,onChanged}){
     const [busy,setBusy]=useState(false),[actionError,setActionError]=useState('');
@@ -1441,9 +1538,12 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       h(Checkbox,{checked:done,disabled:busy,label:done?'重新打开：「'+firstLine(todo.title,20)+'」':'标记完成：「'+firstLine(todo.title,20)+'」',
         onChange:()=>onAction(done?'reopen':'done',todo),style:{marginTop:3}}),
       h('div',{style:{flex:1,minWidth:0}},
-        h('div',{style:{fontSize:15,color:done?C.text3:C.text,lineHeight:1.6,textDecoration:done?'line-through':'none',wordBreak:'break-word'}},todo.title),
+        // 完成的事**不划删除线**：横线是"取消/作废"的语义，而这里只是做完了。状态交给
+        // 下面那颗「已完成」标签表达，一眼看得清，也不会把清单画得乱七八糟。
+        h('div',{style:{fontSize:15,color:done?C.text2:C.text,lineHeight:1.6,wordBreak:'break-word'}},todo.title),
         todo.detail&&todo.detail!==todo.title&&h('p',{style:{margin:'5px 0 0',fontSize:13,color:C.text2,lineHeight:1.7,whiteSpace:'pre-wrap',maxHeight:60,overflow:'hidden'}},todo.detail),
         h('div',{style:{display:'flex',gap:8,alignItems:'center',marginTop:6,flexWrap:'wrap'}},
+          done&&h('span',{style:pill(C.ok)},'已完成'),
           doing&&h('span',{style:pill(C.brand)},'在做'),
           !done&&due&&h('span',{style:pill(due.color)},due.text),
           todo.identity&&h('span',{style:{fontSize:13,color:C.text3}},'来自 '+todo.identity.title),
@@ -1536,10 +1636,17 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           h('details',{key:group.key,style:{borderTop:'1px solid '+C.border,paddingTop:16,marginBottom:20}},
             h('summary',{style:{fontSize:15,color:C.text}},group.title+'（'+group.items.length+' 条）'),
             !group.items.length&&h('p',{style:hint},'还没有已处理的记录。'),
-            group.items.map(entry=>h(Row,{key:entry.id,title:entry.identity.title,right:relativeTime(entry.updatedAt),
-              // 写清是谁处理掉的、处理成了什么样。「已处理」三个字既没说人也没说事，
-              // 用户看完不知道助手到底做了什么（实测被问过"助手怎么处理呢"）。
-              meta:(entry.actor==='you'?'你':'助手')+' · '+firstLine(entry.detail||'处理完了',60)}))))));
+            group.items.map(entry=>{
+              // 做过的事可能是"处理了某条消息"（有联系人），也可能是"做完了某件待办"
+              // （可能根本没挂联系人）。所以标题要允许只有待办自身的文字。
+              const title=(entry.identity&&entry.identity.title)||entry.title||'（未命名）';
+              return h(Row,{key:entry.id,title,right:relativeTime(entry.updatedAt),
+                // 写清是谁处理掉的、处理成了什么样。「已处理」三个字既没说人也没说事，
+                // 用户看完不知道助手到底做了什么（实测被问过"助手怎么处理呢"）。
+                meta:entry.todo?'你自己记下的一件待办':((entry.actor==='you'?'你':'助手')+' · '+firstLine(entry.detail||'处理完了',60)),
+                // 状态用标签表达，不用删除线：横线是"取消"的语义，而这里只是"已完成"。
+                children:entry.todo?h('div',{style:{marginTop:8}},h('span',{style:pill(C.ok)},'已完成')):null});
+            })))));
   }
 
   // ---- 联系人 ---------------------------------------------------------------------------------------------------------------------
@@ -1591,16 +1698,27 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   function AutomationPage(){
     const status=usePoller(true,()=>api('status'),5000);
     const settings=usePoller(true,()=>api('settings'),15000);
-    const [saving,setSaving]=useState(false),[settingError,setSettingError]=useState('');
+    const [saving,setSaving]=useState(false),[settingError,setSettingError]=useState(''),[acking,setAcking]=useState(false);
     // 「添加」表单的开关挂在页面这一层，不挂在操作条里面 —— 见 AddContact 的说明。
     const [adding,setAdding]=useState(false);
     async function action(path,data){await api(path,data);await status.refresh();}
     const rules=status.data?.rules||[];
     const activeRules=rules.filter(rule=>rule.enabled).length;
     const attentionJobs=rules.filter(rule=>rule.enabled&&['blocked','needs_user','waiting_connection'].includes(rule.status)).length;
+    // 「我知道了」：把这条规则上没确认的记录标成已看过，提醒就不再出现。
+    // 首页那张「自动回复需要你看一眼」的卡片点进来之后，这里也得能处理 —— 否则跳过来
+    // 什么都点不了，等于把提醒永久挂着（用户实测报的就是这个）。
+    async function acknowledge(ruleId){
+      if(!ruleId||acking)return;
+      setAcking(true);setSettingError('');
+      try{await api('automation/ack',{ruleId});await status.refresh();}
+      catch(e){setSettingError(e.message);}finally{setAcking(false);}
+    }
     const renderJob=({count,job})=>h('div',{key:job.id,style:{display:'flex',gap:10,alignItems:'baseline',padding:'10px 0',borderTop:'1px solid '+C.border,fontSize:13}},
       h('span',{style:{...pill(job.state==='failed'||job.state==='uncertain'?C.error:C.ok),fontSize:11,padding:'2px 8px'}},JOB[job.state]||'已处理'),
-      h('span',{style:{color:C.text2,lineHeight:1.6}},firstLine(job.text||job.detail||'',80)+(count>1?'（同类 '+count+' 条）':'')));
+      h('span',{style:{flex:1,minWidth:0,color:C.text2,lineHeight:1.6}},firstLine(job.text||job.detail||'',80)+(count>1?'（同类 '+count+' 条）':''),),
+      (job.state==='failed'||job.state==='uncertain')&&h('button',{onClick:()=>acknowledge(job.rule_id),disabled:acking,
+        style:{...small(false),flexShrink:0}},acking?'正在记…':'我知道了'));
     const paused=settings.data?.settings?.auto_reply_paused===true;
     async function togglePaused(){
       setSaving(true);setSettingError('');
@@ -1961,6 +2079,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('div',{style:{display:'flex',gap:8,flexShrink:0}},
           h('button',{onClick:()=>{setImportOpen(value=>!value);setOpen(false);},style:small(!importOpen)},importOpen?'收起':'批量导入'),
           h('button',{onClick:()=>{setOpen(value=>!value);setImportOpen(false);},style:small(!open)},open?'收起':'＋ 新增'))),
+      // 「要不要在规则里挂知识库」这个问题在这里一次说清：不用挂。发布即可用。
+      h('p',{style:{...hint,margin:'0 0 12px'}},'这里的东西是全站通用的，不用在自动回复规则里勾选：发布之后，助手回复任何人、以及给你起草回复时都会自动来里面找相关条目；找不到就不编，涉及退款、报价这类会停下来交给你。'),
       h(Notice,{error}),
       importOpen&&h(KnowledgeImport,{onDone:()=>{setImportOpen(false);refresh();},onCancel:()=>setImportOpen(false)}),
       open&&h(KnowledgeForm,{onDone:()=>{setOpen(false);refresh();}}),
@@ -2029,8 +2149,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           h(DevToggle,{})),
         h('section',{style:{...card,marginTop:16}},
           h('h3',h3,'数据保存在哪'),
-          h('p',{style:{...hint,margin:'0 0 10px'}},'自动回复规则和发送记录保存在本机的 reply.db。看消息、整理消息都读微信本机的数据库副本：不打开微信窗口、不切前台、不清未读红点。整理结果与对话记录分别存在数据目录的 organize.json 和 chat-log.json。'),
-          h('p',{style:{...hint,margin:0}},'关闭开发者模式后，界面上的原生入口（工作区、模型选择器、工具 JSON）也会一起隐藏。')),
+          h('p',{style:{...hint,margin:0}},'自动回复规则、跟进记录、待办、整理结果和对话记录都只保存在这台电脑上，不会上传。看消息与整理消息都不会打开微信窗口，也不会清掉聊天里的未读红点。')),
         data&&h('details',{style:{marginTop:16,color:C.text2}},
           h('summary',{style:{cursor:'pointer',fontSize:15}},'高级信息'),
           h('div',{style:{marginTop:12,padding:16,borderRadius:10,background:C.panel,fontSize:14,lineHeight:2,color:C.text2}},
@@ -2061,7 +2180,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
 
   // 首版只呈现自动回复核心。主动查消息继续走原生对话框里的 MCP，避免再造一个不稳定的整理页。
   // 首屏是「消息」：关键信息 + 关键操作 + 对话。主动查消息不再需要回到原生对话框 ——
-  // 产品自己的对话区走的是同一个 Agent，而且带着一份本地数据库快照。
+  // 产品自己的对话区走的是同一个 Agent，而且每次提问都会带上最新消息。
   const NAV=[['home','消息'],['todos','待办'],['automation','自动回复'],['context','回复配置']];
   const NAV_ICON={home:'home',messages:'messages',today:'today',customers:'contacts',automation:'automation',context:'context'};
   function NavEntry({store,wide}){
@@ -2108,7 +2227,15 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   function Workbench({ctx,store}){
     const {open,cover,tab,contactKey,contactTitle,contactKind}=useStore(store),[narrow,setNarrow]=useState(()=>matchMedia('(max-width: 900px)').matches),closeRef=useRef(null),rootRef=useRef(null);
     useEffect(()=>{const media=matchMedia('(max-width: 900px)'),change=()=>setNarrow(media.matches);media.addEventListener('change',change);return()=>media.removeEventListener('change',change);},[]);
-    useEffect(()=>{if(!open)return;const key=event=>{if(event.key==='Escape')store.set({open:false,cover:false});};document.addEventListener('keydown',key);closeRef.current?.focus();return()=>document.removeEventListener('keydown',key);},[open,store]);
+    // Esc 只做"往回退一步"，**绝不**离开产品：原来它写的是 `cover:false`，而 cover:false
+    // 就是把画面交回 DSH 原生界面（工作区、模型选择器）—— 按一下 Esc 掉进开发界面，
+    // 用户会以为产品崩了。现在：开着会话就先退回列表，再按一次才收起面板（停在封面）。
+    useEffect(()=>{if(!open)return;const key=event=>{
+      if(event.key!=='Escape')return;
+      const state=store.get();
+      if(state.contactKey)store.set({contactKey:null,contactTitle:null,contactKind:null});
+      else store.set({open:false,cover:true});
+    };document.addEventListener('keydown',key);closeRef.current?.focus();return()=>document.removeEventListener('keydown',key);},[open,store]);
     // 折射的挂载点。玻璃元素（页头、回执条）是各页面自己渲染出来的，出现和消失都不经过
     // Workbench 的 render，所以这里追 DOM 而不是挂在某个组件上。
     // 只在「新增节点里真的有 [data-liquid-glass]」时才重扫 —— 否则动画期间每帧都扫一遍。

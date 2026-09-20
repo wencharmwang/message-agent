@@ -212,17 +212,23 @@ test('「今天要做的」只有待办、等你确认的发送和已完成', ()
   assert.match(draftRow.title, /长江证券孙盛/);
 });
 
-test('在做的待办排在最前面，做完的留在同一张单子上', () => {
+test('在做的待办排在最前面；做完的离开「待办」进「已完成」', () => {
   const todo = (id, state, dueAt = null) => ({id, title: id, state, dueAt, source: 'manual', conversationKey: null});
   const page = projectToday({
     todoBuckets: {overdue: [todo('已逾期', 'open', 1)], today: [], later: [], someday: [todo('没日期', 'open')]},
-    doneTodos: [todo('做完了', 'done')]
+    doneTodos: [{...todo('做完了', 'done'), doneAt: 1789000000}]
   });
   const rows = page.groups.find(group => group.key === 'todos').items;
-  assert.deepEqual(rows.map(row => row.title), ['已逾期', '没日期', '做完了'], '没做完的按到期排在前，做完的收在后面');
+  // 做完的**不在**这一组：否则一眼数不清还剩几件（用户原话「已完成的放在已完成就行了，
+  // 不要再展示在上面」）。
+  assert.deepEqual(rows.map(row => row.title), ['已逾期', '没日期'], '待办只放要做和在做');
   assert.equal(page.counts.todos, 2);
   assert.equal(page.counts.done, 1);
   assert.equal(page.counts.overdue, 1);
+  // 它出现在「已完成」里，并且带得出标题（手记的待办没有联系人，标题不能取 identity）。
+  const done = page.groups.find(group => group.key === 'handled').items.find(row => row.todo);
+  assert.equal(done.title, '做完了');
+  assert.equal(done.actor, 'you');
 
   const withDoing = projectToday({
     todoBuckets: {overdue: [todo('已逾期', 'open', 1)], today: [], later: [], someday: [todo('要做', 'open'), todo('在做', 'doing')]},

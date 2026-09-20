@@ -64,8 +64,21 @@ test('首屏是消息页：关键信息 + 关键操作 + 对话', () => {
   assert.match(source, /function ConversationView\(\{store,username,title,kind,narrow\}\)/);
   // 主操作只有一条：整理消息。
   assert.match(source, /'正在整理…':'整理消息'/);
-  // 对话区明确告诉用户数据来自数据库，不是"去开微信窗口读"。
-  assert.match(source, /读本机数据库，不打开微信窗口/);
+  // 对话区明确告诉用户"不会打扰微信"，但**不**提任何数据来源的实现细节。
+  assert.match(source, /不打开微信窗口，不会打扰你/);
+});
+
+test('界面不提"数据库"这类实现细节', () => {
+  // 用户明确要求：界面上不能出现读取本地数据库的说法。检查所有**字符串字面量**里的
+  // 相关词——注释里为开发保留说明是允许的（`//` 与 `*` 开头的行不算）。
+  const uiLines = source.split('\n')
+    .map((line, index) => ({line, index: index + 1}))
+    .filter(({line}) => {
+      const trimmed = line.trim();
+      return !trimmed.startsWith('//') && !trimmed.startsWith('*') && !trimmed.startsWith('/*');
+    });
+  const leaky = uiLines.filter(({line}) => /数据库|数据表|db副本|副本|解锁/.test(line));
+  assert.deepEqual(leaky.map(({index, line}) => index + ': ' + line.trim()), []);
 });
 
 test('「回到对话框」退化到开发者模式，不再占日常路径', () => {

@@ -61,8 +61,8 @@ function build() {
   assert.ok(source.includes(marker), 'client.js 的模块导出点变了，这个冒烟测试需要跟着改');
   const patched = source.replace(marker,
     '  globalThis.__MA_COMPONENTS__={SessionRow,HomeCard,StatStrip,OrganizeResult,ChatBubble,'
-    + 'HomeChat,HomePage,ConversationView,RailFoot,Cover,TodayPage,AutomationPage,ContextPage,SettingsPage};\n'
-    + marker);
+    + 'HomeChat,HomePage,ConversationView,ConversationExtras,RailFoot,Cover,TodayPage,AutomationPage,'
+    + 'ContextPage,SettingsPage};\n' + marker);
 
   let factory = null;
   globalThis.window.__ModuleLoader__ = {load({factory: register}) { factory = register; }};
@@ -111,6 +111,15 @@ test('界面组件都能渲染出内容（白屏体检）', {skip: available ? f
     HomePage: h(C.HomePage, {store, narrow: false}),
     'HomePage 窄屏': h(C.HomePage, {store, narrow: true}),
     ConversationView: h(C.ConversationView, {store, username: 'doy1572', title: 'Wencharm', kind: 'direct', narrow: false}),
+    'ConversationExtras 空': h(C.ConversationExtras, {conversationKey: 'k', data: {customer: null, todos: [], followups: []},
+      loading: false, onChanged() {}}),
+    'ConversationExtras 有内容': h(C.ConversationExtras, {conversationKey: 'k', loading: false, onChanged() {},
+      data: {
+        customer: {stage: '已报价', nextStep: '周五回电', updatedAt: now},
+        todos: [{id: 't1', title: '回他电话', state: 'open', source: 'manual', detail: '周五前'},
+                {id: 't2', title: '已经问过了', state: 'done', source: 'manual'}],
+        followups: [{id: 'f1', kind: '记录', note: '电话确认了报价，等他周五回复', createdAt: now - 3600}]
+      }}),
     Cover: h(C.Cover, {store}),
     TodayPage: h(C.TodayPage, {store, ctx: {}}),
     AutomationPage: h(C.AutomationPage),
@@ -136,4 +145,27 @@ test('首页渲染出来的是「消息」三块，不是一个空白壳', {skip
   assert.match(html, /正在打开消息/, '首屏加载态没有文案');
   const settled = ReactDOMServer.renderToStaticMarkup(React.createElement(C.Cover, {store}));
   assert.match(settled, /打开消息助手/);
+});
+
+test('会话页底部在没内容时不摆空壳', {skip: available ? false : '找不到宿主的 react，跳过渲染体检'}, () => {
+  const {React, ReactDOMServer, C} = ctx;
+  const h = React.createElement;
+  const empty = ReactDOMServer.renderToStaticMarkup(h(C.ConversationExtras,
+    {conversationKey: 'k', data: {customer: null, todos: [], followups: []}, loading: false, onChanged() {}}));
+  // 用户点一条最近动态进来，看到的应该是聊天记录 + 一排按钮，而不是三个"还没有…"。
+  assert.doesNotMatch(empty, /没有未完成的待办|还没有记录|还没有填写/);
+  assert.match(empty, /＋ 待办/);
+  assert.match(empty, /＋ 跟进/);
+
+  const filled = ReactDOMServer.renderToStaticMarkup(h(C.ConversationExtras, {conversationKey: 'k', loading: false, onChanged() {},
+    data: {
+      customer: {stage: '已报价', nextStep: '周五回电', updatedAt: 1},
+      todos: [{id: 't1', title: '回他电话', state: 'open', source: 'manual'},
+              {id: 't2', title: '已经问过了', state: 'done', source: 'manual'}],
+      followups: [{id: 'f1', kind: '记录', note: '电话确认了报价', createdAt: 1}]
+    }}));
+  assert.match(filled, /回他电话/);
+  // 做完的收进折叠的「已完成」，并且**不划删除线**：横线是"取消"的语义。
+  assert.match(filled, /已完成 1 件/);
+  assert.doesNotMatch(filled, /line-through/);
 });

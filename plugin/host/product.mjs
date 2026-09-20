@@ -199,8 +199,13 @@ export function projectInbox({rules, jobs, bindings, drafts, reviewed = {}}) {
     let bucket = 'ok';
     let attentionReason = null;
     let attentionKind = null;
+    // 这条提醒能不能被"我知道了"消掉。只有来自**某条未确认的失败/不确定记录**的提醒才
+    // 消得掉；规则本身被拦住（blocked / waiting_connection）是状态问题，标一句"看过了"
+    // 也解决不了，所以那里不给按钮 —— 否则按钮点了没反应，比没有按钮更糟。
+    let acknowledgeable = false;
     if (rule.status === 'blocked' || rule.status === 'waiting_connection' || openProblem) {
       bucket = 'error';
+      acknowledgeable = !!openProblem;
       attentionKind = rule.status === 'waiting_connection' ? 'connection'
         : openProblem?.state === 'uncertain' || rule.status === 'blocked' ? 'send' : 'failed';
       attentionReason = codeMessage(rule.detail) || codeMessage(openProblem?.detail)
@@ -238,6 +243,7 @@ export function projectInbox({rules, jobs, bindings, drafts, reviewed = {}}) {
       bucket,
       attentionReason,
       attentionKind,
+      acknowledgeable,
       summary: latest?.text || humanizeDetail(latest?.detail) || humanizeDetail(rule.detail) || '',
       pendingDrafts: pendingDrafts.length,
       sessions: {
@@ -325,9 +331,10 @@ export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [
   // 「在做」排到最前：正在推进的那件比还没开始的更该在视线里。sort 在现代 V8 里是稳定的，
   // 所以同一组内部原来的排序（逾期 → 今天 → 以后 → 没有日期）不会被这次重排打乱。
   openTodos.sort((a, b) => (a.state === 'doing' ? 0 : 1) - (b.state === 'doing' ? 0 : 1));
-  // 做完的留在同一张清单的后面：点一下它就整条消失的话，用户看到的是"点了没打勾"，
-  // 也没有地方回看自己刚做完什么。
-  const todos = openTodos.concat((doneTodos ?? []).map(todo => ({...todo, kind: 'todo', id: 'todo:' + todo.id, todoId: todo.id, dueState: 'done'})));
+  // **做完的待办不再留在「待办」这一组**：它已经完成，混在"要做/在做"里只会让人一眼数不清
+  // 还剩几件（用户原话「已完成的放在已完成就行了，不要再展示在上面」）。它们统一进下面的
+  // 「已完成」，用状态标签表达结果，不划删除线 —— 横线是"取消"的语义，不是"做完了"。
+  const todos = openTodos;
   // 「已完成」原来只列助手的作业。用户自己点掉的那些（标为已看 / 处理完了）一条都不出现，
   // 于是"已完成"这件事在两处都查不到。现在合并成一张回执，每行写清**谁**把它处理成了什么样。
   const identityByRule = new Map(items.map(item => [item.rule.id, item]));
@@ -353,15 +360,27 @@ export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [
       state: 'done', updatedAt: entry.updatedAt
     });
   }
-  const receipts = handled.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, 8);
+  // 做完的待办也收在这里。identity 可能为空（自己手记的待办没挂联系人），所以渲染侧要
+  // 允许只有标题；也就是说这条回执说的是"哪件事做完了"，不一定是"跟谁的事"。
+  for (const todo of doneTodos ?? []) {
+    handled.push({
+      id: 'todo:' + todo.id, kind: 'handled', actor: 'you', todo: true,
+      conversationKey: todo.conversationKey ?? null,
+      identity: todo.identity ?? null,
+      title: todo.title, detail: '已完成',
+      state: 'done', updatedAt: todo.doneAt ?? todo.updatedAt
+    });
+  }
+  // 做完的待办现在也在这张单子上，所以上限放宽一点：它是"回看"，不是"待办"。
+  const receipts = handled.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, 12);
   // 自动回复自己卡住了（规则被拦住、读不到微信）不属于"分类"，是故障，界面用一行指路。
   // 待确认的草稿不重复计：它在上面那块里有自己的位置。
   const automation = items.filter(item => item.bucket === 'pending' && item.attentionKind !== 'draft').length;
   return {
     groups: [
       {key: 'confirm', title: '等你确认发送', hint: '正文已经拟好，确认后才会发出', items: confirm},
-      {key: 'todos', title: '待办', hint: '要做、在做、做完都在这里', items: todos},
-      {key: 'handled', title: '已完成', hint: '你和助手处理掉的，只留最近几条', items: receipts}
+      {key: 'todos', title: '待办', hint: '要做和在做；做完的收在下面的「已完成」', items: todos},
+      {key: 'handled', title: '已完成', hint: '做完的待办，以及你和助手处理掉的消息', items: receipts}
     ],
     counts: {
       todos: openTodos.length, doing: openTodos.filter(todo => todo.state === 'doing').length,
@@ -401,6 +420,19 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
     writeFileSync(reviewedPath, JSON.stringify(kept));
     return ids.length;
   };
+  /**
+   * 「我知道了」：把这条规则上还没确认的失败/不确定记录标成已看过。
+   *
+   * 这是**唯一**能让提醒消失的动作。首页与自动回复页以前只有「去处理」这个跳转，跳过去
+   * 也点不了任何东西，于是提醒一直挂着（用户实测报的就是这个）。
+   * 它只是"看过了"，绝不代表重试：发送结果不确定的那条永远不会自动重发。
+   */
+  async function reviewRule(ruleId) {
+    const status = await runtime.status();
+    return markReviewed((status.jobs ?? [])
+      .filter(job => job.rule_id === ruleId && (job.state === 'failed' || job.state === 'uncertain'))
+      .map(job => job.id));
+  }
 
   // ---- developer diagnostics -------------------------------------------------
   const devEnabled = devDiagnosticsEnabled(config);
@@ -1068,6 +1100,14 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
         respond(res, 200, {...answer, items});
         return true;
       }
+      // 首页与自动回复页共用的「我知道了」。
+      if (path === '/message-agent/api/automation/ack' && req.method === 'POST') {
+        const payload = await readBody(req);
+        const ruleId = typeof payload.ruleId === 'string' ? payload.ruleId : '';
+        if (!ruleId) throw Object.assign(new Error('缺少要处理的规则'), {code: 'CONTEXT_INVALID'});
+        respond(res, 200, {reviewed: await reviewRule(ruleId)});
+        return true;
+      }
       // ---- message centre (product design §14) ------------------------------
       if (path === '/message-agent/api/message-center' || path.startsWith('/message-agent/api/message-center/')) {
         await handleMessageCenter(req, res, url);
@@ -1339,12 +1379,9 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
           return true;
         }
         if (action === '/ack' && req.method === 'POST') {
-          const {status, items} = await aggregate();
+          const {items} = await aggregate();
           const target = requireItem(items, key);
-          const ids = (status.jobs ?? [])
-            .filter(job => job.rule_id === target.rule.id && (job.state === 'failed' || job.state === 'uncertain'))
-            .map(job => job.id);
-          respond(res, 200, {reviewed: markReviewed(ids)});
+          respond(res, 200, {reviewed: await reviewRule(target.rule.id)});
           return true;
         }
         if (action === '/ask' && req.method === 'POST') {
