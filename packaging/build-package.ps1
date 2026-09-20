@@ -34,8 +34,16 @@ param(
   [string]$NodeVersion = 'v22.23.0',
   [string]$PythonVersion = '3.13.12',
   [switch]$SkipEngine,
-  [switch]$SkipHashes
+  [switch]$SkipHashes,
+  [switch]$ForceEngine,
+  [string]$LogTo = ''
 )
+
+# 构建很久（引擎归档约 10 分钟、哈希 8 分钟），常常放在计划任务里跑。
+# 用 transcript 把完整输出落到文件，比在外面套重定向稳（不涉及嵌套引号）。
+if ($LogTo) {
+  try { Start-Transcript -LiteralPath $LogTo -Force | Out-Null } catch { Write-Host "无法写日志到 $LogTo：$($_.Exception.Message)" -ForegroundColor Yellow }
+}
 
 if (-not $OutDir)     { $OutDir = Join-Path $PSScriptRoot 'out' }
 if (-not $RepoRoot)   { $RepoRoot = Split-Path $PSScriptRoot -Parent }
@@ -49,6 +57,15 @@ function Say($t, $c = 'Gray') { Write-Host $t -ForegroundColor $c }
 function Step($t) { Say ''; Say "== $t" 'Cyan' }
 
 $package = Join-Path $OutDir 'package'
+# 引擎归档 1.5GB、重打要 8 分钟，清理旧包前先把它挪到旁边，清理完再放回。
+# （不加 -ForceEngine 时复用；这也是"改个脚本重打包"能几分钟搞定的原因。）
+$tarCache = Join-Path $OutDir 'harness.tar.cache'
+$existingTar = Join-Path $package 'engine\harness.tar'
+if ((Test-Path -LiteralPath $existingTar) -and -not $ForceEngine -and -not $SkipEngine) {
+  New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+  Move-Item -LiteralPath $existingTar -Destination $tarCache -Force
+  Say ''; Say "复用上次打好的引擎归档（改包不重打；要重打加 -ForceEngine）" 'DarkGray'
+}
 if (Test-Path -LiteralPath $package) {
   # 清理旧包**不能用 Remove-Item**：它和 Copy-Item 一样受 260 字符路径限制，
   # 而引擎的 node_modules 里随手就是超长路径（实测报"对路径 someLimit.js 的访问被拒绝"，
@@ -61,6 +78,10 @@ if (Test-Path -LiteralPath $package) {
   if (Test-Path -LiteralPath $package) { throw "清理旧包失败（$package 还在）。手动删掉它再重试。" }
 }
 New-Item -ItemType Directory -Force -Path $package | Out-Null
+if (Test-Path -LiteralPath $tarCache) {
+  New-Item -ItemType Directory -Force -Path (Join-Path $package 'engine') | Out-Null
+  Move-Item -LiteralPath $tarCache -Destination (Join-Path $package 'engine\harness.tar') -Force
+}
 
 # -- 1. 产品本体 ------------------------------------------------------------
 Step '复制产品本体'
@@ -155,41 +176,59 @@ if ($SkipEngine) {
   Say '    按要求跳过引擎' 'Yellow'
 } else {
   if (-not (Test-Path -LiteralPath (Join-Path $EngineRoot 'apps\cli\src\bin.ts'))) { throw "引擎目录不对：$EngineRoot" }
-  $engineOut = Join-Path $package 'engine\harness'
+  $engineOut = Join-Path $package 'engine'
   New-Item -ItemType Directory -Force -Path $engineOut | Out-Null
-  Say '    正在复制引擎（体积大，耐心等；用 robocopy）…' 'DarkGray'
+  $tarPath = Join-Path $engineOut 'harness.tar'
   #
-  # 为什么必须用 robocopy 而不是 Copy-Item：
-  #  1) pnpm 的 node_modules 里全是符号链接/junction，树很深，**路径经常超过 260 字符**，
-  #     Copy-Item 到这些文件会直接失败；robocopy 原生支持长路径。
-  #  2) robocopy 可以按目录名排除，并且默认把 junction 的内容复制成真实目录 ——
-  #     复制出来的树不依赖原来的链接，给用户时才不会指向开发机的路径。
-  $excludeDirs = @('.git', '.github', '.claude', '.agents', 'snapshots', 'coverage', 'node_modules\.cache')
-  $args = @($EngineRoot, $engineOut, '/E', '/MT:16', '/NFL', '/NDL', '/NJH', '/NJS', '/R:1', '/W:1',
-            '/XF', '*.tsbuildinfo', '*.log')
-  foreach ($dir in $excludeDirs) { $args += @('/XD', (Join-Path $EngineRoot $dir)) }
-  & robocopy @args | Out-Null
-  # robocopy 的退出码：0-7 都是成功（1=有文件被复制），>=8 才是失败
-  if ($LASTEXITCODE -ge 8) { throw "复制引擎失败（robocopy 退出码 $LASTEXITCODE）" }
-
-  # 自检：入口和关键依赖必须在，否则等于发了一个跑不起来的引擎
-  foreach ($must in 'apps\cli\src\bin.ts', 'node_modules\tsx', 'package.json') {
-    if (-not (Test-Path -LiteralPath (Join-Path $engineOut $must))) { throw "引擎复制后缺少 $must，中止打包。" }
+  # 为什么要打成 tar 而不是复制目录：
+  #  engine 有 7.4 万个文件（其中 node_modules 5.6 万），逐文件复制在慢盘上实测只有
+  #  ~28 文件/秒（3 MB/s），要 45 分钟以上；`tar -cf` 一次写一个流实测 121 文件/秒，
+  #  快 4 倍，而且**交付物只有一个文件**，看起来也干净，安装时一次解包即可。
+  #  Windows 10 起自带 bsdtar（tar.exe），不额外依赖。
+  #
+  #
+  Say '    处理引擎归档…' 'DarkGray'
+  $reuse = (Test-Path -LiteralPath $tarPath) -and ((Get-Item -LiteralPath $tarPath).Length -gt 100MB) -and -not $ForceEngine
+  if ($reuse) {
+    Say '    复用已有归档（要重打加 -ForceEngine）' 'DarkGray'
+  } else {
+    Say '    正在打成单个归档（约 10 分钟，请耐心等）…' 'DarkGray'
+    if (Test-Path -LiteralPath $tarPath) { Remove-Item -LiteralPath $tarPath -Force }
+    # 排除开发用的东西：agent 笔记、CI、测试快照、编辑器配置。运行时不需要。
+    # 不加 -L（跟随链接）：pnpm 的链接**都是相对路径**（如
+    # `.pnpm\tsx@4.22.4\node_modules\tsx`、`../../../../node_modules/.pnpm/...`），
+    # 原样存成链接后解包仍能正确解析 —— 而且省掉几倍的重复内容。
+    $excludes = @('--exclude=./.git', '--exclude=./.github', '--exclude=./.agents', '--exclude=./.claude',
+                  '--exclude=./snapshots', '--exclude=./coverage', '--exclude=*.tsbuildinfo')
+    & tar -cf $tarPath @excludes -C $EngineRoot .
+    if ($LASTEXITCODE -ne 0) { throw "打包引擎失败（tar 退出码 $LASTEXITCODE）" }
+    if (-not (Test-Path -LiteralPath $tarPath)) { throw '引擎归档没有生成。' }
   }
-  $engineMB = (Get-ChildItem -LiteralPath $engineOut -Recurse -File -ErrorAction SilentlyContinue |
-    Measure-Object Length -Sum).Sum / 1MB
-  Say ("    engine\harness -> {0:N0} MB（已排除 .git / .github / .claude / snapshots）" -f $engineMB) 'Green'
+  $tarMB = (Get-Item -LiteralPath $tarPath).Length / 1MB
+
+  # 自检：入口必须是个真文件；tsx 在归档里是**符号链接**，所以不能按
+  # `node_modules/tsx/package.json` 去找（第一次就是这么误报"缺少 tsx"的），
+  # 要按它真正落地的位置找：.pnpm 里的实体。
+  $listing = & tar -tf $tarPath
+  if ($listing -notcontains './apps/cli/src/bin.ts') { throw '引擎归档里缺少 ./apps/cli/src/bin.ts，中止打包。' }
+  $hasTsx = ($listing | Where-Object { $_ -match '^\./node_modules/\.pnpm/tsx@[^/]+/node_modules/tsx/package\.json$' } | Select-Object -First 1)
+  if (-not $hasTsx) { throw '引擎归档里没有 tsx（.pnpm 下的实体），中止打包。' }
+  Say ("    engine\harness.tar -> {0:N0} MB（已排除 .git/.github/.agents/.claude/snapshots）" -f $tarMB) 'Green'
 }
 
 # -- 5. 脚本与说明 ----------------------------------------------------------
 Step '复制安装脚本与说明'
-foreach ($f in 'install.ps1', 'start.ps1', 'stop.ps1', 'restart.ps1', 'uninstall.ps1',
-               'MessageAgent.cmd', 'config.template.json', 'make_config.py') {
-  Copy-Item -LiteralPath (Join-Path $PSScriptRoot $f) -Destination $package -Force
+# **按类型整体复制，不列白名单**。之前是手写清单，结果 install.ps1 里加了
+# wechat_keys.py / 读取微信密钥.ps1，这里忘加 —— 装完第 7 步报"脚本不存在"。
+# 这类清单漂移只能靠"不列清单"根治。
+$copied = 0
+foreach ($file in (Get-ChildItem -LiteralPath $PSScriptRoot -File |
+    Where-Object { $_.Extension -in '.ps1', '.py', '.cmd', '.md', '.json' -and $_.Name -ne 'build-package.ps1' })) {
+  Copy-Item -LiteralPath $file.FullName -Destination $package -Force
+  $copied++
 }
-if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '安装说明.md')) {
-  Copy-Item -LiteralPath (Join-Path $PSScriptRoot '安装说明.md') -Destination $package -Force
-}
+if (-not (Test-Path -LiteralPath (Join-Path $package 'install.ps1'))) { throw '安装脚本没有复制进包，中止。' }
+if (-not (Test-Path -LiteralPath (Join-Path $package 'wechat_keys.py'))) { throw 'wechat_keys.py 没有复制进包，中止。' }
 # PowerShell 5.1 读取 .ps1 时，没有 BOM 就按 ANSI(GBK) 解释 —— 脚本里的中文会变成乱码，
 # 而且常常直接**语法错误**（引号被吃掉、字符串缺终止符），报错信息还完全看不懂。
 # 这里统一补 BOM，避免"用别的编辑器改一下就装不了"。
@@ -197,7 +236,7 @@ foreach ($script in (Get-ChildItem -LiteralPath $package -Filter '*.ps1' -File))
   $text = [IO.File]::ReadAllText($script.FullName, [Text.UTF8Encoding]::new($false))
   [IO.File]::WriteAllText($script.FullName, $text, [Text.UTF8Encoding]::new($true))
 }
-Say '    install/start/stop/restart/uninstall + 说明（已统一 UTF-8 BOM）' 'Green'
+Say ("    脚本与说明 {0} 个（已统一 UTF-8 BOM）" -f $copied) 'Green'
 
 # -- 6. 清单 ----------------------------------------------------------------
 Step '生成 manifest.json'
@@ -218,8 +257,8 @@ $repoHead = Git-Rev $RepoRoot
 $dbLabHead = Git-Rev $DbLabRoot
 $files = @()
 if (-not $SkipHashes) {
-  $all = Get-ChildItem -LiteralPath $package -Recurse -File |
-    Where-Object { $_.FullName -notmatch '\\engine\\harness\\node_modules\\' }
+  # 引擎是单个归档，所以这里**不做例外**都要算哈希 —— 最大的那块恰恰最需要可校验。
+  $all = Get-ChildItem -LiteralPath $package -Recurse -File
   $i = 0
   foreach ($f in $all) {
     $i++
@@ -247,12 +286,15 @@ $manifest = [ordered]@{
 }
 [IO.File]::WriteAllText((Join-Path $package 'manifest.json'),
   ($manifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
-Say ("    manifest.json：{0} 个文件（引擎的 node_modules 不计入）" -f $files.Count) 'Green'
+Say ("    manifest.json：{0} 个文件（含引擎归档的哈希）" -f $files.Count) 'Green'
 
 $size = (Get-ChildItem -LiteralPath $package -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
 Say ''
 Say ("打包完成：{0}" -f $package) 'Green'
 Say ("总体积：{0:N1} MB" -f $size) 'Green'
 Say ''
-Say '下一步（自己用）：' 'White'
-Say ("  powershell -ExecutionPolicy Bypass -File `"$package\install.ps1`" -EngineRoot <引擎目录>") 'White'
+Say '下一步：' 'White'
+Say ("  powershell -ExecutionPolicy Bypass -File `"$package\install.ps1`"") 'White'
+Say '（引擎已随包提供，安装时不需要再指定 -EngineRoot）' 'DarkGray'
+
+if ($LogTo) { try { Stop-Transcript | Out-Null } catch { } }

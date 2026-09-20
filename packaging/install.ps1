@@ -101,8 +101,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $Source 'app\launch.py'))) {
 if (-not $EngineRoot) { $EngineRoot = Join-Path $Source 'engine\harness' }
 if (-not $RuntimeRoot) { $RuntimeRoot = (Get-ItemProperty 'HKCU:\Software\MessagingRuntime' -ErrorAction SilentlyContinue).Root }
 if (-not $RuntimeRoot) { $RuntimeRoot = Join-Path $env:LOCALAPPDATA 'Programs\MessagingRuntime' }
-if (-not (Test-Path -LiteralPath (Join-Path $EngineRoot 'apps\cli\src\bin.ts'))) {
-  Die "找不到消息引擎（$EngineRoot）。它应该随安装包一起提供；如果你是开发者，可以用 -EngineRoot 指定引擎目录。"
+# 引擎有两种随包形式：目录（开发/自用）或单个归档（正式分发，见 build-package.ps1）。
+if (-not (Test-Path -LiteralPath (Join-Path $EngineRoot 'apps\cli\src\bin.ts')) -and
+    -not (Test-Path -LiteralPath (Join-Path $Source 'engine\harness.tar'))) {
+  Die "找不到消息引擎（既没有 $EngineRoot，也没有 engine\harness.tar）。发给用户的包必须带引擎；开发者可以用 -EngineRoot 指定引擎目录。"
 }
 if (-not (Test-Path -LiteralPath (Join-Path $RuntimeRoot '.runtime-data\shared-service.json'))) {
   Warn "没有找到消息服务的数据目录（$RuntimeRoot\.runtime-data）。如果消息服务装在别处，请用 -RuntimeRoot 指定。"
@@ -180,8 +182,8 @@ if ($EngineRoot -and (Test-Path -LiteralPath (Join-Path $EngineRoot 'apps\cli\sr
   if ($engineInside) {
     Ok '引擎已在安装目录内，跳过复制'
   } else {
-    Say '    正在安装消息引擎（体积大，请耐心等）…' 'DarkGray'
     $engineTarget = Join-Path $InstallDir 'engine\harness'
+    Say '    正在安装消息引擎（体积大，请耐心等）…' 'DarkGray'
     New-Item -ItemType Directory -Force -Path $engineTarget | Out-Null
     & robocopy $EngineRoot $engineTarget /E /MT:16 /NFL /NDL /NJH /NJS /R:1 /W:1 | Out-Null
     if ($LASTEXITCODE -ge 8) { Die "安装引擎失败（robocopy 退出码 $LASTEXITCODE）。" }
@@ -191,8 +193,20 @@ if ($EngineRoot -and (Test-Path -LiteralPath (Join-Path $EngineRoot 'apps\cli\sr
     $EngineRoot = $engineTarget
     Ok '消息引擎就位'
   }
+} elseif (Test-Path -LiteralPath (Join-Path $Source 'engine\harness.tar')) {
+  # 引擎以单个归档形式随包提供：一次解包，比逐文件复制快得多（Windows 10 起自带 tar）。
+  $engineTarget = Join-Path $InstallDir 'engine\harness'
+  New-Item -ItemType Directory -Force -Path $engineTarget | Out-Null
+  Say '    正在解开消息引擎（体积大，请耐心等）…' 'DarkGray'
+  & tar -xf (Join-Path $Source 'engine\harness.tar') -C $engineTarget
+  if ($LASTEXITCODE -ne 0) { Die "解包引擎失败（tar 退出码 $LASTEXITCODE）。" }
+  foreach ($must in 'apps\cli\src\bin.ts', 'node_modules\tsx') {
+    if (-not (Test-Path -LiteralPath (Join-Path $engineTarget $must))) { Die "引擎解包后缺少 $must，安装中止。" }
+  }
+  $EngineRoot = $engineTarget
+  Ok '消息引擎就位'
 } else {
-  Die "安装包里没有消息引擎（$EngineRoot）。发给用户的包必须带引擎，请重新打包。"
+  Die "安装包里没有消息引擎（也没找到 engine\harness.tar）。发给用户的包必须带引擎，请重新打包。"
 }
 
 # --------------------------------------------------------------------------
