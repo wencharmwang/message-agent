@@ -54,3 +54,15 @@ Windows 登录任务 `Messaging Agent` 托管 `launch.py`，共同管理 Harness
 代价是数据源依赖解密缓存：拿不到密钥时整条读取链路为空（此时首页会直说"还没有读到会话"），而不会退化成读错内容。
 
 验证包括后台微信只读探测、原生 Harness 真实模型任务、模拟消息端到端测试（回复、暂停、去重）、同一会话多轮续聊及重启恢复、联系人隔离，以及上层和 Runtime/WeChat 回归测试。界面另有两层自动化体检：`plugin/client-render.test.mjs` 钉住界面约定（导航结构、"回到对话框"只在开发者模式出现、OCR 版整理页不得复活），`plugin/client-smoke.test.mjs` 用 react-dom/server 把每个页面真的渲染一遍，抓"白屏"这类只有打开页面才会发现的错误。会话复用测试使用模拟消息，不向真实联系人发送测试消息。
+
+## 文档
+
+| 文档 | 讲什么 |
+| --- | --- |
+| [architecture.md](docs/architecture.md) | 分层、数据流、模块边界 |
+| [message-home-design.md](docs/message-home-design.md) | 「消息」首页的产品约定与实现取舍（含逐条钉住的用户要求） |
+| [manual-message-organizer.md](docs/manual-message-organizer.md) | 手动触发的消息整理链路 |
+| [auto-reply-context-system.md](docs/auto-reply-context-system.md) | 自动回复的上下文构成与发送治理 |
+| [knowledge-base.md](docs/knowledge-base.md) | 知识库：分类、风险等级、引用方式 |
+| [message-center-product-design.md](docs/message-center-product-design.md) | 消息中心（历史方案；`plugin/host/message-center.mjs` 仍按其 §2 实现） |
+| [packaging-plan.md](docs/packaging-plan.md) | 打包与交付方案（**待评估**）：一键安装、模型 key、微信密钥保管、明文副本策略 |
