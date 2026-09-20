@@ -85,6 +85,30 @@ test('会话页不做 CRM，完成的条目不划删除线', () => {
   assert.doesNotMatch(code, /line-through/, '删除线是"作废"的语义，别拿它表示完成');
 });
 
+test('导航图标按用户逐条指认的形状', () => {
+  assert.match(source, /const NAV_ICON=\{home:'home',messages:'messages',today:'check',customers:'contacts',automation:'automation',context:'settings'\}/);
+  // 待办 = 一个勾（不带框）；设置 = 通用齿轮；回复配置沿用原来那颗圆盘 + 辐条。
+  assert.match(source, /check:'M4\.8 10\.7 8\.4 14\.3 15\.4 7\.1'/);
+  assert.match(source, /gear:'M10 3\.2/);
+  // 消息沿用原「待办」那个圆角方框的外形，里面是两行消息线（原样搬过来框里是勾，会撞脸）。
+  assert.match(source, /home:'M4\.2 4\.5h11\.6[^']*M6\.7 8\.6h6\.6M6\.7 11\.5h4\.3'/);
+  assert.match(source, /h\(Icon,\{name:'gear',size:18\}\),narrow\?null:'设置'/);
+});
+
+test('图标按钮够大、位置固定，文案不啰嗦', () => {
+  // 纯图标按钮外面必须留点击留白，否则"看不清、点不准"。
+  assert.match(source, /const iconButton=\{border:'none'[\s\S]*?padding:6/);
+  assert.match(source, /h\(Icon,\{name:fromAssistant\?'spark':'person',size:16\}\)/, '来源图标要 16px（原来是 13px）');
+  assert.match(source, /h\(Icon,\{name:'trash',size:16\}\)/, '删除图标要 16px');
+  // 「返回」本来就是回上一级，不要再写"全部消息"。
+  assert.match(source, /title:'返回消息列表'/);
+  assert.doesNotMatch(source, /← 全部消息/);
+  // 待办页的主按钮叫「＋ 待办」，别写成「＋ 加一条待办」。
+  const page = source.slice(source.indexOf('function TodayPage('), source.indexOf('function CustomersPage('));
+  assert.match(page, /'＋ 待办'/);
+  assert.doesNotMatch(page, /＋ 加一条待办/);
+});
+
 test('界面不提"数据库"这类实现细节', () => {
   // 用户明确要求：界面上不能出现读取本地数据库的说法。检查所有**字符串字面量**里的
   // 相关词——注释里为开发保留说明是允许的（`//` 与 `*` 开头的行不算）。

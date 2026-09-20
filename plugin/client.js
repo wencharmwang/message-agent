@@ -654,6 +654,14 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   const h1={margin:'0 0 6px',fontSize:28,lineHeight:1.25,letterSpacing:'-.02em',color:C.text};
   const h2={margin:'0 0 12px',fontSize:16,color:C.text};
   const h3={margin:'0 0 10px',fontSize:15,color:C.text};
+  /**
+   * 纯图标按钮（删除这类）。
+   *
+   * 图标和文字按钮不同，它没有可点的面积感，所以外面必须留一圈留白 —— 用户实测
+   * 「太小了，看不清，操作不方便」。6px 内边距 + 16px 图标 ≈ 28px 的点击区域。
+   */
+  const iconButton={border:'none',background:'transparent',color:C.text3,cursor:'pointer',
+    padding:6,lineHeight:0,display:'inline-flex',alignItems:'center',justifyContent:'center',flexShrink:0};
 
   // Every label answers "what does this mean for me", never which subsystem produced it.
   const JOB={queued:'排队中',generating:'正在准备回复',ready:'回复已备好',sending:'正在发送',sent:'已发送',failed:'没有处理成功',cancelled:'已取消',uncertain:'发送结果待确认',not_sent:'没有发出去',done:'处理完成',skipped:'无需回复',skip:'无需回复',needs_user:'交给你处理',expired:'已过期'};
@@ -757,7 +765,15 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   // Monochrome icons: they inherit the surrounding text colour via currentColor, so the
   // same glyph reads correctly on a light or dark host theme. Colour emoji cannot do that.
   const ICONS={
-    home:'M3 9.3 10 3.4l7 5.9v6.2a1 1 0 0 1-1 1h-3.4v-4.2H7.4v4.2H4a1 1 0 0 1-1-1V9.3Z',
+    // 导航图标。四条要求都来自用户逐条指认：消息要"一个消息样子"、待办要一个勾、
+    // 回复配置沿用原来设置那颗（圆盘 + 辐条）、设置换成通用齿轮。
+    // 消息沿用原来「待办」那个圆角方框的外形（用户要的就是这个形状），里面换成两行消息线 ——
+    // 原样搬过来框里是个勾，会和待办撞脸。
+    home:'M4.2 4.5h11.6a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4.2a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1ZM6.7 8.6h6.6M6.7 11.5h4.3',
+    // 待办：一个勾，不带框。
+    check:'M4.8 10.7 8.4 14.3 15.4 7.1',
+    // 设置：通用齿轮（外齿 + 内圆）。
+    gear:'M10 3.2 12.6 5.6 15.9 6.6 15.1 10 15.9 13.4 12.6 14.4 10 16.8 7.4 14.4 4.1 13.4 4.9 10 4.1 6.6 7.4 5.6ZM12.3 10a2.3 2.3 0 1 1-4.6 0 2.3 2.3 0 0 1 4.6 0Z',
     // 待办来源：一颗星 = 助手记的，一个人形 = 自己记的。只有图标、没有文字。
     spark:'M10 3.4l1.55 4.05L15.6 9l-4.05 1.55L10 14.6 8.45 10.55 4.4 9l4.05-1.55L10 3.4Z',
     person:'M10 9.3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 6.2c0-2.2 2.7-3.7 6-3.7s6 1.5 6 3.7',
@@ -1264,7 +1280,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     // 被塞进"不可收缩的页头"里 —— 页面看着在，滚不动（实测踩到过）。
     const header=h('div',{style:{flexShrink:0,padding:'14px clamp(16px,3vw,32px) 12px',borderBottom:'1px solid '+C.border,
       display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}},
-      h('button',{onClick:back,style:{...small(false),flexShrink:0}},'← 全部消息'),
+      h('button',{onClick:back,title:'返回消息列表',style:{...small(false),flexShrink:0}},'返回'),
       h('h1',{style:{...h1,fontSize:19,margin:0,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},
         data?.identity?.title||title||username),
       h('span',{style:{...pill(kind==='group'?C.text3:C.brand),fontSize:12,flexShrink:0}},kind==='group'?'群聊':'单聊'),
@@ -1531,17 +1547,17 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           doing&&h('span',{style:pill(C.brand)},'在做'),
           !done&&due&&h('span',{style:pill(due.color)},due.text),
           todo.identity&&h('span',{style:{fontSize:13,color:C.text3}},'来自 '+todo.identity.title),
-          h('span',{title:sourceTitle,'aria-label':sourceTitle,style:{display:'inline-flex',alignItems:'center',color:C.text3}},
-            h(Icon,{name:fromAssistant?'spark':'person',size:13})))),
-      done
-        // 做完的只留一个删除 —— 「在做 / 明天」对已经结束的事没有意义。
-        ? h('button',{onClick:()=>onAction('delete',todo),disabled:busy,title:'删除这条待办','aria-label':'删除这条待办',
-            style:{border:'none',background:'transparent',color:C.text3,cursor:busy?'default':'pointer',padding:6,flexShrink:0,lineHeight:0}},
-            h(Icon,{name:'trash',size:15}))
-        : h('div',{style:{display:'flex',gap:6,flexShrink:0}},
-            h('button',{onClick:()=>onAction(doing?'reopen':'doing',todo),disabled:busy,style:small(false)},doing?'放回待办':'在做'),
-            h('button',{onClick:()=>onAction('tomorrow',todo),disabled:busy,style:small(false)},'明天'),
-            h('button',{onClick:()=>onAction('delete',todo),disabled:busy,style:small(false,true)},'删除')));
+          // 来源与删除都放在这一行、同一个尺寸。13px 的时候用户看不清也点不准
+          // （原话「太小了，看不清，操作不方便」），所以图标本身放大，外面再给一圈点击留白。
+          h('span',{style:{display:'inline-flex',alignItems:'center',gap:14,marginLeft:2}},
+            h('span',{title:sourceTitle,'aria-label':sourceTitle,style:{display:'inline-flex',alignItems:'center',color:C.text3}},
+              h(Icon,{name:fromAssistant?'spark':'person',size:16})),
+            done&&h('button',{onClick:()=>onAction('delete',todo),disabled:busy,title:'删除这条待办','aria-label':'删除这条待办',
+              style:iconButton},h(Icon,{name:'trash',size:16}))))),
+      !done&&h('div',{style:{display:'flex',gap:6,flexShrink:0}},
+        h('button',{onClick:()=>onAction(doing?'reopen':'doing',todo),disabled:busy,style:small(false)},doing?'放回待办':'在做'),
+        h('button',{onClick:()=>onAction('tomorrow',todo),disabled:busy,style:small(false)},'明天'),
+        h('button',{onClick:()=>onAction('delete',todo),disabled:busy,style:small(false,true)},'删除')));
   }
 
   function TodayPage({store,ctx}){
@@ -1604,7 +1620,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           h('div',null,
             h('h1',h1,'待办'),
             h('p',{style:{margin:'0 0 4px',color:C.text2,fontSize:14,lineHeight:1.8}},total?('还有 '+total+' 件要做。勾掉就完成，做完的收在下面。'):'没有要做的事了。')),
-          h('button',{onClick:()=>setAdding(true),style:button(true)},'＋ 加一条待办')),
+          h('button',{onClick:()=>setAdding(true),style:button(true)},'＋ 待办')),
         h(Notice,{error:error||today.error}),
         // 自动回复自己卡住了（规则被拦住 / 读不到微信）不是"分类"，是故障，用一行指路，
         // 不占一块任务区，也不参与红点计数。
@@ -1619,7 +1635,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
             h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:10,marginBottom:8}},
               h('h2',{style:{...h2,margin:0}},group.title+(items.length?(' · '+items.length+' 件'):'')),
               group.hint&&h('span',{style:{fontSize:13,color:C.text3}},group.hint)),
-            !items.length&&h('p',{style:{...hint,padding:'10px 0'}},'还没有待办。点右上角「加一条待办」，或者在「消息」里把一件事记成待办。'),
+            !items.length&&h('p',{style:{...hint,padding:'10px 0'}},'还没有待办。点右上角「＋ 待办」，或者在「消息」里把一件事记成待办。'),
             !!items.length&&h('div',{style:{border:'1px solid '+C.border,borderRadius:14,background:C.panel,overflow:'hidden'}},
               items.map(entry=>{
                 if(entry.kind==='new')return h('div',{key:'new',style:{padding:'13px 15px'}},h(Composer,{mode:'todo',fixedMode:true,setMode:()=>{},busy,onSubmit:addTodo}));
@@ -1644,16 +1660,15 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
               const title=(entry.identity&&entry.identity.title)||entry.title||'（未命名）';
               if(entry.todo){
                 // 做完了的待办：**不再标一次「已完成」**（它就列在这一组里，状态本来就清楚），
-                // 也不再写"你自己记下的一件待办"（啰嗦）—— 来源只留一个图标，删除只留一个图标。
+                // 也不再写"你自己记下的一件待办"（啰嗦）。来源和删除都放在第二行、同一个尺寸 ——
+                // 用户实测：13px 的图标看不清也点不准。
                 const fromAssistant=entry.source==='assistant',sourceTitle=fromAssistant?'助手记的':'自己记的';
-                return h(Row,{key:entry.id,title,
-                  right:h('span',{style:{display:'inline-flex',alignItems:'center',gap:8,flexShrink:0}},
-                    relativeTime(entry.updatedAt),
+                return h(Row,{key:entry.id,title,right:relativeTime(entry.updatedAt),
+                  meta:h('span',{style:{display:'inline-flex',alignItems:'center',gap:14}},
+                    h('span',{title:sourceTitle,'aria-label':sourceTitle,style:{display:'inline-flex',alignItems:'center',color:C.text3}},
+                      h(Icon,{name:fromAssistant?'spark':'person',size:16})),
                     h('button',{onClick:()=>deleteDoneTodo(entry),disabled:busy,title:'删除这条待办','aria-label':'删除这条待办',
-                      style:{border:'none',background:'transparent',color:C.text3,cursor:busy?'default':'pointer',padding:2,lineHeight:0}},
-                      h(Icon,{name:'trash',size:15}))),
-                  meta:h('span',{title:sourceTitle,'aria-label':sourceTitle,style:{display:'inline-flex',alignItems:'center',color:C.text3}},
-                    h(Icon,{name:fromAssistant?'spark':'person',size:13}))});
+                      style:iconButton},h(Icon,{name:'trash',size:16})))});
               }
               return h(Row,{key:entry.id,title,right:relativeTime(entry.updatedAt),
                 // 写清是谁处理掉的、处理成了什么样。「已处理」三个字既没说人也没说事，
@@ -2195,7 +2210,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   // 首屏是「消息」：关键信息 + 关键操作 + 对话。主动查消息不再需要回到原生对话框 ——
   // 产品自己的对话区走的是同一个 Agent，而且每次提问都会带上最新消息。
   const NAV=[['home','消息'],['todos','待办'],['automation','自动回复'],['context','回复配置']];
-  const NAV_ICON={home:'home',messages:'messages',today:'today',customers:'contacts',automation:'automation',context:'context'};
+  const NAV_ICON={home:'home',messages:'messages',today:'check',customers:'contacts',automation:'automation',context:'settings'};
   function NavEntry({store,wide}){
     const {open}=useStore(store);
     return h('button',{onClick:()=>store.set({open:!open,cover:true,tab:'home'}),title:'消息',
@@ -2232,7 +2247,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       h('button',{onClick:()=>store.set({tab:'settings'}),'aria-current':tab==='settings'?'page':undefined,title:'设置',
         'data-active':tab==='settings'?'':undefined,className:'lg-navitem',
         style:{minHeight:46,padding:'11px 12px',cursor:'pointer',textAlign:narrow?'center':'left',fontSize:14,display:'flex',alignItems:'center',gap:10,justifyContent:narrow?'center':'flex-start'}},
-        h(Icon,{name:'settings',size:18}),narrow?null:'设置'),
+        h(Icon,{name:'gear',size:18}),narrow?null:'设置'),
       dev&&h('button',{ref:closeRef,onClick:()=>store.set({open:false,cover:false}),title:'回到原生对话框（开发用）',
         className:'lg-navitem lg-quiet',style:{minHeight:42,padding:'9px 12px',cursor:'pointer',fontSize:13,textAlign:narrow?'center':'left'}},
         narrow?'原生':'← 原生对话框'));
