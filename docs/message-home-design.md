@@ -139,8 +139,21 @@ POST /api/home/organize
 - 被拖的那张**垫实底**（`--ma-surface`）、**不淡化**，用虚线框标出"它是被拿走的那张"。
 - 落点用**实线 + 品牌色**，和被拖的虚线分开，两者不会看错。
 - 跟着光标走的那块影像也要不透明：浏览器默认给的是"按下那一刻的快照"（同样是玻璃底，
-  糊）。用 `dragGhost()` 复制一份、垫上 `--ma-surface` 再交给 `setDragImage`，
-  用完 `setTimeout(…,0)` 移除。
+  糊）。用 `dragGhost()` 复制一份交给 `setDragImage`，两个细节都不能省：
+  - **要连子元素一起压成不透明**（`.ma-drag-ghost *{background-color:transparent!important}`）。
+    只给最外层涂色不够 —— 卡片自己的半透明底在它上面，照样透光。
+  - **影像元素要活到松手**（`dragend` / `drop` 再移除）。用 `setTimeout(…,0)` 移除会踩坑：
+    Chrome 要等这一帧才真的去取影像，元素提前没了就退回默认快照 —— 表现就是"改了还是不清晰"。
+
+### Esc 的归属
+
+Esc 在全局是"往回退一步"，但它**必须先归正在编辑的控件**：输入框里的 Esc 会冒泡到
+document 上那个监听，实测踩过"在待办里改文案，按 Esc 直接退出了消息助手"。两层都要做：
+
+1. 全局监听在焦点属于 `INPUT` / `TEXTAREA` / `SELECT` / contenteditable 时直接返回；
+2. 控件自己的 Esc 处理调 `stopPropagation()`（Enter 同理，保存不该触发全局行为）。
+
+这样在输入框里按 Esc 只退出编辑，焦点回到页面后再按才收起面板 —— 逐级后退，符合预期。
 
 ## 会话视图里放什么
 

@@ -156,8 +156,10 @@ test('未完成的待办可以双击改文案、改到期时间', () => {
   // 编辑态：文案 + 到期时间 + 回车保存 / Esc 取消。
   assert.match(row, /type:'date'/);
   assert.match(row, /'aria-label':'到期时间'/);
-  assert.match(row, /if\(event\.key==='Enter'\)save\(\)/);
-  assert.match(row, /if\(event\.key==='Escape'\)setEditing\(false\)/);
+  // Esc / 回车都要**拦住冒泡**：全局那个 Esc 监听会顺手收起整个面板
+  // （实测："修改时按 Esc 直接退出了消息助手"）。
+  assert.match(row, /if\(event\.key==='Escape'\)\{event\.stopPropagation\(\);setEditing\(false\);\}/);
+  assert.match(row, /if\(event\.key==='Enter'\)\{event\.stopPropagation\(\);save\(\);\}/);
   // 空标题不提交（服务端也会拒）。
   assert.match(row, /if\(!title\|\|busy\)return;/);
   // 还有一个不依赖双击的入口：鼠标党不一定想得到要双击。
@@ -194,11 +196,26 @@ test('拖动时卡片要有实底，不能靠淡化表示"正在拖"', () => {
   // 落点用实线 + 品牌色，和被拖的虚线分开。
   assert.match(page, /outline:'2px dashed '\+C\.brand/);
   assert.match(page, /outline:'2px solid '\+C\.brand/);
-  // 跟着光标走的影像也要不透明：浏览器默认给的是拖动前快照（玻璃底，糊）。
+  // 跟着光标走的影像：只给最外层涂色不够（卡片自己的半透明底在它上面，照样透光），
+  // 要靠 .ma-drag-ghost 那两条规则**连子元素一起**压成不透明。
   assert.match(page, /function dragGhost\(event\)/);
+  assert.match(page, /ghost\.className='ma-drag-ghost'/);
   assert.match(page, /setDragImage\(ghost,24,20\)/);
-  assert.match(page, /ghost\.style\.backgroundColor='var\(--ma-surface\)'/);
-  assert.ok(page.indexOf('document.body.appendChild(ghost)') < page.indexOf('setDragImage(ghost'));
+  assert.match(source, /\.ma-drag-ghost\{background-color:var\(--ma-surface\)!important/);
+  assert.match(source, /\.ma-drag-ghost \*\{background-color:transparent!important/);
+  // 影像元素要活到松手：Chrome 要等这一帧才真的取影像，提前移除就退回默认快照。
+  assert.match(page, /ghostRef\.current=ghost/);
+  assert.match(page, /function clearGhost\(\)/);
+  assert.match(page, /onDragEnd:\(\)=>\{clearGhost\(\)/);
+  assert.doesNotMatch(page, /setTimeout\(\(\)=>ghost\.remove\(\),0\)/);
+});
+
+test('在输入框里按 Esc 不会把整个消息助手关掉', () => {
+  // 全局 Esc 监听在 document 上，输入框里的 Esc 会冒泡上去把面板收起来
+  // （实测："修改时按 Esc 直接退出了消息助手"）。
+  const key = source.slice(source.indexOf("const key=event=>{"), source.indexOf("document.addEventListener('keydown',key)"));
+  assert.match(key, /event\.key!=='Escape'/);
+  assert.match(key, /target\.tagName==='INPUT'\|\|target\.tagName==='TEXTAREA'\|\|target\.tagName==='SELECT'\|\|target\.isContentEditable/);
 });
 
 test('两个任务各配各的模型（自动回复 / 整理消息），都支持本地模型', () => {

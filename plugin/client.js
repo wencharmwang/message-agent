@@ -1636,7 +1636,12 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       return h('div',{style:{padding:'13px 15px',borderBottom:'1px solid '+C.border}},
         h('div',{style:{display:'flex',gap:8,alignItems:'center'}},
           h('input',{value:draft,autoFocus:true,onChange:event=>setDraft(event.target.value),
-            onKeyDown:event=>{if(event.key==='Enter')save();if(event.key==='Escape')setEditing(false);},
+            onKeyDown:event=>{
+              // Esc 只退出编辑，不能再往上冒泡 —— 全局那个监听会顺手把整个面板收起来
+              // （实测："修改时按 Esc 直接退出了消息助手"）。
+              if(event.key==='Escape'){event.stopPropagation();setEditing(false);}
+              if(event.key==='Enter'){event.stopPropagation();save();}
+            },
             'aria-label':'待办文案',style:{...field,flex:1,minWidth:0}}),
           h('button',{onClick:save,disabled:busy||!draft.trim(),style:small(true)},'保存'),
           h('button',{onClick:()=>setEditing(false),disabled:busy,style:small(false)},'取消')),
@@ -1878,11 +1883,13 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
      * 「置顶」是给"监听很多"时的另一条路：拖到第一位要精准，置顶只需要一次点击。
      */
     const [dragIndex,setDragIndex]=useState(null),[dropIndex,setDropIndex]=useState(null);
+    const ghostRef=useRef(null);
     async function saveOrder(list){
       try{await api('rules/order',{ids:list.map(rule=>rule.id)});await status.refresh();}
       catch(e){setSettingError(e.message);}
     }
     function dropOn(index){
+      clearGhost();
       const dragged=rules[dragIndex];
       if(!dragged||index===dragIndex){setDragIndex(null);setDropIndex(null);return;}
       const next=[...rules];
@@ -1902,20 +1909,26 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
      * 浏览器默认的影像是"按下那一刻的快照"，而卡片是**玻璃底**（半透明的
      * `--lg-card-bg`），跟着光标走的那一块几乎透光，字糊在页面上看不清（用户实测：
      * 「拖动时卡片没有背景，看不清文字」）。这里复制一份、垫上实底再交给 setDragImage。
+     *
+     * 垫实底是靠 `.ma-drag-ghost` 那两条规则（连子元素一起压成不透明）：只给最外层涂色
+     * 不够，卡片自己的半透明底在它上面，照样透光。
      */
     function dragGhost(event){
       try{
         const node=event.currentTarget,rect=node.getBoundingClientRect();
         const ghost=node.cloneNode(true);
+        ghost.className='ma-drag-ghost';
         ghost.style.position='fixed';ghost.style.top='-10000px';ghost.style.left='-10000px';
         ghost.style.width=rect.width+'px';ghost.style.height=rect.height+'px';ghost.style.margin='0';
-        ghost.style.backgroundColor='var(--ma-surface)';
-        ghost.style.borderRadius='var(--lg-r-lg)';
-        ghost.style.boxShadow='var(--ma-shadow)';
         document.body.appendChild(ghost);
         event.dataTransfer.setDragImage(ghost,24,20);
-        setTimeout(()=>ghost.remove(),0);
+        // **不要**用 setTimeout(…,0) 移除：Chrome 要等这一帧才真的去取影像，元素提前没了
+        // 就退回默认快照（还是那张透光的卡片）—— 这正是"改了还是不清晰"的原因。留到松手再清。
+        ghostRef.current=ghost;
       }catch{/* 自定义影像失败不影响拖动本身 */}
+    }
+    function clearGhost(){
+      if(ghostRef.current){ghostRef.current.remove();ghostRef.current=null;}
     }
     // 「我知道了」：把这条规则上没确认的记录标成已看过，提醒就不再出现。
     // 首页那张「自动回复需要你看一眼」的卡片点进来之后，这里也得能处理 —— 否则跳过来
@@ -1989,7 +2002,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
             onDragOver:event=>{if(dragIndex===null)return;event.preventDefault();if(dropIndex!==index)setDropIndex(index);},
             onDragLeave:()=>{if(dropIndex===index)setDropIndex(null);},
             onDrop:event=>{event.preventDefault();dropOn(index);},
-            onDragEnd:()=>{setDragIndex(null);setDropIndex(null);},
+            onDragEnd:()=>{clearGhost();setDragIndex(null);setDropIndex(null);},
             // 被拖的那张：**垫实底、不淡化**。卡片自己是玻璃底，一淡化就糊在页面上读不了。
             // 落点用实线 + 品牌色，和"被拖的虚线"分开，两者不会看错。
             style:{
@@ -2501,8 +2514,13 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     // Esc 只做"往回退一步"，**绝不**离开产品：原来它写的是 `cover:false`，而 cover:false
     // 就是把画面交回 DSH 原生界面（工作区、模型选择器）—— 按一下 Esc 掉进开发界面，
     // 用户会以为产品崩了。现在：开着会话就先退回列表，再按一次才收起面板（停在封面）。
+    //
+    // 另一个坑：这个监听在 document 上，输入框里按 Esc 也会冒泡到这里 —— 实测"在待办里
+    // 改文案，按 Esc 直接退出了消息助手"。所以焦点在输入类控件里时，Esc 归控件自己处理。
     useEffect(()=>{if(!open)return;const key=event=>{
       if(event.key!=='Escape')return;
+      const target=event.target;
+      if(target&&(target.tagName==='INPUT'||target.tagName==='TEXTAREA'||target.tagName==='SELECT'||target.isContentEditable))return;
       const state=store.get();
       if(state.contactKey)store.set({contactKey:null,contactTitle:null,contactKind:null});
       else store.set({open:false,cover:true});
@@ -2542,7 +2560,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       // 底层刻意不写 background：画布的环境色团与颗粒在 liquid 样式表里定义。
       // 行内样式权重最高，一旦写死就会把玻璃可折射的背景盖掉。
       style:{position:'fixed',inset:0,zIndex:60,display:'flex',pointerEvents:'auto',color:C.text,fontFamily:'Inter, ui-sans-serif, "Segoe UI", "Microsoft YaHei", sans-serif'}},
-      h('style',null,'[data-ma] .ma-jump{position:absolute;right:22px;bottom:22px;width:44px;height:44px;border-radius:50%;border:1px solid var(--lg-edge);background-color:var(--lg-card-bg);background-image:var(--lg-card-sheen);box-shadow:var(--lg-card-shadow),inset 0 1px 0 var(--lg-card-rim);color:var(--ma-ink);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:4;-webkit-backdrop-filter:blur(var(--lg-blur-sm));backdrop-filter:blur(var(--lg-blur-sm))}[data-ma] .ma-jump:hover{filter:brightness(1.05)}[data-ma] .ma-iconbtn{color:var(--ma-muted);border-radius:8px;cursor:pointer;transition:background var(--lg-dur-1) var(--lg-ease-smooth),color var(--lg-dur-1) var(--lg-ease-smooth)}[data-ma] .ma-iconbtn:not(:disabled):hover{background:var(--lg-tint);color:var(--ma-danger)}[data-ma] .ma-iconbtn:disabled{opacity:.45;cursor:default}[data-ma] button{transition:background var(--lg-dur-1) var(--lg-ease-smooth),border-color var(--lg-dur-1) var(--lg-ease-smooth),color var(--lg-dur-1) var(--lg-ease-smooth),box-shadow var(--lg-dur-1) var(--lg-ease-smooth),transform var(--lg-dur-1) var(--lg-ease-interactive),filter var(--lg-dur-1) var(--lg-ease-smooth)}[data-ma] button:not(:disabled):hover{filter:brightness(1.04)}[data-ma] button:not(:disabled):active{transform:scale(.975)}[data-ma] button:focus-visible,[data-ma] input:focus-visible,[data-ma] textarea:focus-visible,[data-ma] select:focus-visible{outline:3px solid var(--ma-primary);outline-offset:2px}[data-ma] button:disabled{opacity:.55;cursor:not-allowed}[data-ma] summary{cursor:pointer}[data-ma] input[type="checkbox"]{accent-color:var(--ma-primary)}[data-ma] .ma-pulse{animation:ma-pulse 1.3s ease-in-out infinite}@keyframes ma-pulse{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}[data-ma] .ma-spin{animation:ma-spin .8s linear infinite}@keyframes ma-spin{to{transform:rotate(360deg)}}[data-ma] .ma-track-fill{animation:ma-track 1.6s ease-in-out infinite}@keyframes ma-track{0%{transform:translateX(-110%)}100%{transform:translateX(320%)}}@media(max-width:1100px){[data-ma] .ma-rule-grid{grid-template-columns:1fr!important}}@media (prefers-reduced-motion: reduce){[data-ma] .ma-pulse,[data-ma] .ma-spin,[data-ma] .ma-track-fill{animation:none}[data-ma] .ma-track-fill{width:100%;opacity:.5}[data-ma] button:not(:disabled):active{transform:none!important}}'),
+      h('style',null,'.ma-drag-ghost{background-color:var(--ma-surface)!important;background-image:none!important;opacity:1!important;box-shadow:var(--ma-shadow)!important;border-radius:12px;overflow:hidden}.ma-drag-ghost *{background-color:transparent!important;background-image:none!important;box-shadow:none!important;-webkit-backdrop-filter:none!important;backdrop-filter:none!important}[data-ma] .ma-jump{position:absolute;right:22px;bottom:22px;width:44px;height:44px;border-radius:50%;border:1px solid var(--lg-edge);background-color:var(--lg-card-bg);background-image:var(--lg-card-sheen);box-shadow:var(--lg-card-shadow),inset 0 1px 0 var(--lg-card-rim);color:var(--ma-ink);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:4;-webkit-backdrop-filter:blur(var(--lg-blur-sm));backdrop-filter:blur(var(--lg-blur-sm))}[data-ma] .ma-jump:hover{filter:brightness(1.05)}[data-ma] .ma-iconbtn{color:var(--ma-muted);border-radius:8px;cursor:pointer;transition:background var(--lg-dur-1) var(--lg-ease-smooth),color var(--lg-dur-1) var(--lg-ease-smooth)}[data-ma] .ma-iconbtn:not(:disabled):hover{background:var(--lg-tint);color:var(--ma-danger)}[data-ma] .ma-iconbtn:disabled{opacity:.45;cursor:default}[data-ma] button{transition:background var(--lg-dur-1) var(--lg-ease-smooth),border-color var(--lg-dur-1) var(--lg-ease-smooth),color var(--lg-dur-1) var(--lg-ease-smooth),box-shadow var(--lg-dur-1) var(--lg-ease-smooth),transform var(--lg-dur-1) var(--lg-ease-interactive),filter var(--lg-dur-1) var(--lg-ease-smooth)}[data-ma] button:not(:disabled):hover{filter:brightness(1.04)}[data-ma] button:not(:disabled):active{transform:scale(.975)}[data-ma] button:focus-visible,[data-ma] input:focus-visible,[data-ma] textarea:focus-visible,[data-ma] select:focus-visible{outline:3px solid var(--ma-primary);outline-offset:2px}[data-ma] button:disabled{opacity:.55;cursor:not-allowed}[data-ma] summary{cursor:pointer}[data-ma] input[type="checkbox"]{accent-color:var(--ma-primary)}[data-ma] .ma-pulse{animation:ma-pulse 1.3s ease-in-out infinite}@keyframes ma-pulse{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}[data-ma] .ma-spin{animation:ma-spin .8s linear infinite}@keyframes ma-spin{to{transform:rotate(360deg)}}[data-ma] .ma-track-fill{animation:ma-track 1.6s ease-in-out infinite}@keyframes ma-track{0%{transform:translateX(-110%)}100%{transform:translateX(320%)}}@media(max-width:1100px){[data-ma] .ma-rule-grid{grid-template-columns:1fr!important}}@media (prefers-reduced-motion: reduce){[data-ma] .ma-pulse,[data-ma] .ma-spin,[data-ma] .ma-track-fill{animation:none}[data-ma] .ma-track-fill{width:100%;opacity:.5}[data-ma] button:not(:disabled):active{transform:none!important}}'),
       h('nav',{'data-ma':'nav','aria-label':'主要功能',className:'lg-glass','data-compact':narrow?'':undefined,
         // 功能层：悬浮玻璃轨。padding / 描边 / 底色 / 材质全在样式表的 nav[data-ma="nav"] 里；
         // 行内只留布局 —— 宽度随窄屏变，是动态值，只能写在这。
