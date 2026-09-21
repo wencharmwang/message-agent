@@ -268,3 +268,26 @@ test('render: the prompt carries the partitioned sections and evidence ids', asy
   }
   assert.ok(prompt.includes(`[ev_kb_${k.id}]`));
 });
+
+test('问产品/问事实的问题要算 faq，不能掉进 social（闲聊）', async () => {
+  const { classifyIntent } = await import('./reply-context/risk-gate.mjs');
+  // 用户实测：问「介绍一下最终产品关系里面描述的产品形态」被判成 social，
+  // 而只有 faq / product_usage 属于"必须引用证据"的意图 —— 于是模型当成闲聊，
+  // 回了句"产品那块的细节我这边说不全，等回去咱当面聊"。
+  for (const question of [
+    '介绍一下产品文档',
+    '介绍一下最终产品关系里面描述的产品形态',
+    '你们的产品有哪些功能',
+    '有没有相关的资料'
+  ]) {
+    assert.equal(classifyIntent(question), 'faq', question + ' 应当是 faq');
+  }
+  // 「怎么用」走 product_usage —— 和 faq 一样属于必须引用证据，同样合格
+  assert.equal(classifyIntent('这个功能是怎么用的'), 'product_usage');
+  // 真正的闲聊仍然算 social，别把规则放宽到失去区分度
+  assert.equal(classifyIntent('牛肉记得多炖一会儿会更软'), 'social');
+  assert.equal(classifyIntent('今天天气不错'), 'social');
+  // 高风险意图优先级不变（排在前面的先命中）
+  assert.equal(classifyIntent('这个报价多少'), 'quote');
+  assert.equal(classifyIntent('能不能便宜点'), 'discount');
+});
