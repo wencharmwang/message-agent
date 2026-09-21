@@ -382,21 +382,6 @@ export function apply(ctx) {
    * **模型单独配**：整理要归纳和判断轻重，和"像人一样回一句话"是两种能力，用户可能给它们
    * 用不同的模型（设置里两行，各配各的）。缺省跟自动回复一致。
    */
-  // 判断「重复」用的系统提示词（见 judgeDuplicateTodos）。
-  const DEDUPE_SYSTEM = [
-    '你在判断两件事是不是「同一件要做的事」。用户在消息助手里已经记了一些待办，',
-    '助手又从聊天里总结出新的建议，你要找出哪些建议是已经记过的。',
-    '',
-    '判断标准：',
-    '1. 看**要做的事**，不看措辞。「回复他，说明看不到链接内容」和',
-    '   「回复他，说明能否处理语音并回应链接」在同一个对话里就是同一件事 → 算重复。',
-    '2. 一个说得笼统、一个说得具体，只要指的是同一件事 → 算重复。',
-    '3. 只是话题相同、但要做的事不同（比如「回复他」和「给他发报价单」）→ 不算重复。',
-    '4. 拿不准时**不算**重复：多提一次比漏掉一件要容易原谅。',
-    '',
-    '只输出 JSON：{"duplicates":[B 的下标]}，没有就 {"duplicates":[]}。'
-  ].join('\n');
-
   const organizeMessages = async ({prompt}) => {
     const runtimeSettings = await worker.settings()
       .then(result => result?.settings ?? {}).catch(() => ({}));
@@ -415,41 +400,7 @@ export function apply(ctx) {
       throw error;
     }
   };
-  /**
-   * 判断"这次的建议是不是已经记过的同一件事"。
-   *
-   * 为什么必须用模型：用户实测过两种说法完全对不上、但其实是同一件事——
-   * 已有的待办是「回复 Wencharm，说明看不到链接内容并请其文字说明」，
-   * 这次建议是「回复 Wencharm，说明能否处理语音并回应链接」。字符串匹配（哪怕是"包含"）
-   * 都挡不住，于是同一件事反复提示，用户就觉得"这功能在耍我"。
-   *
-   * 输入很小（两份清单，各几条），输出只要一串下标，成本可以忽略。
-   */
-  const judgeDuplicateTodos = async ({existing, suggestions}) => {
-    const runtimeSettings = await worker.settings()
-      .then(result => result?.settings ?? {}).catch(() => ({}));
-    const lines = [
-      'A. 用户已有的待办：',
-      ...existing.map((title, index) => `  A${index}. ${String(title).slice(0, 120)}`),
-      '',
-      'B. 这次新提出的建议：',
-      ...suggestions.map((title, index) => `  B${index}. ${String(title).slice(0, 120)}`),
-      '',
-      '只输出 JSON，不要解释：{"duplicates":[B 的下标, ...]}'
-    ];
-    const {text} = await oneShot({
-      system: DEDUPE_SYSTEM, prompt: lines.join('\n'), maxTokens: 200, reasoningEffort: 'off',
-      provider: runtimeSettings.organize_provider, model: runtimeSettings.organize_model
-    });
-    const raw = String(text ?? '');
-    const start = raw.indexOf('{'), end = raw.lastIndexOf('}');
-    if (start === -1 || end <= start) throw new Error('去重结果不是可解析的结构');
-    const parsed = JSON.parse(raw.slice(start, end + 1));
-    const list = Array.isArray(parsed?.duplicates) ? parsed.duplicates : [];
-    return list.map(Number).filter(index => Number.isInteger(index) && index >= 0 && index < suggestions.length);
-  };
-
-  const productApi = createProductApi({config, token, runtime: worker, conversations, bindingsPath, respond, readBody: body, ensureInteractiveSession, askAssistant, crm, context: contextSystem, messageCenter, classifyMessages, draftReply, analyzeStyle, organizeMessages, judgeDuplicateTodos});
+  const productApi = createProductApi({config, token, runtime: worker, conversations, bindingsPath, respond, readBody: body, ensureInteractiveSession, askAssistant, crm, context: contextSystem, messageCenter, classifyMessages, draftReply, analyzeStyle, organizeMessages});
   ctx.effect(() => () => {
     for (const handle of active.values()) handle.agent.cancel({kind:'user'});
   });

@@ -419,7 +419,7 @@ export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [
  * (architecture §6). Returns true when the request was handled. index.mjs applies
  * the same-origin guards before delegating here.
  */
-export function createProductApi({config, token, runtime: runtimeInjected, conversations, bindingsPath, respond, readBody, ensureInteractiveSession, askAssistant, crm: crmInjected, context: contextSystem, messageCenter: messageCenterInjected, classifyMessages, draftReply, analyzeStyle, organizeMessages, judgeDuplicateTodos}) {
+export function createProductApi({config, token, runtime: runtimeInjected, conversations, bindingsPath, respond, readBody, ensureInteractiveSession, askAssistant, crm: crmInjected, context: contextSystem, messageCenter: messageCenterInjected, classifyMessages, draftReply, analyzeStyle, organizeMessages}) {
   const runtime = runtimeInjected ?? new RuntimeAdapter({controlPort: config.control_port, token});
   const drafts = new Drafts(join(dirname(config.database), 'drafts.json'));
   const crm = crmInjected ?? createCrm(join(dirname(config.database), 'crm.db'));
@@ -1073,44 +1073,18 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
    */
   function reconcileSuggestions(result, todos) {
     if (!result || !Array.isArray(result.todos) || !result.todos.length) return result;
-    const open = (todos ?? crm.listTodos({limit: 500})).map(todo => ({title: todo.title, state: todo.state}));
+    const existing = (todos ?? crm.listTodos({limit: 500})).map(todo => todo.title);
     const kept = [];
     let hidden = 0;
     for (const item of result.todos) {
-      const done = open.some(todo => sameSuggestion(todo.title, item.title));
-      if (done) { hidden++; continue; }
+      // 一、模型在**同一次整理**里就标出了"这条对应已有的哪一条待办"（duplicateOf）。
+      // 用它摘掉，不需要再调一次模型判重（用户指出那样效率低）。
+      if (item.duplicateOf) { hidden++; continue; }
+      // 二、兜底：模型偶尔会漏填 duplicateOf，字面相同的照样挡掉（免费）。
+      if (existing.some(title => sameSuggestion(title, item.title))) { hidden++; continue; }
       kept.push({...item, alreadyAdded: false});
     }
     return {...result, todos: kept, hiddenCount: hidden};
-  }
-
-  /**
-   * 让模型判断"这条建议是不是已经记过的同一件事"。
-   *
-   * 为什么字符串匹配不够：用户实测——
-   *   已有待办：「回复 Wencharm，说明看不到链接内容并请其文字说明」
-   *   这次建议：「回复 Wencharm，说明能否处理语音并回应链接」
-   * 两句话没有一个词能对上（"看不到链接"vs"能否处理语音"），但要做的是同一件事。
-   * 于是用户觉得自己被耍：明明记过了，又被提醒一次。
-   *
-   * 规则：**判重失败就保持原样**。多提一次只是烦，把真正要做的事吞掉是错。
-   */
-  async function semanticReconcile(result, todos) {
-    const items = result?.todos ?? [];
-    if (!items.length || !judgeDuplicateTodos) return result;
-    const existing = (todos ?? []).map(todo => todo.title).filter(Boolean).slice(0, 40);
-    if (!existing.length) return result;
-    try {
-      const drop = await judgeDuplicateTodos({existing, suggestions: items.map(item => item.title)});
-      if (!drop.length) return result;
-      return {
-        ...result,
-        todos: items.filter((_, index) => !drop.includes(index)),
-        hiddenCount: (result.hiddenCount || 0) + drop.length
-      };
-    } catch (error) {
-      return result;
-    }
   }
 
   async function homePayload() {
@@ -1283,11 +1257,9 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
           todos: result.todos.map(item => ({...item, ...(locate(bundle, item.conversation) ?? {})})),
           account, scannedAt: scanAt, sessionsRead: bundle.length, at: Date.now() / 1000
         };
-        // 落库前先把"已经处理过的"摘掉：提示词只能劝，这一步才是保证。
-        // 两道：先按标题做便宜的字面过滤，再让模型判"是不是同一件事"（措辞不同也算）。
-        const todos = crm.listTodos({limit: 500});
-        const byText = reconcileSuggestions(located, todos);
-        writeJsonFile(organizePath, await semanticReconcile(byText, todos));
+        // 落库前把"已经处理过的"摘掉。判重**不再单独调模型**：整理那一次调用里
+        // 模型已经给每条建议填了 duplicateOf，这里按它摘 + 字面兜底即可。
+        writeJsonFile(organizePath, reconcileSuggestions(located, crm.listTodos({limit: 500})));
         respond(res, 200, readJsonFile(organizePath, located));
         return true;
       }

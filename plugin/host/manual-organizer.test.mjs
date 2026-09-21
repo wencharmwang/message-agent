@@ -54,11 +54,11 @@ test('整理是有状态的：已经处理过的建议不再重复出现', () =>
   // 因为整理是无状态的，每次都从同一批消息重新得出结论。
   // 两头都要做：提示词里明确"别再提"，结果落库前再过滤一遍。
   assert.match(homeModule, /renderOrganizePrompt\(bundle, \{now = Date\.now\(\) \/ 1000, handled = \[\]\} = \{\}\)/);
-  assert.match(homeModule, /这次不要再提/);
-  assert.match(homeModule, /不要把它们换个说法再写一遍/);
+  assert.match(homeModule, /用户已有的待办（编号用于 duplicateOf，不要重复提出同一件事）/);
+  assert.match(homeModule, /和清单里是同一件事的不要再写进 todos/);
   assert.match(product, /const handled = crm\.listTodos\(\{limit: 200\}\)\.map\(todo => todo\.title\)/);
   assert.match(product, /renderOrganizePrompt\(bundle, \{handled\}\)/);
-  assert.match(product, /const byText = reconcileSuggestions\(located, todos\)/);
+  assert.match(product, /writeJsonFile\(organizePath, reconcileSuggestions\(located, crm\.listTodos/);
   // "处理过"包含已完成 —— 做完了的更不该再提醒一次
   assert.match(product, /function reconcileSuggestions\(result, todos\)/);
   assert.match(product, /hiddenCount: hidden/);
@@ -85,25 +85,32 @@ test('读消息不轮询：进页面读一次，靠用户按需整理', () => {
 });
 
 
-test('建议判重交给模型：措辞不同但同一件事也要认出来', () => {
-  // 用户实测的反例：
+test('判重并进整理那一次调用：不再单独调模型比对', () => {
+  // 用户的原始反例：
   //   已有：「回复 Wencharm，说明看不到链接内容并请其文字说明」
   //   建议：「回复 Wencharm，说明能否处理语音并回应链接」
-  // 没有一个词能对上（"看不到链接" vs "能否处理语音"），但要做的是同一件事。
-  // 所以字符串过滤之后必须再让模型判一次。
+  // 没有一个词能对上，但要做的是同一件事。
+  //
+  // 第一版做法是"出完结果再调一次模型比对"——用户指出那样效率低。
+  // 现在改成：**同一次调用里**把已有待办编号（A1/A2…）交给模型，并要求每条建议
+  // 都填 duplicateOf，落库时按它摘掉。一次调用，一次答案。
   const index = readFileSync(join(here, '..', 'index.mjs'), 'utf8');
-  assert.match(index, /const DEDUPE_SYSTEM = \[/);
-  assert.match(index, /看\*\*要做的事\*\*，不看措辞/);
-  assert.match(index, /拿不准时\*\*不算\*\*重复/);
-  assert.match(index, /const judgeDuplicateTodos = async \(\{existing, suggestions\}\) =>/);
-  assert.match(index, /只输出 JSON，不要解释：\{"duplicates":\[B 的下标, \.\.\.\]\}/);
-  assert.match(index, /organizeMessages, judgeDuplicateTodos\}\)/);
-  // 落库前两道：字面过滤 + 语义判重
-  assert.match(product, /const byText = reconcileSuggestions\(located, todos\)/);
-  assert.match(product, /await semanticReconcile\(byText, todos\)/);
-  assert.match(product, /async function semanticReconcile\(result, todos\)/);
-  // 判重失败必须保持原样：多提一次只是烦，吞掉真事是错
-  assert.match(product, /catch \(error\) \{\s*return result;/);
-  // 首页读的时候不该再调模型（那会把页面拖慢）
-  assert.match(product, /lastOrganize: reconcileSuggestions\(readJsonFile\(organizePath, null\), todos\)/);
+
+  // 输出格式里必须有 duplicateOf 这个字段
+  assert.match(homeModule, /"detail":"依据：引一句最短的原文，40 字以内","duplicateOf":null/);
+  // 硬性要求里写清了怎么填（看要做的事，不看措辞；拿不准填 null）
+  assert.match(homeModule, /每一条 todos 都必须填 duplicateOf/);
+  assert.match(homeModule, /判断看的是「要做的事」，不是措辞/);
+  assert.match(homeModule, /拿不准时填 null/);
+  // 已有待办要编号成清单给模型
+  assert.match(homeModule, /用户已有的待办（编号用于 duplicateOf，不要重复提出同一件事）/);
+  assert.match(homeModule, /'A' \+ \(index \+ 1\) \+ '\. ' \+ item/);
+  // 解析要留下这个字段
+  assert.match(homeModule, /duplicateOf: typeof item\?\.duplicateOf === 'string'/);
+  // 落库时按它摘掉；模型漏填时字面兜底
+  assert.match(product, /if \(item\.duplicateOf\) \{ hidden\+\+; continue; \}/);
+  assert.match(product, /existing\.some\(title => sameSuggestion\(title, item\.title\)\)/);
+  // **不许**再有第二次调用
+  assert.doesNotMatch(product, /judgeDuplicateTodos|semanticReconcile/);
+  assert.doesNotMatch(index, /DEDUPE_SYSTEM|judgeDuplicateTodos/);
 });

@@ -95,14 +95,20 @@ const CHAT_PER_SESSION = 10;
 export const ORGANIZE_SYSTEM = [
   '你在帮用户整理微信消息。用户已经同意这次读取，数据来自本机微信数据库的真实记录（不是截图识别）。',
   '只输出一个 JSON 对象，不要代码块、不要解释、不要额外文字。格式：',
-  '{"summary":"两三句话概括这段时间发生了什么","focus":[{"conversation":"显示名","why":"为什么需要用户关注，20 字以内","action":"建议的动作，20 字以内"}],"todos":[{"title":"用户本人要做的事，25 字以内","conversation":"相关显示名，没有就空字符串","detail":"依据：引一句最短的原文，40 字以内"}]}',
+  '{"summary":"两三句话概括这段时间发生了什么","focus":[{"conversation":"显示名","why":"为什么需要用户关注，20 字以内","action":"建议的动作，20 字以内"}],"todos":[{"title":"用户本人要做的事，25 字以内","conversation":"相关显示名，没有就空字符串","detail":"依据：引一句最短的原文，40 字以内","duplicateOf":null}]}',
   '硬性要求：',
   '1) focus 只放"确实需要用户本人关注或回应"的人和群，最多 5 条；宁可少也不要凑数。',
   '2) todos 只放用户本人要动手做的事（回复谁、确认什么、交什么、什么时候），最多 5 条；'
     + '别人之间的约定、单纯的信息、已经被回复过的内容，一律不要写成待办。',
   '3) 时间、金额、承诺只能来自原文。原文里没有的不要编；拿不准就不写。',
   '4) 没有值得关注的内容时，focus 和 todos 给空数组，summary 直说最近没什么要处理的。',
-  '5) conversation 必须用给定的显示名原样填写，不要改写、不要加"微信"前缀。'
+  '5) conversation 必须用给定的显示名原样填写，不要改写、不要加"微信"前缀。',
+  '6) 如果下面给了「用户已有的待办」清单（A1、A2…），每一条 todos 都必须填 duplicateOf：'
+    + '这条建议和清单里某一条是**同一件事**就填那个编号（例如 "A2"），否则填 null。'
+    + '判断看的是「要做的事」，不是措辞：同一个对话里「回复他，说明看不到链接内容」和'
+    + '「回复他，说明能否处理语音并回应链接」是同一件事。一个笼统一个具体，只要指同一件事也算。'
+    + '话题相同但要做的事不同（「回复他」和「给他发报价单」）→ 填 null。拿不准时填 null。'
+    + '没有给清单时，duplicateOf 一律填 null。',
 ].join('\n');
 
 /**
@@ -121,9 +127,9 @@ export function renderOrganizePrompt(bundle, {now = Date.now() / 1000, handled =
   const done = (Array.isArray(handled) ? handled : [])
     .map(item => String(item ?? '').trim()).filter(Boolean).slice(0, 20);
   const skip = done.length
-    ? ['', '下面这些**上一次已经提过，用户已经记成待办或已经做完了**，这次不要再提：',
-       ...done.map(item => '- ' + item),
-       '不要把它们换个说法再写一遍，也不要写进 todos。'].join('\n')
+    ? ['', '用户已有的待办（编号用于 duplicateOf，不要重复提出同一件事）：',
+       ...done.map((item, index) => 'A' + (index + 1) + '. ' + item),
+       '和清单里是同一件事的不要再写进 todos。'].join('\n')
     : '';
   return [head, '', body || '（没有可读的会话）', skip].filter(part => part !== '').join('\n');
 }
@@ -151,7 +157,10 @@ export function parseOrganizeAnswer(text) {
   const todos = list(parsed.todos, 5).map(item => ({
     title: clamp(item?.title, 80),
     conversation: clamp(item?.conversation, 60),
-    detail: clamp(item?.detail, 120)
+    detail: clamp(item?.detail, 120),
+    // 模型**在同一次调用里**标出"这条对应已有的哪一条待办"（A1/A2…）。
+    // 拿它直接摘掉重复项，省掉一次单独的判重调用（用户指出那样效率低）。
+    duplicateOf: typeof item?.duplicateOf === 'string' ? clamp(item.duplicateOf, 8) : null
   })).filter(item => item.title);
   return {summary: clamp(parsed.summary, 400), focus, todos};
 }
