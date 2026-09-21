@@ -3,6 +3,7 @@ import { join, dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 import { DEFAULT_REPLY_STYLE, REPLY_POLICY_FIXED, modelContext, validateSubmission } from './reply-policy.mjs';
+import { MEMORY_UPDATE_SYSTEM, buildMemoryPrompt, parseMemoryAnswer, applyMemories } from './host/reply-context/memory-update.mjs';
 import { ConversationSessions, automaticRequestConfig, conversationKey, completedDecision } from './conversation-sessions.mjs';
 import { createProductApi, identityKey } from './host/product.mjs';
 import { RuntimeAdapter } from './host/runtime.mjs';
@@ -381,6 +382,32 @@ export function apply(ctx) {
     return DEFAULT_REPLY_STYLE;
   };
 
+  /**
+   * 记住这个人：从最近的对话里提炼值得长期记住的事，写进记忆库。
+   *
+   * 聊天稳不稳，很大程度取决于"这个人是谁、在意什么、答应过什么"能不能跨轮次留住。
+   * 会话自带的记忆很脆（换会话、重启、上下文变长都会丢），所以另存一份、每轮后台更新。
+   * 三条硬要求：**不阻塞回复**（调用点在 respond 之后，异常全吞）、
+   * **不猜就记**（模型说 low 的先存 candidate，不进提示词）、**不重复记**（写前比对已有条目）。
+   */
+  async function updateContactMemory({conversationKey, contextData}) {
+    const messages = Array.isArray(contextData?.messages) ? contextData.messages : [];
+    if (messages.length < 2) return;
+    const existing = contextSystem.memory.list(contextSystem.workspaceId, {conversationKey})
+      .map(item => ({kind: item.kind, content: item.content}));
+    const runtimeSettings = await worker.settings()
+      .then(result => result?.settings ?? {}).catch(() => ({}));
+    const {text: answer} = await oneShot({
+      system: MEMORY_UPDATE_SYSTEM,
+      prompt: buildMemoryPrompt({existing, messages}),
+      maxTokens: 600, reasoningEffort: 'off',
+      provider: runtimeSettings.organize_provider, model: runtimeSettings.organize_model
+    });
+    const candidates = parseMemoryAnswer(answer);
+    if (!candidates.length) return;
+    applyMemories(contextSystem.memory, contextSystem.workspaceId, conversationKey, candidates, existing);
+  }
+
   const draftReply = async ({identity, conversationKey: draftKey, rule, contextData, recentDeliveries}) => {
     const run = await contextSystem.build({jobId: 'draft-' + draftKey.slice(0, 12), identity, conversationKey: draftKey, rule, contextData, recentDeliveries});
     // 起草回复属于自动回复链路（就是那条链路上的「拟回复」），所以模型跟着它走：
@@ -543,6 +570,9 @@ export function apply(ctx) {
         await ctx.sessions.flush(handle.agent.session);
         conversations.bind(key, sessionId);
         const agentCtx = handle.agent.ctx;
+        // 让自动回复也能**自己去翻这个人的历史**：原来只有问助手挂了 read_local_messages，
+        // 于是「和一个人聊了很久」时它只能看快照，拿不准也没得查。
+        attachDbTool(agentCtx, sessionId);
         // A resumed Session can carry an adapter-derived maxTokens marker. Always
         // re-apply our explicit cap, otherwise DeepSeek's advertised 1M default is
         // sent to an endpoint whose accepted maximum is currently 393216.
@@ -602,6 +632,11 @@ export function apply(ctx) {
         // job_id / event_id / action / text / reason (spec §9, agent_worker/decision.py).
         respond(res,200,{session_id:sessionId,session_reused:persisted || !!live,
           response:JSON.stringify({job_id:finalDecision.job_id,event_id:finalDecision.event_id,action:finalDecision.action,text:finalDecision.text,reason:finalDecision.reason})});
+
+        // 决定已经交出去了，接下来顺手记住这个人 —— 放后台，失败也不影响这次回复。
+        updateContactMemory({conversationKey: key, contextData}).catch(error => {
+          ctx.logger.warn('记忆更新失败：' + (error instanceof Error ? error.message : 'unknown'));
+        });
         });
       } catch (error) {
         ctx.logger.warn('Messaging task failed: ' + (error instanceof Error ? error.message : 'unknown'));

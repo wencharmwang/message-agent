@@ -95,6 +95,14 @@ export function renderContextPrompt({contextPack, evidenceCatalog = [], rule = {
     openLoops: contact.openLoops ?? []
   }));
 
+  // 这个人的长期记忆单独一段：它和"知识库"不同 —— 知识是全站通用的事实，
+  // 记忆是这个人身上的、只对他成立的东西。
+  const memories = contextPack.contact?.memories ?? [];
+  if (memories.length) {
+    lines.push('[CONTACT MEMORY]');
+    memories.forEach(item => lines.push('- [' + item.kind + '] ' + item.content));
+  }
+
   lines.push('[VERIFIED KNOWLEDGE WITH EVIDENCE IDS]');
   const knowledge = contextPack.knowledge ?? [];
   if (knowledge.length) {

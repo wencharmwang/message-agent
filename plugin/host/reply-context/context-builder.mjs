@@ -101,6 +101,14 @@ export function createContextBuilder({db, workspaceId = 'local', crm = null, res
 
     // 3. CRM projection + open loops (spec §5.3).
     const contact = memory.contactContext(conversationKey);
+    // 3.5 这个人的长期记忆。**只取 confirmed**：candidate 是模型猜的、还没被确认，
+    //     当成事实喂回去比不喂更糟（聊天稳不稳，很大程度取决于"喂进去的是不是真的"）。
+    try {
+      contact.memories = memory.list(workspaceId, {conversationKey, status: 'confirmed'})
+        .slice(0, 15).map(item => ({kind: item.kind, content: item.content}));
+    } catch {
+      contact.memories = [];
+    }
     const openLoops = memory.openLoops(workspaceId, conversationKey);
     contact.openLoops = openLoops.map(m => ({kind: m.kind, content: m.content, sourceRef: m.sourceRef}));
 

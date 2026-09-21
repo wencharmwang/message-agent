@@ -291,3 +291,44 @@ test('问产品/问事实的问题要算 faq，不能掉进 social（闲聊）',
   assert.equal(classifyIntent('这个报价多少'), 'quote');
   assert.equal(classifyIntent('能不能便宜点'), 'discount');
 });
+
+test('记住这个人：解析、去重、把握不够的先存候选', async () => {
+  const {parseMemoryAnswer, selectNewMemories, sameMemory, applyMemories} =
+    await import('./reply-context/memory-update.mjs');
+
+  // 解析：只要 JSON 在，外面裹了什么话都能认
+  const parsed = parseMemoryAnswer('好的，我记一下：{"items":[{"kind":"preference","content":"喜欢吃辣","confidence":"high"},'
+    + '{"kind":"乱写","content":"周末要去看展","confidence":"low"}]}');
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].kind, 'preference');
+  assert.equal(parsed[0].confidence, 'high');
+  assert.equal(parsed[1].kind, 'fact', '不认识的类型归成 fact');
+  assert.deepEqual(parseMemoryAnswer('完全不是 JSON'), []);
+  assert.deepEqual(parseMemoryAnswer('{"items":[]}'), []);
+
+  // 去重：标点不同、一个包含另一个，都算同一件事
+  assert.equal(sameMemory('喜欢吃辣', '喜欢吃辣。'), true);
+  assert.equal(sameMemory('他在做一个跨境电商的项目', '跨境电商的项目'), true);
+  assert.equal(sameMemory('喜欢吃辣', '喜欢喝咖啡'), false);
+  // 太短的片段不算包含（否则"辣"会把什么都吃掉）
+  assert.equal(sameMemory('辣', '他喜欢吃辣'), false);
+
+  const existing = [{content: '喜欢吃辣'}];
+  const kept = selectNewMemories([
+    {kind: 'preference', content: '喜欢吃辣！'},
+    {kind: 'fact', content: '周末要去看展'}
+  ], existing);
+  assert.equal(kept.length, 1, '重复的不再记');
+  assert.equal(kept[0].content, '周末要去看展');
+
+  // 写入：high 才算确认（会进提示词），low 只存成候选
+  const added = [];
+  const fakeMemory = {add: (workspaceId, item) => { added.push(item); return item; }};
+  applyMemories(fakeMemory, 'w1', 'k1', [
+    {kind: 'fact', content: '他是我老公', confidence: 'high'},
+    {kind: 'event', content: '可能下周出差', confidence: 'low'}
+  ], []);
+  assert.equal(added.length, 2);
+  assert.equal(added[0].status, 'confirmed');
+  assert.equal(added[1].status, 'candidate', '拿不准的先别当事实');
+});
