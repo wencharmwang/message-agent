@@ -2997,8 +2997,6 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           description:'管的是点「问助手」时由谁来读消息、归纳要点。这个任务要读懂整段上下文并判断轻重，换成本地小模型时容易读偏，建议先试几次再定。',
           catalog,provider:assistantProvider,model:assistantModel,saving:saving==='assistant',
           onPick:value=>saveTaskModel('assistant',value)}),
-        // 起草回复是自动回复链路上的「拟回复」，所以跟着那条链路的模型走，不单独设。
-        h('p',{style:{...hint,margin:'10px 2px 0'}},'「起草回复」跟着「自动回复模型」走。'),
         // 语音放在整块模型配置之后：上面全是「选模型」，下面才是语音。
         h(VoiceCard,{}),
         h('section',{style:{...card,marginTop:16}},
