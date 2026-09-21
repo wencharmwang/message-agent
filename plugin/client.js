@@ -2169,7 +2169,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const [uncontrolled,setUncontrolled]=useState(false);
     const open=controlled?openProp:uncontrolled;
     const setOpen=value=>{if(controlled){if(!value&&onClose)onClose();}else setUncontrolled(value);};
-    const [choices,setChoices]=useState([]),[conversation,setConversation]=useState(''),[prompt,setPrompt]=useState('用自然、友好、简短的中文回复日常聊天；不确定的事情交给我处理。'),[busy,setBusy]=useState(false),[error,setError]=useState(''),[kind,setKind]=useState('direct');
+    const [choices,setChoices]=useState([]),[conversation,setConversation]=useState(''),[prompt,setPrompt]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState(''),[kind,setKind]=useState('direct');
     // 群聊由本地会话的类型自动判定（微信里群聊的 username 一律以 @chatroom 结尾），
     // 换人选时自动跟着变。原来摆一个勾选框让用户自己声明类型，等于问一个数据已经回答了
     // 的问题；留一个「按群聊处理 / 按单聊处理」的纠正入口就够了。
@@ -2180,7 +2180,9 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     async function add(){
       if(!conversation){setError('请先选择一个联系人或群聊');return;}
       setBusy(true);setError('');
-      try{await api('rules',{conversation_id:conversation,prompt,kind});setConversation('');onAdded();setOpen(false);}
+      // 一个字都没写就确认 = 采用占位里那段默认规矩（否则用户会被后端拦住，而界面上没有必填提示）。
+      const finalPrompt=prompt.trim()||'用自然、友好、简短的中文回复日常聊天；不确定的事情交给我处理。';
+      try{await api('rules',{conversation_id:conversation,prompt:finalPrompt,kind});setConversation('');setPrompt('');onAdded();setOpen(false);}
       catch(e){setError(e.message);}finally{setBusy(false);}
     }
     const crm=purpose==='crm';
@@ -2205,7 +2207,9 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
             h('span',{style:{fontSize:12,color:C.text3}},'类型从本地会话自动识别，判断错了可以改'))),
         h('div',null,
           h('label',{style:fieldLabel},'2. 要自动回复的话，告诉助手怎么回'),
-          h('textarea',{value:prompt,onChange:event=>setPrompt(event.target.value),rows:5,style:{...field,resize:'vertical',lineHeight:1.7}}),
+          h('textarea',{value:prompt,onChange:event=>setPrompt(event.target.value),rows:5,
+            placeholder:'例如：用自然、友好、简短的中文回复日常聊天；不确定的事情交给我处理。',
+            style:{...field,resize:'vertical',lineHeight:1.7}}),
           !crm&&h(StylePresetPicker,{disabled:busy,onPick:setPrompt,value:prompt}),
           h('p',{style:{...hint,marginTop:8}},crm?'不想让它自动回复也可以，保持关闭就行。':'每个联系人都可以写得不一样。加好即开始监听，想停就暂停。'))),
       h('div',{style:{display:'flex',gap:10,marginTop:18,paddingTop:16,borderTop:'1px solid var(--lg-card-line)'}},

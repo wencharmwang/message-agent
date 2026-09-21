@@ -448,3 +448,14 @@ test('到期时间控件是自绘的，但仍然能定到几点', () => {
   // 界面上不该再有原生日期控件
   assert.doesNotMatch(source, /type:'datetime-local'/);
 });
+
+test('新增规则时预设要露出来（规矩初始为空）', () => {
+  // 踩过：新增规则时 prompt 预填了一段默认文案，于是"还没写规矩才显示预设"的判断永远不成立，
+  // 用户在新规则页根本看不到预设（实测报"添加自动时，没有预设"）。
+  const add = source.slice(source.indexOf('function AddContact({'), source.indexOf('// ---- 待办'));
+  assert.match(add, /\[prompt,setPrompt\]=useState\(''\)/, '新增规则的规矩要留空');
+  assert.match(add, /placeholder:'例如：用自然、友好、简短的中文回复日常聊天/, '默认那句话退成占位示例');
+  assert.match(add, /prompt:finalPrompt,kind/, '一个字都没写也要能用默认规矩加上');
+  // 预设本身仍只在空的时候出现
+  assert.match(source, /if\(String\(value\?\?''\)\.trim\(\)\)return null;/);
+});
