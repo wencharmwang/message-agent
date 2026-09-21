@@ -2088,7 +2088,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       editing?h('div',{style:{padding:'0 20px 18px',flex:1}},
         h('label',{style:fieldLabel},'希望助手怎样回复这个人？'),
         h('textarea',{value:prompt,onChange:event=>setPrompt(event.target.value),rows:5,style:{...field,resize:'vertical',lineHeight:1.7}}),
-        h(StylePresetPicker,{disabled:busy,onPick:setPrompt}),
+        h(StylePresetPicker,{disabled:busy,onPick:setPrompt,value:prompt}),
         h(RuleMemory,{rule}),
         h('p',{style:{...hint,marginTop:8}},'只对这个人生效。改完按新规矩继续回复，不用重新开启。'),
         h('div',{style:{display:'flex',gap:10}},
@@ -2206,7 +2206,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('div',null,
           h('label',{style:fieldLabel},'2. 要自动回复的话，告诉助手怎么回'),
           h('textarea',{value:prompt,onChange:event=>setPrompt(event.target.value),rows:5,style:{...field,resize:'vertical',lineHeight:1.7}}),
-          !crm&&h(StylePresetPicker,{disabled:busy,onPick:setPrompt}),
+          !crm&&h(StylePresetPicker,{disabled:busy,onPick:setPrompt,value:prompt}),
           h('p',{style:{...hint,marginTop:8}},crm?'不想让它自动回复也可以，保持关闭就行。':'每个联系人都可以写得不一样。加好即开始监听，想停就暂停。'))),
       h('div',{style:{display:'flex',gap:10,marginTop:18,paddingTop:16,borderTop:'1px solid var(--lg-card-line)'}},
         h('button',{onClick:add,disabled:busy,style:button(true)},busy?'请稍等…':'确认'),
@@ -3021,16 +3021,18 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
    * 所以这里只提供"填进去再改"的几套现成文本，配置本身留在规则里（规则自带的那段优先）。
    * 不可修改的系统契约不在这里展示：和以前一样，后台默认拼上去就行。
    */
-  function StylePresetPicker({onPick,disabled}){
+  function StylePresetPicker({onPick,disabled,value}){
     const presets=usePoller(true,()=>api('reply-style'),300000);
     const list=presets.data?.presets||[];
     if(!list.length)return null;
-    // 四个按钮换成下拉：省地方，也不会让人以为"点了就等于选定了"。
-    return h('div',{style:{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginTop:8}},
-      h('span',{style:{fontSize:12,color:C.text3}},'照着写'),
-      h(Select,{value:'',minWidth:200,disabled,placeholder:'选一个现成的，再按这个人改',
-        groups:[{items:list.map(item=>({value:item.id,label:item.name}))}],
-        onChange:id=>{const hit=list.find(item=>item.id===id);if(hit)onPick(hit.text);}}));
+    // **只在还没写规矩时出现**：写好了它就该消失（那时候它只是噪音，
+    // 还会让人以为"是不是还得再选点什么"）；把内容清空它会自己回来。
+    if(String(value??'').trim())return null;
+    return h('div',{style:{marginTop:10}},
+      h('p',{style:{...hint,margin:'0 0 8px'}},'还没写规矩？选一个现成的开始，再按这个人改：'),
+      h('div',{style:{display:'flex',gap:8,flexWrap:'wrap'}},
+        list.map(item=>h('button',{key:item.id,type:'button',disabled,style:small(false),
+          onClick:()=>onPick(item.text)},item.name))));
   }
 
   /**
