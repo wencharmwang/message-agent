@@ -1805,6 +1805,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         border:'1px solid '+(mine?'transparent':'var(--lg-card-line)'),
         backgroundColor:mine?'var(--ma-primary-soft)':FIELD_BG,color:C.text}},
         message.content,
+        // 语音还没转出来时**照样先把消息显示出来**（内容是 [语音]），只挂一句"转写中"——
+        // 转写在后台排队做，页面不等它。等它写完，下次刷新这条就变成文字了。
+        message.pending_voice?h('span',{style:{display:'block',fontSize:11,color:C.text3,marginTop:4}},
+          '正在这台电脑上转成文字…'):null,
         h('span',{style:{display:'block',fontSize:11,color:C.text3,marginTop:4}},messageTime(message.at))));
   }
 

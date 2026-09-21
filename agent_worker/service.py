@@ -14,6 +14,7 @@ import time
 import traceback
 import unicodedata
 import urllib.request
+import queue
 import re
 import difflib
 from .database import Store
@@ -235,6 +236,17 @@ class Worker:
         self.config = config
         self.store = Store(config['database'])
         self.mcp = mcp or Mcp(config['runtime_settings_file'], config['worker_token_file'])
+        # 语音：一条后台线程 + 一个常驻识别进程。
+        # 读消息**绝不能**在这里等转写（一条 1-2 秒，一次读十几条就是十几秒，页面直接卡住）。
+        # 所以读的时候只看缓存；缺的丢进队列，后台慢慢转，下次读就有了。
+        self._voice_queue = queue.Queue()
+        self._voice_pending = set()
+        self._voice_failed = set()
+        self._voice_daemon = None
+        self._voice_stop = threading.Event()
+        self._voice_thread = threading.Thread(target=self._voice_worker, daemon=True,
+                                              name='voice-transcribe')
+        self._voice_thread.start()
         self.harness = harness or Harness(config)
         self.stop = threading.Event()
         self.last_error = ''
@@ -427,11 +439,16 @@ class Worker:
         kind = 'text' if local_type == 1 else str(local_type)
         # 语音：能转成文字就把文字当正文（整理、会话详情、首页都用得上），
         # 转不出来仍旧退回 [语音] 占位。有缓存，同一条只转一次。
+        pending_voice = False
         if local_type == 34:
-            spoken = self.voice_text(row[0])
+            spoken = voice.cached_only(self._data_dir(), row[0])
             if spoken:
                 text = spoken
                 kind = 'text'
+            else:
+                # 还没转过：**不等**，标一下让界面显示"转写中"，同时排进后台队列。
+                pending_voice = True
+                self._queue_voice(row[0])
         if not text and label:
             text = '[' + label + ']'
         return {
@@ -441,6 +458,7 @@ class Worker:
             'type': kind,
             'at': row[4] or 0,
             'sort_seq': row[2] or 0,
+            'pending_voice': pending_voice,
         }
 
     def db_sessions(self, limit=500):
@@ -667,6 +685,11 @@ class Worker:
             return self.watcher
 
     def close(self):
+        # 别把常驻的识别进程留成孤儿：Worker 退出时一起收掉。
+        try:
+            self.close_voice()
+        except Exception:
+            pass
         if self.watcher is not None:
             self.watcher.close()
             self.watcher = None
@@ -769,6 +792,11 @@ class Worker:
                 raise voice.VoiceError('库里没有这段语音的音频')
             wav = self._data_dir() / 'voice' / ('v%s.wav' % local_id)
             voice.silk_to_wav(blob, wav, app_root)
+            # 优先用常驻服务：模型已经载好了，一条只要 1~2 秒；
+            # 它起不来才退回"每次起进程"的老路（慢，但至少能用）。
+            daemon = self._voice_daemon_instance()
+            if daemon is not None:
+                return daemon.transcribe(wav, local_id)
             return voice.transcribe(wav, str(python_exe),
                                     prefs.get('model') or voice.DEFAULT_MODEL, lib_dir=lib_dir)
 
@@ -781,10 +809,68 @@ class Worker:
             return ''
 
     def _transcribe(self, event) -> str:
-        """事件里的语音消息 -> 文字。"""
+        """事件里的语音消息 -> 文字。
+
+        这条路径**可以等**：它在自动回复的异步流程里，不像读界面那样会卡住用户。
+        """
         if event.get('direction') != 'incoming' or event.get('local_type') != 34:
             return ''
         return self.voice_text(event.get('local_id'))
+
+    def _queue_voice(self, local_id):
+        """把一条待转写的语音排进后台队列。
+
+        去重 + 上限：一次读十几条语音、或者用户反复刷新，都不该堆成一座山；
+        失败过的也不再排（省得一直重试烧 CPU）。
+        """
+        try:
+            key = int(local_id)
+        except (TypeError, ValueError):
+            return
+        if key in self._voice_pending or key in self._voice_failed:
+            return
+        if self._voice_queue.qsize() >= 50:
+            return
+        self._voice_pending.add(key)
+        self._voice_queue.put(key)
+
+    def _voice_worker(self):
+        """后台转写线程：界面不等它，转完写进缓存，下次读就有文字了。"""
+        while not self._voice_stop.is_set():
+            try:
+                key = self._voice_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                if not self.voice_text(key):
+                    self._voice_failed.add(key)
+            except Exception:
+                self._voice_failed.add(key)
+            finally:
+                self._voice_pending.discard(key)
+
+    def _voice_daemon_instance(self):
+        """常驻识别进程（懒启动，模型只载一次）。不可用时返回 None。"""
+        if self._voice_daemon is not None:
+            return self._voice_daemon
+        runtime = voice.voice_python(self._data_dir())
+        if runtime is None:
+            return None
+        python_exe, lib_dir = runtime
+        prefs = voice.load_prefs(self._data_dir())
+        self._voice_daemon = voice.Daemon(str(python_exe),
+                                          prefs.get('model') or voice.DEFAULT_MODEL, lib_dir)
+        return self._voice_daemon
+
+    def close_voice(self):
+        """停掉后台线程与常驻进程（进程退出时调用）。"""
+        self._voice_stop.set()
+        daemon, self._voice_daemon = self._voice_daemon, None
+        if daemon is not None:
+            try:
+                daemon.close()
+            except Exception:
+                pass
 
     def _rules_by_username(self):
         out = {}

@@ -227,3 +227,33 @@ class VoiceWiringTests(WorkerDbWatchTests):
             self.assertEqual(called, [], '开关关着的时候不该去找识别环境，更不该启动它')
         finally:
             voice_module.voice_python = original
+
+
+    def test_reading_messages_never_waits_for_transcription(self):
+        """读消息**绝不能**在请求里转写。
+
+        用户实测："进消息页要等好久才显示"—— 因为一次读十几条语音，每条 1-2 秒，
+        页面就卡在那儿。转写必须在后台排队，读的时候只看缓存。
+        """
+        import inspect
+        from agent_worker import service
+        row = inspect.getsource(service.Worker._message_row)
+        self.assertIn('cached_only', row, '读消息要走"只看缓存"')
+        self.assertNotIn('voice_text(', row, '读消息里不许出现会触发转写的调用')
+        self.assertIn('_queue_voice', row, '没转过的要排进后台队列')
+        self.assertIn('pending_voice', row, '要告诉界面"这条在转"')
+
+    def test_background_queue_dedupes_and_has_a_ceiling(self):
+        from agent_worker import voice as voice_module
+        original = voice_module.voice_python
+        # 没装识别环境：排队逻辑照样要能跑（不能报错，也不能无限堆）
+        voice_module.voice_python = lambda *a, **k: None
+        try:
+            for _ in range(3):
+                self.worker._queue_voice(42)
+            self.assertEqual(self.worker._voice_queue.qsize(), 1, '同一条不该排多次')
+            self.worker._voice_failed.add(99)
+            self.worker._queue_voice(99)
+            self.assertEqual(self.worker._voice_queue.qsize(), 1, '失败过的不再排')
+        finally:
+            voice_module.voice_python = original

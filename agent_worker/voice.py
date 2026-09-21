@@ -23,6 +23,8 @@ import os
 import struct
 import subprocess
 import sys
+import threading
+import time
 import tempfile
 import wave
 from pathlib import Path
@@ -227,3 +229,121 @@ def cached_transcript(data_dir: str | Path, key: str, producer) -> str:
         except OSError:
             pass
     return text
+
+
+# --------------------------------------------------------------------------
+# 常驻识别服务：模型只加载一次
+#
+# 为什么非做不可：一次性起进程 + 载模型实测 **9-12 秒/条**，而真正的转写只要 1-2 秒。
+# 用户打开语音开关就说明有需求，"每条等十秒"是不能接受的手感。
+# 这里起一个后台进程（voice_daemon.py），用 stdin/stdout 的 JSON 行通信，模型只载一次。
+# --------------------------------------------------------------------------
+class Daemon:
+    """常驻的 faster-whisper 进程。进程崩了下次调用会自动重起。"""
+
+    def __init__(self, python_exe: str, model: str, lib_dir=None):
+        self.python_exe = str(python_exe)
+        self.model = model
+        self.lib_dir = str(lib_dir) if lib_dir else None
+        self._proc = None
+        self._lock = threading.Lock()
+        self._startup_error = ''
+
+    def _env(self) -> dict:
+        env = dict(os.environ)
+        env['PYTHONUTF8'] = '1'
+        env['PYTHONIOENCODING'] = 'utf-8'
+        env['MA_VOICE_MODEL'] = self.model
+        if self.lib_dir:
+            env['PYTHONPATH'] = self.lib_dir + os.pathsep + env.get('PYTHONPATH', '')
+        return env
+
+    def _ensure(self):
+        """确保进程活着。返回 (proc, error)。"""
+        if self._proc is not None and self._proc.poll() is None:
+            return self._proc, ''
+        script = Path(__file__).resolve().parent / 'voice_daemon.py'
+        try:
+            self._proc = subprocess.Popen(
+                [self.python_exe, str(script)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, encoding='utf-8', errors='replace', env=self._env(), bufsize=1,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except Exception as error:
+            self._proc = None
+            return None, '识别服务起不来：%s' % error
+        # 第一行是就绪信息（含模型载入失败的原因）
+        ready = self._read_line(timeout=600)
+        if not ready:
+            return None, '识别服务没有就绪'
+        if ready.get('error'):
+            self._startup_error = str(ready['error'])[:200]
+            return None, self._startup_error
+        self._startup_error = ''
+        return self._proc, ''
+
+    def _read_line(self, timeout: int):
+        """读一行 JSON。daemon 载模型可能要几十秒，所以超时给得很宽。"""
+        deadline = time.time() + timeout
+        stream = self._proc.stdout
+        while time.time() < deadline:
+            line = stream.readline()
+            if not line:
+                return None
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+        return None
+
+    def transcribe(self, wav_path: str | Path, local_id) -> str:
+        with self._lock:
+            proc, error = self._ensure()
+            if proc is None:
+                raise VoiceError(error or '识别服务不可用')
+            try:
+                line = json.dumps({'wav': str(wav_path), 'id': local_id})
+                proc.stdin.write(line + chr(10))
+                proc.stdin.flush()
+            except Exception as write_error:
+                self.close()
+                raise VoiceError('识别服务连接断了：%s' % write_error)
+            reply = self._read_line(timeout=300)
+            if reply is None:
+                self.close()
+                raise VoiceError('识别服务没有回应')
+            if reply.get('error'):
+                raise VoiceError(str(reply['error'])[:200])
+            return str(reply.get('text') or '').strip()
+
+    def close(self):
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            proc.stdin and proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
+def cached_only(data_dir: str | Path, key) -> str:
+    """只看缓存，**绝不触发转写**。
+
+    读消息列表（首页、整理、会话详情）必须走这条：一条语音要 1-2 秒，
+    一次读十几条就把页面卡死了（用户实测："进消息页要等好久才显示"）。
+    没转过的就先不显示，交给后台队列，用户看到的是「转写中」。
+    """
+    target = Path(data_dir) / 'voice' / 'cache' / (str(key) + '.txt')
+    try:
+        if target.exists():
+            return io.open(target, encoding='utf-8').read().strip()
+    except OSError:
+        pass
+    return ''
