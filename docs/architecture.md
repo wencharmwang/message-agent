@@ -194,3 +194,68 @@ CRM 归 Message Agent 的业务模块，不放进通用消息 Runtime。第一�
 ## 9. 验收与后续入口
 
 引擎内置、公共 Runtime 复用、密钥保管、明文副本策略、模型配置与发布迁移见 [打包与交付方案](packaging-plan.md)。本轮没有运行安装器、重启服务、变更规则或向真实联系人发送消息。
+
+
+## 10. 监听本地数据库的具体实现（2026-09-21 核对）
+
+这一节回答"消息到底是怎么被监听到的"，都是照着代码和真实库核对过的。
+
+### 10.1 链路
+
+```text
+微信 4.x 原始库（加密）
+  └─ wechat-db-lab 解锁 → vault/<账号>/plain/**（明文副本）
+       ├─ python -m wechat_db_lab.cli watch --interval 3 --overlap 10   ← 子进程，逐行输出 JSON 事件
+       │     └─ WatcherSource（agent_worker/watcher_source.py）解析 stdout → 事件队列
+       │           └─ Worker.tick() → _handle_event → 规则匹配 → 交引擎决策 → 发送
+       └─ 界面用的读取：Worker 直接用 SQL 查明文副本（不经过 watcher）
+```
+
+* **监听靠子进程**：`WatcherSource` 起一个 `wechat_db_lab.cli watch` 进程，每 3 秒扫一次新消息，
+  按 `sort_seq`（毫秒时间戳、全局单调）去重，逐行打印 JSON 事件（username / direction /
+  text / local_type / sort_seq / create_time）。
+* **Worker 再按自己的 `poll_interval_seconds` 取事件**，所以端到端延迟 ≈ 两个周期（秒级）。
+* `PYTHONUTF8=1` + `encoding="utf-8"`：Windows 下不给这两个，中文正文会读成乱码（注释里记着）。
+
+### 10.2 界面读消息走的是另一条路（直接 SQL）
+
+`db_sessions / db_messages / db_recent` 全部是 **read-only 直查**明文副本，不打开微信窗口：
+
+| 数据 | 来源 |
+| --- | --- |
+| 会话列表 | `session/session.db` → `SessionTable`（is_hidden=0，按 sort_timestamp 倒序） |
+| 显示名 | `contact/contact.db` → `contact`（remark > nick_name > username） |
+| 消息正文 | `message/message_*.db` → 每会话一张 `Msg_<md5(username)>` 分片表 |
+| 发送者 | `Name2Id`（分片内，权威）+ resource 库的 `SenderName2Id`（补群成员） |
+
+查询用 `mode=ro&immutable=1` 打开。`db_recent` 只建一次上下文、只遍历一遍分片，
+把"每个会话查一次"的 O(会话×分片) 降到 O(分片+目标表)。
+
+### 10.3 会不会回复：门在 `_ingest`
+
+```python
+should_reply = (direction == 'incoming' and local_type == 1 and bool(text))
+```
+
+`local_type` 是微信的类型号：1 文本 / 3 图片 / 34 语音 / 43 视频 / 47 表情 / 49 文件或链接。
+**只有文本会触发回复**。非文本以前是静默丢弃（连提示都没有），现在会在规则上留一句说明
+（见 `_note_unhandled`），界面就能告诉用户"对方发的是语音，我看不到内容"。
+
+### 10.4 语音消息：数据库里只有音频，没有文字（实测）
+
+* 语音正文的实际音频在 `message/media_0.db` 的 **`VoiceInfo.voice_data`**，格式是
+  **SILK v3**（`#!SILK_V3`），字段还有 `create_time / local_id / svr_id`。
+* 全库扫描 `voice / trans / asr / audio` 相关表：**只有 `VoiceInfo` 这一张**，
+  没有任何"语音转文字"的结果表。
+* 结论：**微信没有把语音转文字存进数据库** —— 除非用户自己在客户端点过"转文字"，
+  而那个结果也不落库。
+
+所以要处理语音只能自己转文字，成本最低的三条路：
+
+| 方案 | 成本 | 评价 |
+| --- | --- | --- |
+| 本地 Whisper（faster-whisper / whisper.cpp，tiny~base 模型 75–150 MB） | 一次性下载 + 每条约 0.5–2 秒 CPU | **推荐**。SILK 要先解码成 WAV（`pilkwav` 之类的纯 Python 解码器，或 silk-v3-decoder），全本地、不联网、不花钱 |
+| 云 ASR（各家的语音识别 API） | 按分钟计费 | 效果最好，但聊天语音要出本机，和"不外传"的产品口径冲突，得让用户明确同意 |
+| Windows 自带离线识别 | 免费 | 中文识别质量差、要配语言包，不值得 |
+
+不做的代价现在是"一句话说明"，见 10.3。
