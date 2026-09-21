@@ -1645,6 +1645,37 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
    * items 来自 data/chat-log.json，只为"刷新之后还能看见刚才那几轮"。
    * 每次提问，服务端都会把一份消息快照拼进提示词 —— 助手不需要打开微信窗口读消息。
    */
+  /**
+   * 会随内容长高的问话框。
+   *
+   * 原来是个单行 `<input>`：问题一长只能看到一行（用户实测："输入文案较多时只能显示一行"）。
+   * 聊天类输入的惯例：**Enter 发送、Shift+Enter 换行**；
+   * 还有一个中文用户必需的细节 —— 输入法组字时按 Enter 是**选字**，不能当成发送
+   * （`event.isComposing`），否则打"zhong午"选词那一下就发出去了。
+   */
+  function GrowingAskField({value,onChange,onSubmit,placeholder,ariaLabel,maxRows=7}){
+    const ref=useRef(null);
+    const lineHeight=22, padding=16;
+    const cap=maxRows*lineHeight+padding;
+    const resize=()=>{
+      const el=ref.current;
+      if(!el)return;
+      el.style.height='auto';
+      el.style.height=Math.min(el.scrollHeight,cap)+'px';
+      el.style.overflowY=el.scrollHeight>cap?'auto':'hidden';
+    };
+    useEffect(resize,[value]);
+    return h('textarea',{ref,value,rows:1,placeholder,'aria-label':ariaLabel,
+      onChange:event=>onChange(event.target.value),
+      onKeyDown:event=>{
+        if(event.key!=='Enter'||event.shiftKey||event.isComposing)return;
+        event.preventDefault();
+        onSubmit();
+      },
+      style:{...field,flex:'1 1 auto',minWidth:0,resize:'none',lineHeight:lineHeight+'px',
+        height:lineHeight+padding,maxHeight:cap,overflowY:'hidden',boxSizing:'border-box'}});
+  }
+
   function HomeChat({narrow}){
     const [items,setItems]=useState([]),[text,setText]=useState('');
     const [asking,setAsking]=useState(false),[error,setError]=useState(''),[note,setNote]=useState('');
@@ -1699,9 +1730,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h(Notice,{error}),
         h(Result,{text:note}),
         h('div',{style:{display:'flex',gap:8,alignItems:'center'}},
-          h('input',{value:text,onChange:event=>setText(event.target.value),
-            onKeyDown:event=>{if(event.key==='Enter')submit();},
-            placeholder:'问助手任何关于你消息的事…','aria-label':'问助手',style:{...field,flex:'1 1 auto',minWidth:0}}),
+          h(GrowingAskField,{value:text,onChange:setText,onSubmit:submit,
+            placeholder:'问助手任何关于你消息的事…（Enter 发送，Shift+Enter 换行）',ariaLabel:'问助手'}),
           h('button',{onClick:()=>submit(),disabled:asking||!text.trim(),style:{...button(true),flexShrink:0}},asking?'…':'发送'))));
   }
 
