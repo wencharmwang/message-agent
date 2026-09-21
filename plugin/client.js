@@ -1526,6 +1526,32 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
    * 动作。旧版这类建议直接进待办，结果把用户不知道是什么的群聊也塞进了今天要做的事。
    */
   function OrganizeResult({result,busy,picked,added,onCheck,onAdd,onOpen}){
+    // 「拟一版」：整理告诉我们"该回复谁"，这里直接把草稿写出来，用户改完点发送。
+    // 发送是**唯一会动这台电脑**的动作（要打开微信窗口），所以链路上只有这一个触发点：
+    // 用户点「发送」。不做二次确认（用户明确说了：不是删除）。
+    const [draftOf,setDraftOf]=useState(''),[draftText,setDraftText]=useState('');
+    const [draftMeta,setDraftMeta]=useState(null),[draftBusy,setDraftBusy]=useState(''),[draftNote,setDraftNote]=useState('');
+    const [draftError,setDraftError]=useState('');
+    async function makeDraft(item,index){
+      const key=String(index);
+      setDraftBusy(key);setDraftError('');setDraftNote('');
+      try{
+        const made=await api('reply-draft',{title:item.conversation||''});
+        setDraftMeta({provider:made.provider,conversation:made.conversation,title:made.title});
+        setDraftText(made.text||'');setDraftOf(key);
+      }catch(e){
+        setDraftError(e.message);setDraftOf('');
+      }finally{setDraftBusy('');}
+    }
+    async function sendDraft(){
+      if(!draftMeta||!draftText.trim())return;
+      setDraftBusy('send');setDraftError('');setDraftNote('');
+      try{
+        const sent=await api('send',{provider:draftMeta.provider,conversation:draftMeta.conversation,text:draftText.trim()});
+        setDraftNote(sent&&sent.status==='not_sent'?'没有发出去（'+(sent.code||'消息窗口不可用')+'）':'已发送给 '+draftMeta.title);
+        setDraftOf('');
+      }catch(e){setDraftError(e.message);}finally{setDraftBusy('');}
+    }
     const todos=result?.todos||[];
     const focus=result?.focus||[];
     // 已经处理过的条目在服务端就被摘掉了（见 reconcileSuggestions），这里只报个数，
@@ -1555,20 +1581,43 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       !!todos.length&&h('div',null,
         h('p',{style:{...hint,margin:'0 0 8px'}},'勾选要记进待办的事（默认全选）：'),
         h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
-          todos.map((item,index)=>h('label',{key:item.title+index,
-            style:{display:'flex',gap:10,alignItems:'flex-start',padding:'11px 14px',borderTop:index?'1px solid '+C.border:'none',
-              cursor:busy||isAdded(index)?'default':'pointer'}},
-            h(Checkbox,{checked:picked[index]!==false&&!isAdded(index),disabled:busy||isAdded(index),
-              label:'记成待办：'+firstLine(item.title,20),onChange:event=>onCheck(index,event.target.checked),style:{marginTop:3}}),
-            h('div',{style:{flex:1,minWidth:0}},
-              h('div',{style:{fontSize:14,color:isAdded(index)?C.text3:C.text,lineHeight:1.6,
-                textDecoration:'none',wordBreak:'break-word'}},item.title),
-              (item.detail||item.conversation)&&h('div',{style:{fontSize:12,color:C.text3,marginTop:3,lineHeight:1.6,wordBreak:'break-word'}},
-                (item.detail||'')+(item.conversation?((item.detail?' · ':'')+'来自 '+item.conversation):''))),
-            isAdded(index)&&h('span',{style:{fontSize:12,color:C.ok,flexShrink:0}},'已加入')))),
+          todos.map((item,index)=>h('div',{key:item.title+index,
+            style:{borderTop:index?'1px solid '+C.border:'none'}},
+            // 外层是 div、label 只包复选框和文字：按钮放进 label 里会被它吃掉点击
+            // （点"拟一版"变成勾选复选框）。
+            h('div',{style:{display:'flex',gap:10,alignItems:'flex-start',padding:'11px 14px'}},
+              h('label',{style:{display:'flex',gap:10,alignItems:'flex-start',flex:1,minWidth:0,
+                cursor:busy||isAdded(index)?'default':'pointer'}},
+                h(Checkbox,{checked:picked[index]!==false&&!isAdded(index),disabled:busy||isAdded(index),
+                  label:'记成待办：'+firstLine(item.title,20),onChange:event=>onCheck(index,event.target.checked),style:{marginTop:3}}),
+                h('div',{style:{flex:1,minWidth:0}},
+                  h('div',{style:{fontSize:14,color:isAdded(index)?C.text3:C.text,lineHeight:1.6,
+                    textDecoration:'none',wordBreak:'break-word'}},item.title),
+                  (item.detail||item.conversation)&&h('div',{style:{fontSize:12,color:C.text3,marginTop:3,lineHeight:1.6,wordBreak:'break-word'}},
+                    (item.detail||'')+(item.conversation?((item.detail?' · ':'')+'来自 '+item.conversation):'')))),
+              // 「拟一版」只在能确定收件人时出现：整理给的是显示名，解析不到会话就没法发。
+              item.conversation&&h('button',{type:'button',disabled:!!draftBusy||busy,
+                onClick:()=>makeDraft(item,index),style:{...small(false),flexShrink:0},
+                title:'写一版回复草稿，你看过再发'},draftBusy===String(index)?'正在写…':'拟一版'),
+              isAdded(index)&&h('span',{style:{fontSize:12,color:C.ok,flexShrink:0}},'已加入')),
+            draftOf===String(index)&&h('div',{style:{margin:'0 14px 12px',padding:'12px 13px',
+                border:'1px solid '+C.border,borderRadius:10,background:C.panel}},
+              h('p',{style:{...hint,margin:'0 0 8px'}},
+                '发给「'+(draftMeta?.title||item.conversation)+'」—— 可以改，改完点发送。'),
+              h('textarea',{value:draftText,rows:4,'aria-label':'回复草稿',
+                onChange:event=>setDraftText(event.target.value),
+                style:{...field,width:'100%',boxSizing:'border-box',lineHeight:1.7,resize:'vertical'}}),
+              h('div',{style:{display:'flex',gap:10,alignItems:'center',marginTop:10,flexWrap:'wrap'}},
+                h('button',{type:'button',onClick:sendDraft,disabled:!!draftBusy||!draftText.trim(),
+                  style:button(true)},draftBusy==='send'?'正在发送…':'发送'),
+                h('button',{type:'button',onClick:()=>{setDraftOf('');setDraftError('');},disabled:!!draftBusy,
+                  style:button(false,false,true)},'取消'),
+                h('span',{style:{fontSize:12,color:C.text3}},'会打开微信窗口发出')),
+              h(Notice,{error:draftError}))))),
         h('button',{onClick:onAdd,disabled:busy||!chosen.length,style:{...small(true),marginTop:12}},
           busy?'正在记…':(chosen.length?('加入选中的 '+chosen.length+' 件'):'没有选中任何条目')),
-        hidden?h('p',{style:{...hint,margin:'10px 0 0'}},
+        draftNote?h('p',{style:{...hint,margin:'10px 0 0',color:C.ok}},draftNote):null,
+        hidden?h('p',{style:{...hint,margin:'10px 0 0'}}, 
           '另有 '+hidden+' 条已经记进待办（或已完成），这次没有再列出来。'):null),
       !todos.length&&!focus.length&&h('p',{style:{margin:0,fontSize:14,color:C.text2,lineHeight:1.8}},'这次整理没有给出可执行的事项。'),
       h('p',{style:{...hint,margin:'12px 0 0'}},'整理只看消息本身；不会打开微信窗口，也不会发送任何消息。'));
@@ -2862,6 +2911,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
 
   function KnowledgeCard({k,onAct}){
     const [editing,setEditing]=useState(false);
+    const [confirming,setConfirming]=useState(false);
     if(editing)return h(KnowledgeForm,{initial:k,onDone:()=>{setEditing(false);onAct(()=>Promise.resolve());},onCancel:()=>setEditing(false)});
     return h('article',{style:card},
       h('div',{style:{display:'flex',justifyContent:'space-between',gap:12,alignItems:'center'}},
@@ -2879,7 +2929,11 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       h('div',{style:{display:'flex',gap:10,flexWrap:'wrap',marginTop:12}},
         k.status!=='published'&&h('button',{onClick:()=>onAct(()=>api('context/knowledge/'+k.id+'/publish',{})),style:small(true)},'发布'),
         k.status==='published'&&h('button',{onClick:()=>onAct(()=>api('context/knowledge/'+k.id+'/retire',{})),style:small(false)},'停用'),
-        h('button',{onClick:()=>setEditing(true),style:small(false)},'编辑')));
+        h('button',{onClick:()=>setEditing(true),style:small(false)},'编辑'),
+        // 删除是**真删**（停用只是停用）。分两步：第一次点变成"确认删除"，再点才真删 ——
+        // 不用浏览器原生弹窗（和这块界面的风格不搭），也不给一次误点就丢内容的机会。
+        h('button',{onClick:()=>{if(!confirming)return setConfirming(true);
+            onAct(()=>mutate('context/knowledge/'+k.id,'DELETE'));},style:small(false,confirming)},confirming?'确认删除':'删除')));
   }
 
   function KnowledgeSection({data,refresh,filter,setFilter}){

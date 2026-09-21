@@ -145,6 +145,24 @@ export class Knowledge {
     return after;
   }
 
+  /**
+   * 真删除（用户要求：不用的可以删掉）。
+   *
+   * 与 retire 的区别：retire 是"停用但留档"，这条是**从库里去掉**。
+   * 连带删掉它的历史修订 —— 否则 revision 表会留下查不到的孤儿行。
+   * FTS 由触发器跟着清（database.mjs 里挂了 delete trigger）。
+   */
+  remove(workspaceId, id) {
+    const before = this.get(id, workspaceId);
+    if (!before) throw Object.assign(new Error('没有这条知识'), {code: 'CONTEXT_NOT_FOUND'});
+    this.db.transaction(tx => {
+      tx.prepare('DELETE FROM item_revisions WHERE workspace_id = ? AND item_type = ? AND item_id = ?')
+        .run(workspaceId, 'knowledge', id);
+      tx.prepare('DELETE FROM knowledge_items WHERE id = ? AND workspace_id = ?').run(id, workspaceId);
+    });
+    return before;
+  }
+
   /** Restore the previous revision snapshot as the current content (a new revision). */
   rollback(workspaceId, id, {toRevision} = {}) {
     const row = this.get(id, workspaceId);

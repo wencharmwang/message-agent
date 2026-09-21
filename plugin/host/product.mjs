@@ -1226,6 +1226,59 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
         respond(res, 200, {ok: true, provider: 'deepseek-official'});
         return true;
       }
+      // ---- 「拟一版」与发送（整理结果里的待办可以直接回） --------------------------
+      // 用户的原话：整理时发现"要回复某个人"，是不是应该给一个草稿 + 编辑 + 发送按钮。
+      // 引擎早就有了（draftReply 会读知识库、说话方式、风险门），这里只是把它接到界面上。
+      if (path === '/message-agent/api/reply-draft' && req.method === 'POST') {
+        if (!draftReply) throw Object.assign(new Error('助手暂时不能拟稿'), {code: 'WORKER_UNAVAILABLE'});
+        const payload = await readBody(req);
+        const title = typeof payload?.title === 'string' ? payload.title.trim() : '';
+        if (!title) throw Object.assign(new Error('不知道要回谁'), {code: 'PRODUCT_API_ERROR'});
+        // 整理结果里给的是**显示名**，发送要的是会话 id —— 在这里换成原生身份，
+        // 免得把窗口标题当用户名用（那是微信里的可见文本，不是 id）。
+        // 先看微信当前可见列表；它可能还没刷过（或者这个会话不在可见区），
+        // 于是再用"本地数据库的最近会话"兜一次 —— 首页就是用它，名字对得上。
+        const listed = await runtime.listConversations().catch(() => null);
+        let sessions = listed?.sessions ?? listed?.items ?? [];
+        if (!sessions.length) {
+          const recent = await runtime.dbRecent({sessions: 60, perSession: 1}).catch(() => null);
+          sessions = recent?.sessions ?? [];
+        }
+        const hit = sessions.find(item => (item.title ?? item.display ?? '') === title)
+          ?? sessions.find(item => (item.title ?? item.display ?? '').includes(title));
+        if (!hit) throw Object.assign(new Error('找不到「' + title + '」这个会话，先刷新一下消息列表'), {code: 'CONTEXT_NOT_FOUND'});
+        const provider = hit.provider ?? 'wechat-main';
+        const conversation = hit.username ?? hit.conversation ?? '';
+        if (!conversation) throw Object.assign(new Error('这个会话还没有可用的身份'), {code: 'CONTEXT_NOT_FOUND'});
+        const conversationKey = identityKey(provider, conversation);
+        const page = await runtime.readConversationFromDb({username: conversation}).catch(() => null);
+        const rule = (await runtime.status().catch(() => null))?.rules
+          ?.find(entry => entry.provider === provider && entry.conversation === conversation) ?? null;
+        const generated = await draftReply({
+          identity: {provider, conversation, title: hit.title ?? title, kind: hit.kind ?? 'direct'},
+          conversationKey,
+          rule: rule ?? {provider, conversation, title: hit.title ?? title, kind: hit.kind ?? 'direct', prompt: ''},
+          contextData: {messages: page?.messages ?? []},
+          recentDeliveries: []
+        });
+        respond(res, 201, {text: String(generated.text || ''), provider, conversation, title: hit.title ?? title,
+          evidence: generated.evidence ?? null});
+        return true;
+      }
+      // 发送。链路上没有任何自动触发点 —— 只有用户点了「发送」才会走到这里。
+      if (path === '/message-agent/api/send' && req.method === 'POST') {
+        const payload = await readBody(req);
+        const conversation = typeof payload?.conversation === 'string' ? payload.conversation.trim() : '';
+        const body = typeof payload?.text === 'string' ? payload.text.trim() : '';
+        if (!conversation) throw Object.assign(new Error('不知道要发给谁'), {code: 'PRODUCT_API_ERROR'});
+        if (!body) throw Object.assign(new Error('正文不能为空'), {code: 'PRODUCT_API_ERROR'});
+        const provider = typeof payload?.provider === 'string' ? payload.provider : 'wechat-main';
+        const result = await runtime.sendMessage({provider, conversation,
+          text: body, requestId: 'manual-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)});
+        respond(res, 200, result ?? {status: 'sent'});
+        return true;
+      }
+
       // 「回复规矩」：哪些能改、哪些不能改，连预设一起给界面。
       // 用户的要求是"只有技术或运行逻辑不让改" —— 所以固定段也照样返回，
       // 界面把它显示成只读区，让用户看得见边界在哪。
@@ -1499,6 +1552,10 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
             respond(res, 200, k); return true;
           }
         }
+          // 真删除（不用的知识可以删掉）。retire 只是停用，不是删除。
+          if (id && req.method === 'DELETE') { respond(res, 200, {removed: context.knowledge.remove(ws, id).id}); return true; }
+
+
         if (resource === 'memories') {
           if (!id && req.method === 'GET') {
             const ck = url.searchParams.get('conversation') ?? undefined;
