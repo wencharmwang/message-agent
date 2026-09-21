@@ -1652,6 +1652,16 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
    * items 来自 data/chat-log.json，只为"刷新之后还能看见刚才那几轮"。
    * 每次提问，服务端都会把一份消息快照拼进提示词 —— 助手不需要打开微信窗口读消息。
    */
+  // 占位文案的样式只能靠 CSS —— `::placeholder` 没法用内联样式写，而插件没有自己的样式表。
+  // 只做一件事：提示语和输入**同字号**、颜色**更淡**（默认的浏览器样式两者都不一致，
+  // 用户实测："提示语的字体需要和输入保持一致，可以颜色设置淡一点点"）。
+  if (typeof document !== 'undefined' && !document.getElementById('ma-ask-style')) {
+    const style = document.createElement('style');
+    style.id = 'ma-ask-style';
+    style.textContent = '.ma-ask::placeholder{font-size:14px;color:var(--ma-subtle);opacity:1}';
+    document.head.appendChild(style);
+  }
+
   /**
    * 会随内容长高的问话框。
    *
@@ -1677,7 +1687,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       el.style.overflowY=el.scrollHeight>cap?'auto':'hidden';
     };
     useEffect(resize,[value]);
-    return h('textarea',{ref,value,rows:1,placeholder,'aria-label':ariaLabel,
+    return h('textarea',{ref,value,rows:1,placeholder,'aria-label':ariaLabel,className:'ma-ask',
       onChange:event=>onChange(event.target.value),
       onKeyDown:event=>{
         if(event.key!=='Enter'||event.shiftKey||event.isComposing)return;
@@ -1689,7 +1699,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         height:oneLine,maxHeight:cap,overflowY:'hidden',boxSizing:'border-box',
         border:'none',outline:'none',background:'transparent',color:C.text,
         // 右边留出箭头的宽度，长句换行时不会钻到箭头底下。
-        fontFamily:'inherit',fontSize:14,padding:'0 40px 0 0'}});
+        fontFamily:'inherit',fontSize:14,padding:'0 34px 0 0'}});
   }
 
   function HomeChat({narrow}){
@@ -1748,7 +1758,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h(Result,{text:note}),
         // 一个整体的圆角框：文字在左，发送箭头贴在**框内**右下角。
         // 按钮不再单独占一列 —— 多行时它不会漂在中间（用户实测指出过）。
-        h('div',{style:{position:'relative',padding:'8px 8px 8px 12px',
+        // 用 flex 让它铺满整行（块级 textarea 在这里会被内容压窄，占位文案就"显示不全"了）；
+        // 右侧内边距按箭头宽度 + 2px 给，多行时文案不会离箭头太远。
+        h('div',{style:{position:'relative',display:'flex',alignItems:'flex-end',
+            padding:'8px 8px 8px 12px',
             border:'1px solid var(--lg-card-line)',borderRadius:18,background:FIELD_BG}},
           h(GrowingAskField,{value:text,onChange:setText,onSubmit:submit,ariaLabel:'问助手',
             placeholder:'问助手任何关于你消息的事…'}),
