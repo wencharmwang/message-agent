@@ -2997,10 +2997,23 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const allLocal=providers.every(item=>isLocalProvider(item));
     const allCloud=providers.every(item=>!isLocalProvider(item));
     const mode=allLocal?'local':(allCloud?'cloud':'mixed');
-    const firstCloud=cloudModels.find(entry=>entry.id==='deepseek-v4-flash')||cloudModels[0];
-    const cloudValue=cloudPick||(firstCloud?firstCloud.provider+'::'+firstCloud.id:'');
-    const localValue=localPick||(localModels[0]?localModels[0].provider+'::'+localModels[0].id:'');
     const modeText=allLocal?'本机模型':(allCloud?'云端模型':'自定义（见高级设置）');
+    // 下拉里显示什么：先看用户刚选的；没有就看"现在真正在用的组合"是不是属于这一侧；
+    // 都没有才留空（那时显示占位文案）。之前把 value 写死成空串，于是选完也不回显（用户实测）。
+    const shownFor=side=>{
+      const picked=side==='local'?localPick:cloudPick;
+      if(picked)return picked;
+      const onThisSide=side==='local'?allLocal:allCloud;
+      return onThisSide?autoProvider+'::'+autoModel:'';
+    };
+    // 当前值不在目录里（比如那个模型被删了）也要能在下拉里看见自己 —— 否则触发器只剩占位文案，
+    // 用户会以为设置被改掉了。别处 TaskModelPicker 用同一个办法。
+    const itemsFor=(models,value)=>{
+      const items=models.map(entry=>({value:entry.provider+'::'+entry.id,
+        label:(entry.name===entry.id?entry.id:entry.name+' · '+entry.id)}));
+      if(value&&!items.some(item=>item.value===value))items.unshift({value,label:value});
+      return items;
+    };
 
     async function applySide(value){
       setModelError('');
@@ -3019,11 +3032,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('div',{style:{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}},
           // 云端一般有好几个模型，**让用户自己挑一个** —— 替他默认一个他不满意的，
           // 下次还得回来改（用户实测就撞上过）。
-          h(Select,{value:'',minWidth:240,disabled:!!saving||!models.length,
+          h(Select,{value:value,minWidth:240,disabled:!!saving||!models.length,
             placeholder:models.length?('选一个模型（'+models.length+' 个可用）'):'这一侧还没有模型',
-            groups:[{items:models.map(entry=>({value:entry.provider+'::'+entry.id,
-              label:(entry.name===entry.id?entry.id:entry.name+' · '+entry.id)}))}],
-            onChange:value2=>{setValue(value2);applySide(value2);}}),
+            groups:[{items:itemsFor(models,value)}],
+            onChange:next=>{setValue(next);applySide(next);}}),
           !models.length&&h('span',{style:{fontSize:12,color:C.text3}},
             key==='local'?'还没装本机模型（可选，见下面的说明）':'还没配置云端模型的密钥')));
 
@@ -3033,8 +3045,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('span',null,'现在用的是「'+modeText+'」。'),
         '选「本机模型」时，聊天内容不会离开这台电脑 —— 问助手会读到你的消息，介意的话就选它。'),
       h('div',{style:{display:'flex',flexDirection:'column',gap:10}},
-        sideRow('cloud','云端模型','快、效果好，内容会发给模型服务。',cloudModels,cloudValue,setCloudPick),
-        sideRow('local','本机模型','不联网，内容不出这台电脑。',localModels,localValue,setLocalPick)),
+        sideRow('cloud','云端模型','快、效果好，内容会发给模型服务。',cloudModels,shownFor('cloud'),setCloudPick),
+        sideRow('local','本机模型','不联网，内容不出这台电脑。',localModels,shownFor('local'),setLocalPick)),
       h('div',{style:{marginTop:12}},
         h('button',{onClick:()=>setAdvanced(value=>!value),style:{...small(false),borderRadius:99}},
           advanced?'收起高级设置':'高级设置（逐条链路的模型）')));
