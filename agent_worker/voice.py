@@ -116,6 +116,11 @@ def transcribe(wav_path: str | Path, python_exe: str, model: str = DEFAULT_MODEL
         'print("".join(segment.text for segment in segments).strip())\n'
     )
     env = dict(os.environ)
+    # **必须**让子进程用 UTF-8 输出：Windows 下管道默认是 GBK(cp936)，
+    # 而我们按 utf-8 读 —— 不设这个，转出来的中文直接是乱码。
+    # （同一个坑在 watcher_source.py 里踩过一次，注释还在那儿。）
+    env['PYTHONUTF8'] = '1'
+    env['PYTHONIOENCODING'] = 'utf-8'
     if lib_dir:
         # 依赖装在独立目录里（自带 Python 是 embeddable 版，没有 site-packages），
         # 靠 PYTHONPATH 让它能被 import。
@@ -194,3 +199,31 @@ def save_prefs(data_dir: str | Path, patch: dict) -> dict:
     with io.open(target, 'w', encoding='utf-8') as handle:
         handle.write(json.dumps(current, ensure_ascii=False, indent=2))
     return current
+
+
+def cached_transcript(data_dir: str | Path, key: str, producer) -> str:
+    """带缓存的转写。
+
+    为什么必须有缓存：转一条要 1~2 秒（CPU），而**每次读消息列表都可能碰上同一条语音**
+    （首页、整理、会话详情各读一遍），不缓存会把界面拖垮、也白烧 CPU。
+    键用 local_id（微信的本地消息号，全局单调），所以同一条语音只会转一次。
+    """
+    cache = Path(data_dir) / 'voice' / 'cache'
+    target = cache / (str(key) + '.txt')
+    try:
+        if target.exists():
+            return io.open(target, encoding='utf-8').read().strip()
+    except OSError:
+        pass
+    try:
+        text = (producer() or '').strip()
+    except Exception:
+        return ''
+    if text:
+        try:
+            cache.mkdir(parents=True, exist_ok=True)
+            with io.open(target, 'w', encoding='utf-8') as handle:
+                handle.write(text)
+        except OSError:
+            pass
+    return text

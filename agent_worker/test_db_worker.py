@@ -67,6 +67,8 @@ class WorkerDbWatchTests(unittest.TestCase):
             "database": str(db),
             "runtime_settings_file": str(Path(self.tmp.name) / "settings.json"),
             "worker_token_file": str(Path(self.tmp.name) / "token"),
+            # 语音相关的方法从数据目录推路径（credentials/voice 都在那儿）
+            "control_token_file": str(Path(self.tmp.name) / "control.token"),
             "poll_interval_seconds": 5,
             "job_ttl_seconds": 300,
             "min_reply_interval_seconds": 0,
@@ -188,3 +190,40 @@ class WorkerDbWatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VoiceWiringTests(WorkerDbWatchTests):
+    """语音转文字的接线测试。
+
+    这里盯的是两个**真实踩过的坑**：
+
+    1. `service.py` 忘了 `from . import voice` —— 调用时抛 NameError，被宽 except 吞掉，
+       表现是"开关开着、语音永远读不到、而且一点线索都没有"。所以第一件事就是确认这个导入在。
+    2. 失败必须留痕（`last_voice_error`），否则用户看到开关开着却没反应，只能靠猜。
+    """
+
+    def test_service_imports_the_voice_module(self):
+        from agent_worker import service
+        self.assertTrue(hasattr(service, 'voice'), 'service.py 少了 `from . import voice`')
+
+    def test_worker_reports_why_a_transcript_failed(self):
+        from agent_worker import voice as voice_module
+        # 开关打开，但把"读偏好"弄坏：必须留下原因，而不是静默返回空
+        original = voice_module.load_prefs
+        voice_module.load_prefs = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('读偏好失败'))
+        try:
+            self.assertEqual(self.worker.voice_text(1), '')
+            self.assertIn('读偏好失败', self.worker.last_voice_error)
+        finally:
+            voice_module.load_prefs = original
+
+    def test_voice_switch_off_means_no_work_at_all(self):
+        from agent_worker import voice as voice_module
+        called = []
+        original = voice_module.voice_python
+        voice_module.voice_python = lambda *a, **k: (called.append(1), None)[1]
+        try:
+            self.assertEqual(self.worker.voice_text(1), '')
+            self.assertEqual(called, [], '开关关着的时候不该去找识别环境，更不该启动它')
+        finally:
+            voice_module.voice_python = original

@@ -919,9 +919,13 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       const onDoc=event=>{if(ref.current&&!ref.current.contains(event.target))setOpen(false);};
       const onResize=()=>setOpen(false);
       document.addEventListener('mousedown',onDoc);
+      // 列表自己滚动**不该**收起面板：捕获阶段会把列表内部的 scroll 也报上来，
+      // 用户一滚轮面板就关了、根本看不全选项（用户实测报的就是这个）。
+      // 只有"面板外面"的滚动才意味着触发器位置变了，那时才关。
+      const onScroll=event=>{if(ref.current&&!ref.current.contains(event.target))setOpen(false);};
       window.addEventListener('resize',onResize);
-      window.addEventListener('scroll',onResize,true);
-      return()=>{document.removeEventListener('mousedown',onDoc);window.removeEventListener('resize',onResize);window.removeEventListener('scroll',onResize,true);};
+      window.addEventListener('scroll',onScroll,true);
+      return()=>{document.removeEventListener('mousedown',onDoc);window.removeEventListener('resize',onResize);window.removeEventListener('scroll',onScroll,true);};
     },[open]);
     function openPanel(){
       if(disabled||!items.length)return;
@@ -1340,12 +1344,14 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       if(!open)return;
       const onDoc=event=>{if(ref.current&&!ref.current.contains(event.target))setOpen(false);};
       const onKey=event=>{if(event.key==='Escape'){event.stopPropagation();setOpen(false);}};
-      const onScroll=()=>setOpen(false);
+      const onResize=()=>setOpen(false);
+      // 同上：面板内部滚动（时间下拉列表）不该把整个面板关掉。
+      const onScroll=event=>{if(ref.current&&!ref.current.contains(event.target))setOpen(false);};
       document.addEventListener('mousedown',onDoc);
       document.addEventListener('keydown',onKey,true);
-      window.addEventListener('resize',onScroll);
+      window.addEventListener('resize',onResize);
       window.addEventListener('scroll',onScroll,true);
-      return()=>{document.removeEventListener('mousedown',onDoc);document.removeEventListener('keydown',onKey,true);window.removeEventListener('resize',onScroll);window.removeEventListener('scroll',onScroll,true);};
+      return()=>{document.removeEventListener('mousedown',onDoc);document.removeEventListener('keydown',onKey,true);window.removeEventListener('resize',onResize);window.removeEventListener('scroll',onScroll,true);};
     },[open]);
     function openPanel(){
       const rect=ref.current.getBoundingClientRect();
@@ -2823,7 +2829,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       }catch(e){setModelError(e.message);}finally{setSaving('');}
     }
     return h('div',{style:{width:'100%',overflowY:'auto'}},
-      h('div',{style:{padding:'24px clamp(18px,4vw,48px) 60px',maxWidth:760}},
+      h('div',{style:{padding:'24px clamp(18px,4vw,48px) 60px',maxWidth:760,margin:'0 auto',boxSizing:'border-box'}},
         // 功能层：页面标题条。sticky + 玻璃，卡片从它背后过。
         // 滚动区里的 sticky 元素不做折射，原因见自动回复页那段说明。
         h('div',{className:'lg-glass ma-pagebar'},
@@ -2839,7 +2845,6 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         // 初始化完成后这块自己消失（用户要求：已经读过就别再显示，免得反复点触发风险）。
         h(WeChatInitSection,{}),
         h(ModelSetupCard,{}),
-        h(VoiceCard,{}),
         h(TaskModelPicker,{title:'自动回复模型',
           description:'管的是后台自动回复由谁来写。选本地模型（如「本地 Qwen」）时，那一轮回复的内容不会离开这台电脑。修改后从下一条新消息开始生效。',
           catalog,provider:autoProvider,model:autoModel,saving:saving==='auto',
@@ -2849,6 +2854,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           catalog,provider:organizeProvider,model:organizeModel,saving:saving==='organize',
           onPick:value=>saveTaskModel('organize',value)}),
         h('p',{style:{...hint,margin:'10px 2px 0'}},'「起草回复」和首页对话暂时固定用云端模型。'),
+        // 语音放在整块模型配置之后：上面全是「选模型」，下面才是语音。
+        h(VoiceCard,{}),
         h('section',{style:{...card,marginTop:16}},
           h('h3',h3,'开发者模式'),
           h('p',{style:{...hint,margin:'0 0 12px'}},'默认关闭。打开后会多两样东西：出错的地方多一块折叠的「开发者详情」（Runtime 的错误码、原文、调用栈和读取条数，可一键复制），导航底部多一个回到原生界面的入口。原始日志另外逐条记在数据目录的 dev-errors.log 里。'),

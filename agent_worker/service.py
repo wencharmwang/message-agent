@@ -18,6 +18,7 @@ import re
 import difflib
 from .database import Store
 from .harness import Harness
+from . import voice
 
 
 class RuntimeToolError(RuntimeError):
@@ -423,13 +424,21 @@ class Worker:
         local_type = row[1]
         text = self._decode_message(row[5])
         label = self._TYPE_LABELS.get(local_type)
+        kind = 'text' if local_type == 1 else str(local_type)
+        # 语音：能转成文字就把文字当正文（整理、会话详情、首页都用得上），
+        # 转不出来仍旧退回 [语音] 占位。有缓存，同一条只转一次。
+        if local_type == 34:
+            spoken = self.voice_text(row[0])
+            if spoken:
+                text = spoken
+                kind = 'text'
         if not text and label:
             text = '[' + label + ']'
         return {
             'direction': 'outgoing' if mine else 'incoming',
             'content': text,
             'sender': sender_user or '',
-            'type': 'text' if local_type == 1 else str(local_type),
+            'type': kind,
             'at': row[4] or 0,
             'sort_seq': row[2] or 0,
         }
@@ -702,13 +711,49 @@ class Worker:
     def _data_dir(self) -> Path:
         return Path(self.config['control_token_file']).parent
 
-    def _transcribe(self, event) -> str:
-        """语音消息 -> 文字。只有用户开了开关、并且真的装好了识别环境才会成功。"""
-        if event.get('direction') != 'incoming' or event.get('local_type') != 34:
-            return ''
+    def _voice_blob(self, local_id):
+        """按 local_id 从库里取语音的 SILK 音频。
+
+        **关键**：watcher 事件里只有 local_id，**没有音频**（事件结构里就没有 voice_data 字段），
+        音频在 message/media_*.db 的 VoiceInfo 表里。第一版就是直接读 event['voice_data']，
+        结果永远为空、语音永远读不到 —— 实测报的就是这个。
+        """
+        if local_id in (None, ''):
+            return b''
+        try:
+            key = int(local_id)
+        except (TypeError, ValueError):
+            return b''
+        plain = self._plain()
+        if plain is None:
+            return b''
+        media_dir = plain / 'message'
+        if not media_dir.exists():
+            return b''
+        for db_file in sorted(media_dir.glob('media_*.db')):
+            try:
+                conn = self._open_ro(db_file)
+            except Exception:
+                continue
+            try:
+                row = conn.execute(
+                    'SELECT voice_data FROM VoiceInfo WHERE local_id = ? '
+                    'ORDER BY create_time DESC LIMIT 1', (key,)).fetchone()
+            except Exception:
+                row = None
+            finally:
+                conn.close()
+            if row and row[0]:
+                return bytes(row[0])
+        return b''
+
+    def voice_text(self, local_id) -> str:
+        """语音 -> 文字（带缓存）。没开开关、没装识别、或转不出来都返回空串。"""
         try:
             prefs = voice.load_prefs(self._data_dir())
-        except Exception:
+        except Exception as error:
+            # 不留痕的话，一个 NameError 会变成"语音永远读不到"而毫无线索（今天就是这么踩的）
+            self.last_voice_error = str(error)[:200]
             return ''
         if not prefs.get('enabled'):
             return ''
@@ -716,25 +761,30 @@ class Worker:
         if runtime is None:
             return ''
         python_exe, lib_dir = runtime
-        blob = event.get('voice_data')
-        if isinstance(blob, str):          # 事件里可能是 base64（子进程只能给文本）
-            try:
-                blob = base64.b64decode(blob)
-            except Exception:
-                return ''
-        if not isinstance(blob, (bytes, bytearray)) or not blob:
-            return ''
+        app_root = self.config.get('app_root') or Path(__file__).resolve().parent.parent
+
+        def produce():
+            blob = self._voice_blob(local_id)
+            if not blob:
+                raise voice.VoiceError('库里没有这段语音的音频')
+            wav = self._data_dir() / 'voice' / ('v%s.wav' % local_id)
+            voice.silk_to_wav(blob, wav, app_root)
+            return voice.transcribe(wav, str(python_exe),
+                                    prefs.get('model') or voice.DEFAULT_MODEL, lib_dir=lib_dir)
+
         try:
-            wav = voice.silk_to_wav(blob, self._data_dir() / 'voice' / 'last.wav',
-                                    self.config.get('app_root') or Path(__file__).resolve().parent.parent)
-            text = voice.transcribe(wav, str(python_exe), prefs.get('model') or voice.DEFAULT_MODEL,
-                                    lib_dir=lib_dir)
+            text = voice.cached_transcript(self._data_dir(), local_id, produce)
             self.last_voice_error = ''
             return text
         except Exception as error:
-            # 转不出来不是故障：设置里会显示原因，消息本身仍旧按"读不到内容"处理
             self.last_voice_error = str(error)[:200]
             return ''
+
+    def _transcribe(self, event) -> str:
+        """事件里的语音消息 -> 文字。"""
+        if event.get('direction') != 'incoming' or event.get('local_type') != 34:
+            return ''
+        return self.voice_text(event.get('local_id'))
 
     def _rules_by_username(self):
         out = {}
