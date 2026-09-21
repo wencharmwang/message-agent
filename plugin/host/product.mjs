@@ -1011,6 +1011,27 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
     const loose = exact ?? bundle.find(session => session.title.includes(title) || title.includes(session.title));
     return loose ? {username: loose.username, kind: loose.kind} : null;
   }
+  /**
+   * 整理结果里每条建议标上"是不是已经记过待办了"。
+   *
+   * 为什么必须在服务端标：界面上的"已加入"只是这一次会话的内存状态，**刷新就没了** ——
+   * 于是用户看到又能点一次，以为会重复记（用户实测报的就是这个）。落库时有去重，
+   * 重复点不会真的多一条，但界面在骗人。
+   *
+   * 判断口径与落库那条去重规则对齐：未完成 + 来源是助手 + 标题一致（标题按界面同样的
+   * 60 字截断）。宁可判"已加过"，也不要在用户面前显示一个他能点、点了却没反应的按钮。
+   */
+  function markAddedSuggestions(result) {
+    if (!result || !Array.isArray(result.todos) || !result.todos.length) return result;
+    const open = new Set(crm.listTodos({limit: 500})
+      .filter(todo => todo.state !== 'done')
+      .map(todo => (todo.title || '').trim()));
+    return {...result, todos: result.todos.map(item => ({
+      ...item,
+      alreadyAdded: open.has(String(item.title || '').split('\n')[0].trim().slice(0, 60))
+    }))};
+  }
+
   async function homePayload() {
     const {account, scanAt, bundle} = await dbSnapshot();
     const {items} = await aggregate();
@@ -1018,7 +1039,7 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
       || (item.bucket === 'pending' && item.attentionKind !== 'draft'));
     return homeOverview({
       bundle, todos: crm.listTodos({limit: 200}), automation, account, scanAt,
-      lastOrganize: readJsonFile(organizePath, null), now: Date.now() / 1000
+      lastOrganize: markAddedSuggestions(readJsonFile(organizePath, null)), now: Date.now() / 1000
     });
   }
 
@@ -1031,6 +1052,9 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
         const status = await runtime.status();
         respond(res, 200, {
           ...status,
+          // 哪些记录已经被「知道了」处理过。首页那张卡片走的是 projectInbox（内部会过滤），
+          // 但自动回复页是直接渲染 status.jobs 的 —— 不给这个名单，点了按钮记录也不会消失。
+          reviewedJobs: Object.keys(reviewed()),
           // 规则的顺序由用户自己拖出来（监听一多，没法定出"最重要的"就没法用）。
           // 排序在 Host 侧做：Worker 的 rules 表不需要为"展示顺序"多一个字段。
           rules: orderedRules(status.rules ?? []).map(rule => ({...rule, detail: humanizeDetail(rule.detail)})),

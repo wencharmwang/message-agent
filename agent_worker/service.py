@@ -702,9 +702,10 @@ class Worker:
 
     def _handle_event(self, event, rules_by_username):
         should_reply, message = self._ingest(event)
-        if not should_reply:
-            return
         username = event.get('username') or ''
+        if not should_reply:
+            self._note_unhandled(event, rules_by_username, username)
+            return
         for rule in rules_by_username.get(username, []):
             if rule['status'] in ('queued', 'generating', 'ready', 'sending'):
                 continue
@@ -712,6 +713,32 @@ class Worker:
             incoming = [message]
             fingerprint = str(event.get('sort_seq') or event.get('local_id') or '')
             self.store.enqueue(rule, history, incoming, self.config['job_ttl_seconds'], fingerprint)
+
+    #: 微信 4.x 的 local_type -> 给人看的名字。只列"我们知道但看不到内容"的那几种。
+    _TYPE_NAMES = {3: '图片', 34: '语音', 43: '视频', 47: '表情', 49: '文件或链接'}
+
+    def _note_unhandled(self, event, rules_by_username, username):
+        """收到但不会回复的消息，在规则上留一句说明。
+
+        为什么要有这个：非文本消息（语音/图片/视频/文件）**不会**触发回复 —— 内容根本读不到。
+        但"什么都不说"是最糟的：用户看到对方发了三条语音、助手毫无反应，只会以为它坏了
+        （用户实测报的就是这个）。所以这里把"发生了什么、为什么没动"写在规则上，
+        界面就有东西可以显示，而不是一片沉默。
+        """
+        if event.get('direction') != 'incoming':
+            return
+        local_type = event.get('local_type')
+        if local_type in (None, 1):
+            return
+        label = self._TYPE_NAMES.get(local_type)
+        if not label:
+            return
+        tail = '需要你自己听一遍。' if local_type == 34 else '需要你自己看一下。'
+        detail = f'对方发来的是一条{label}，我读不到里面的内容；{tail}'
+        for rule in rules_by_username.get(username, []):
+            if rule['status'] in ('queued', 'generating', 'ready', 'sending'):
+                continue
+            self.store.status(rule['id'], rule['revision'], 'listening', detail)
 
     def check_rule(self, rule):
         current = self.store.rule(rule['id'])
@@ -796,7 +823,10 @@ class Worker:
             if len(history) > HISTORY_LIMIT:
                 del history[:-HISTORY_LIMIT]
             self.store.replace_baseline(rule, history)
-            self.store.status(rule['id'], rule['revision'], 'listening', '已提交回复，继续监听')
+            # 发出去之后**不留在规则上写"已提交回复"**：那是一句话的状态，挂在界面上会一直
+            # 显示成"当前正在做的事"，让人以为卡住了（用户实测报的就是这个）。真正的结果在
+            # 最近处理记录里，那里才是"留存、有事可查"的地方。
+            self.store.status(rule['id'], rule['revision'], 'listening', '')
         except Exception as error:
             self.harness.close()
             current = self.store.job(job['id'])

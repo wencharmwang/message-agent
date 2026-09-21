@@ -1320,7 +1320,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   function OrganizeResult({result,busy,picked,added,onCheck,onAdd,onOpen}){
     const todos=result?.todos||[];
     const focus=result?.focus||[];
-    const chosen=todos.map((item,index)=>index).filter(index=>picked[index]!==false&&!added[index]);
+    // 已加入 = 这次刚加的（added）或服务端说你早就记过了（alreadyAdded）。
+    // 后者是关键：刷新之后 added 丢了，没有它就会又出现一个能点的按钮。
+    const isAdded=index=>!!added[index]||!!todos[index]?.alreadyAdded;
+    const chosen=todos.map((item,index)=>index).filter(index=>picked[index]!==false&&!isAdded(index));
     return h('section',{style:card},
       h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline',marginBottom:10}},
         h('h2',{style:{...h2,margin:0,fontSize:15}},'整理结果'),
@@ -1343,15 +1346,15 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
           todos.map((item,index)=>h('label',{key:item.title+index,
             style:{display:'flex',gap:10,alignItems:'flex-start',padding:'11px 14px',borderTop:index?'1px solid '+C.border:'none',
-              cursor:busy||added[index]?'default':'pointer'}},
-            h(Checkbox,{checked:picked[index]!==false&&!added[index],disabled:busy||!!added[index],
+              cursor:busy||isAdded(index)?'default':'pointer'}},
+            h(Checkbox,{checked:picked[index]!==false&&!isAdded(index),disabled:busy||isAdded(index),
               label:'记成待办：'+firstLine(item.title,20),onChange:event=>onCheck(index,event.target.checked),style:{marginTop:3}}),
             h('div',{style:{flex:1,minWidth:0}},
-              h('div',{style:{fontSize:14,color:added[index]?C.text3:C.text,lineHeight:1.6,
+              h('div',{style:{fontSize:14,color:isAdded(index)?C.text3:C.text,lineHeight:1.6,
                 textDecoration:'none',wordBreak:'break-word'}},item.title),
               (item.detail||item.conversation)&&h('div',{style:{fontSize:12,color:C.text3,marginTop:3,lineHeight:1.6,wordBreak:'break-word'}},
                 (item.detail||'')+(item.conversation?((item.detail?' · ':'')+'来自 '+item.conversation):''))),
-            added[index]&&h('span',{style:{fontSize:12,color:C.ok,flexShrink:0}},'已加入')))),
+            isAdded(index)&&h('span',{style:{fontSize:12,color:C.ok,flexShrink:0}},'已加入')))),
         h('button',{onClick:onAdd,disabled:busy||!chosen.length,style:{...small(true),marginTop:12}},
           busy?'正在记…':(chosen.length?('加入选中的 '+chosen.length+' 件'):'没有选中任何条目'))),
       !todos.length&&!focus.length&&h('p',{style:{margin:0,fontSize:14,color:C.text2,lineHeight:1.8}},'这次整理没有给出可执行的事项。'),
@@ -1459,7 +1462,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     }
     async function addPicked(){
       const todos=result?.todos||[];
-      const chosen=todos.map((item,index)=>index).filter(index=>picked[index]!==false&&!added[index]);
+      // 已加入 = 这次刚加的（added）或服务端说你早就记过了（alreadyAdded）。
+    // 后者是关键：刷新之后 added 丢了，没有它就会又出现一个能点的按钮。
+    const isAdded=index=>!!added[index]||!!todos[index]?.alreadyAdded;
+    const chosen=todos.map((item,index)=>index).filter(index=>picked[index]!==false&&!isAdded(index));
       if(!chosen.length||busy)return;
       setBusy(true);setError('');setNote('');
       try{
@@ -1949,6 +1955,9 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
             showState&&done&&h('span',{style:pill(C.ok)},'已完成'),
             doing&&h('span',{style:pill(C.brand)},'在做'),
             !done&&due&&h('span',{style:pill(due.color)},due.text),
+            // 没有到期时间的也要有个时间 —— 否则一条待办看起来"什么都没说"（用户实测报的）。
+            // 记的是"什么时候记下来的"，不假装它是截止时间。
+            !done&&!due&&todo.createdAt&&h('span',{style:{fontSize:12,color:C.text3}},'记于 '+relativeTime(todo.createdAt)),
             todo.identity&&h('span',{style:{fontSize:13,color:C.text3}},'来自 '+todo.identity.title),
             // 来源只给图标：13px 时用户看不清，现在 16px。
             h('span',{title:sourceTitle,'aria-label':sourceTitle,style:{display:'inline-flex',alignItems:'center',color:C.text3}},
@@ -2031,7 +2040,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     if(today.loading&&!data)return h('div',{style:{width:'100%',display:'flex'}},
       h(Empty,{title:'正在打开待办',text:'请稍等一下…'}));
     return h('div',{style:{width:'100%',overflowY:'auto'}},
-      h('div',{style:{padding:'24px clamp(18px,4vw,48px) 60px',maxWidth:860}},
+      h('div',{style:{padding:'24px clamp(18px,4vw,48px) 60px',maxWidth:860,margin:'0 auto',boxSizing:'border-box'}},
         h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:16,flexWrap:'wrap'}},
           h('div',null,
             h('h1',h1,'待办'),
@@ -2155,6 +2164,17 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const rules=status.data?.rules||[];
     const activeRules=rules.filter(rule=>rule.enabled).length;
     const attentionJobs=rules.filter(rule=>rule.enabled&&['blocked','needs_user','waiting_connection'].includes(rule.status)).length;
+    // 今天到底干了多少活。用户要的是"一眼看出它在工作、而且有产出"，所以按本地零点算今天，
+    // 并把"回了"和"看过了没回"分开 —— 后者也是工作，但说清楚才不显得像没动。
+    const todayLine=(()=> {
+      const zero=new Date();zero.setHours(0,0,0,0);
+      const from=zero.getTime()/1000;
+      const done=(status.data?.jobs||[]).filter(job=>(job.finished_at||job.created_at||0)>=from);
+      const replied=done.filter(job=>job.state==='sent').length;
+      const skipped=done.filter(job=>['skipped','skip','done','cancelled','superseded'].includes(job.state)).length;
+      const failed=done.filter(job=>['failed','uncertain','not_sent','expired'].includes(job.state)).length;
+      return {total:done.length,replied,skipped,failed};
+    })();
     /**
      * 拖拽排序。
      *
@@ -2219,11 +2239,15 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       try{await api('automation/ack',{ruleId});await status.refresh();}
       catch(e){setSettingError(e.message);}finally{setAcking(false);}
     }
+    // 已经点过「知道了」的记录不再出现 —— 它在首页那边是这么过滤的，自动回复页也必须一致，
+    // 否则点了按钮记录还挂在这儿，用户以为没生效。
+    const reviewedJobs=new Set(status.data?.reviewedJobs||[]);
+    const visibleJobs=(status.data?.jobs||[]).filter(job=>!reviewedJobs.has(job.id));
     const renderJob=({count,job})=>h('div',{key:job.id,style:{display:'flex',gap:10,alignItems:'baseline',padding:'10px 0',borderTop:'1px solid '+C.border,fontSize:13}},
       h('span',{style:{...pill(job.state==='failed'||job.state==='uncertain'?C.error:C.ok),fontSize:11,padding:'2px 8px'}},JOB[job.state]||'已处理'),
       h('span',{style:{flex:1,minWidth:0,color:C.text2,lineHeight:1.6}},firstLine(job.text||job.detail||'',80)+(count>1?'（同类 '+count+' 条）':''),),
       (job.state==='failed'||job.state==='uncertain')&&h('button',{onClick:()=>acknowledge(job.rule_id),disabled:acking,
-        style:{...small(false),flexShrink:0}},acking?'正在记…':'我知道了'));
+        style:{...small(false),flexShrink:0}},acking?'正在记…':'知道了'));
     const paused=settings.data?.settings?.auto_reply_paused===true;
     async function togglePaused(){
       setSaving(true);setSettingError('');
@@ -2234,8 +2258,6 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         // 英雄区：一块玻璃板，不再是绿色大色块。装饰圆换成很淡的品牌色，
         // 只当玻璃上的折射依据，不再当主视觉。
         h('section',{className:'lg-hero',style:{padding:'28px clamp(22px,4vw,38px)',marginBottom:20}},
-          h('span',{style:{position:'absolute',width:220,height:220,borderRadius:'50%',right:-65,top:-105,background:'rgba(7,193,96,.1)'}}),
-          h('span',{style:{position:'absolute',width:130,height:130,borderRadius:'50%',right:120,bottom:-95,background:'rgba(64,198,214,.13)'}}),
           h('div',{style:{position:'relative',display:'flex',justifyContent:'space-between',alignItems:'flex-end',gap:22,flexWrap:'wrap'}},
             h('div',{style:{maxWidth:600}},
               // 状态徽章：一颗状态点 + 一行字，底是玻璃上的一层浅面 ——
@@ -2246,10 +2268,18 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
                   background:activeRules?C.brand:C.text3,
                   boxShadow:activeRules?'0 0 0 3px rgba(7,193,96,.18)':'none'}},),
                 activeRules?'助手正在值守':'等待开启第一条规则'),
-              h('h1',{style:{...h1,color:C.text,fontSize:30,marginBottom:9}},'把重复消息交给助手'),
-              h('p',{style:{margin:0,color:C.text2,fontSize:14,lineHeight:1.8}},'只监听你选中的联系人和群聊。每条规则独立启停，遇到需要本人决定的内容会停下来交给你。')),
+              h('h1',{style:{...h1,color:C.text,fontSize:30,marginBottom:9}},
+                activeRules?'消息助手正在为你工作':'消息助手在等你的第一条规则'),
+              h('p',{style:{margin:0,color:C.text2,fontSize:14,lineHeight:1.8}},
+                activeRules
+                  ?(todayLine.total
+                    ?('今天处理了 '+todayLine.total+' 条消息，其中替你回复 '+todayLine.replied+' 条'
+                      +(todayLine.skipped?('、看过没回 '+todayLine.skipped+' 条'):'')+'。'
+                      +(attentionJobs?('还有 '+attentionJobs+' 件需要你看一眼。'):'没有需要你处理的事。'))
+                    :'正在盯着你选中的联系人和群聊，有该回复的会先写出来再发。')
+                  :'从右边「＋ 新规则」开始：选一个联系人或群聊，剩下的交给它。')),
             h('div',{style:{display:'flex',gap:10,flexWrap:'wrap'}},
-              [[String(rules.length),'已添加'],[String(activeRules),'运行中'],[String(attentionJobs),'需处理']].map(([value,label])=>
+              [[String(todayLine.total),'今天处理'],[String(todayLine.replied),'已回复'],[String(attentionJobs),'需处理']].map(([value,label])=>
                 h('div',{key:label,className:'lg-chip',style:{minWidth:78,padding:'10px 13px'}},
                   h('strong',{style:{display:'block',fontSize:21,lineHeight:1.15,color:C.text}},value),
                   h('span',{style:{fontSize:11,color:C.text2}},label)))))),
@@ -2300,7 +2330,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         !!status.data?.jobs?.length&&h('details',{style:{...card,marginTop:14,boxShadow:'none'}},
           h('summary',{style:{cursor:'pointer',fontSize:14,fontWeight:650,color:C.text}},'最近处理记录'),
           h('div',{style:{marginTop:12}},
-            foldJobRuns(status.data.jobs).slice(0,15).map(renderJob)))));
+            foldJobRuns(visibleJobs).slice(0,15).map(renderJob)))));
   }
 
   // ---- 回复配置：说话方式 + 产品与政策 ----------------------------------------
@@ -2601,7 +2631,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const knowledge=usePoller(true,()=>api('context/knowledge'),8000);
     const [kFilter,setKFilter]=useState('published');
     return h('div',{style:{width:'100%',overflowY:'auto'}},
-      h('div',{style:{padding:'24px clamp(18px,4vw,48px) 60px',maxWidth:900}},
+      h('div',{style:{padding:'24px clamp(18px,4vw,48px) 60px',maxWidth:900,margin:'0 auto',boxSizing:'border-box'}},
         // 功能层：页面标题条。sticky + 玻璃，正文从它背后过。
         // 同自动回复页：滚动区里的 sticky 元素不做折射（每帧重跑滤镜，见那边的说明）。
         h('div',{className:'lg-glass ma-pagebar'},

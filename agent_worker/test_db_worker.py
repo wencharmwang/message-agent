@@ -137,6 +137,46 @@ class WorkerDbWatchTests(unittest.TestCase):
         # 发送定位用 display（rule.title），不是 username
         self.assertEqual(self.mcp.sent[0]["conversation_id"], "好友")
 
+    def test_sent_rule_does_not_keep_a_stale_status_line(self):
+        """发完之后规则上不能留"已提交回复，继续监听"。
+
+        那是一句"正在做什么"的话，挂在界面上会一直显示成当前状态，让人以为卡住了
+        （用户实测报的就是这个）。结果该留在最近处理记录里。
+        """
+        self._add_rule("wxid_a")
+        rules = self.worker._rules_by_username()
+        self.worker._handle_event(_event("wxid_a", "incoming", "第一条", sort_seq=1000), rules)
+        self.worker.process(self.worker.store.pending()[0])
+        rule = self.worker.store.rule(self.worker.store.rules()[0]["id"])
+        self.assertEqual(rule["status"], "listening")
+        self.assertEqual(rule["detail"], "")
+
+    def test_voice_message_tells_the_user_instead_of_staying_silent(self):
+        """语音不会触发回复（读不到内容），但必须在规则上留一句说明。
+
+        用户实测：对方连发三条语音，助手毫无反应、也没有任何提示，只能以为它坏了。
+        """
+        rule_id = self._add_rule("wxid_a")
+        rules = self.worker._rules_by_username()
+        self.worker._handle_event(
+            _event("wxid_a", "incoming", "", local_type=34, sort_seq=2000), rules)
+        self.assertEqual(self.worker.store.pending(), [], "语音不该产生回复任务")
+        rule = self.worker.store.rule(rule_id)
+        self.assertEqual(rule["status"], "listening")
+        self.assertIn("语音", rule["detail"])
+        self.assertIn("需要你自己听", rule["detail"])
+
+    def test_non_text_from_a_conversation_without_a_rule_is_harmless(self):
+        rules = self.worker._rules_by_username()
+        self.worker._handle_event(_event("wxid_none", "incoming", "", local_type=3), rules)
+        self.assertEqual(self.worker.store.pending(), [])
+
+    def test_our_own_outgoing_message_does_not_trigger_a_note(self):
+        rule_id = self._add_rule("wxid_a")
+        rules = self.worker._rules_by_username()
+        self.worker._handle_event(_event("wxid_a", "outgoing", "", local_type=34), rules)
+        self.assertEqual(self.worker.store.rule(rule_id)["detail"], "")
+
     def test_tick_consumes_events_and_processes_jobs(self):
         self._add_rule("wxid_a")
         self.fake_watcher.events = [_event("wxid_a", "incoming", "你好", sort_seq=5000)]
