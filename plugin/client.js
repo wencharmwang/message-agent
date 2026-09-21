@@ -1674,7 +1674,9 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const ref=useRef(null);
     const lineHeight=22, padding=16;
     const cap=maxRows*lineHeight+padding;
-    const oneLine=lineHeight+2;
+    // 一行的高度要对齐按钮高度（32px）：22 行高 + 上下各 5px。
+    // 否则单行时按钮贴底会把上边挤到只剩 2px（用户实测：「更贴近上方边缘」）。
+    const oneLine=lineHeight+10;
     const resize=()=>{
       const el=ref.current;
       if(!el)return;
@@ -1699,7 +1701,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         height:oneLine,maxHeight:cap,overflowY:'hidden',boxSizing:'border-box',
         border:'none',outline:'none',background:'transparent',color:C.text,
         // 右边留出箭头的宽度，长句换行时不会钻到箭头底下。
-        fontFamily:'inherit',fontSize:14,padding:'0 34px 0 0'}});
+        fontFamily:'inherit',fontSize:14,padding:'5px 34px 5px 0'}});
   }
 
   function HomeChat({narrow}){
@@ -1769,7 +1771,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           // 不会再因为 flex 对齐而在不同状态下"跳位置"。
           h('button',{type:'button',onClick:()=>submit(),disabled:asking||!text.trim(),
             'aria-label':'发送',title:'发送',
-            style:{position:'absolute',right:6,bottom:6,width:32,height:32,borderRadius:'50%',
+            // 贴右下 8px —— 和输入框的内边距一致；一行时上下各 8px，对称。
+            style:{position:'absolute',right:8,bottom:8,width:32,height:32,borderRadius:'50%',
               border:'none',padding:0,cursor:asking||!text.trim()?'default':'pointer',
               display:'flex',alignItems:'center',justifyContent:'center',
               background:asking||!text.trim()?C.hover:C.brand,
