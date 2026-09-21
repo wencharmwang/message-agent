@@ -254,8 +254,16 @@ test('两个任务各配各的模型（自动回复 / 整理消息），都支�
   assert.match(picker, /groups\.unshift\(\{label:'当前'/);
   // **顶层只问一次**「云端还是本地」：三条链路各配一次让人困惑（用户提出来的）。
   assert.match(settings, /选择「云端模型」|'cloud','云端模型'/);
-  assert.match(settings, /'local','本机模型'/);
-  assert.match(settings, /async function setMode\(next\)\{/);
+  assert.match(settings, /sideRow\('local','本机模型'/);
+  assert.match(settings, /const sideRow=/);
+  assert.match(settings, /async function applySide\(value\)\{/);
+  // **踩过的坑**：以前用"当前生效的模型"往目标提供方上套 —— 从本机切回云端时，
+  // 把 ollama 的 qwen-dsh-16k:latest 当成 DeepSeek 的模型名发了出去，接口直接报错。
+  // 现在两侧各自只从**自己那侧**的列表里选，而且云端有多个模型时由用户明确挑一个。
+  assert.match(settings, /const cloudModels=listed\.filter\(entry=>!isLocalProvider\(entry\.provider\)\)/);
+  assert.match(settings, /const localModels=listed\.filter\(entry=>isLocalProvider\(entry\.provider\)\)/);
+  assert.doesNotMatch(settings, /deepseek-official'\+\(data\?\.model/, '不许再拿当前模型往云端套');
+  assert.match(settings, /选一个模型（'\+models\.length\+' 个可用）/);
   // 细调收进「高级设置」：三条链路各一行，各存各的字段。
   assert.match(settings, /advanced\?'收起高级设置':'高级设置（逐条链路的模型）'/);
   assert.match(settings, /advanced&&h\(TaskModelPicker,\{title:'自动回复模型'/);

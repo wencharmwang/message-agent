@@ -2977,42 +2977,64 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         settings.refresh();status.refresh();
       }catch(e){setModelError(e.message);}finally{setSaving('');}
     }
-    // ---- 模型从哪来：只问一次「云端还是本地」 --------------------------------
-    // 三条链路（自动回复 / 整理消息 / 问助手）本来各配一次，用户容易困惑；
-    // 这里给一个大选择，需要细调的再去「高级设置」。
+    // ---- 模型从哪来：云端 or 本机 ----------------------------------------------
+    // 三条链路（自动回复 / 整理消息 / 问助手）本来各配一次，用户容易困惑；这里给一个大选择，
+    // 需要细调的再去「高级设置」。
+    //
+    // **踩过的坑**：这里原来直接用"当前生效的模型"往目标提供方上套 ——
+    // 从本机切回云端时，把 ollama 的 qwen-dsh-16k:latest 当成了 DeepSeek 的模型名发出去，
+    // 接口直接报 "The supported API model names are …"。
+    // 所以每一侧都**只从自己那侧的列表里选**，并且让用户明确挑一个（云端本来就有多个）。
     const [advanced,setAdvanced]=useState(false);
-    const localProvider='ollama-local';
+    const [cloudPick,setCloudPick]=useState('');
+    const [localPick,setLocalPick]=useState('');
     const listed=catalog.data?.models||[];
-    const localFirst=listed.find(entry=>entry.provider===localProvider);
-    // 以自动回复那条为准判断「现在整体是云端还是本地」；三条不一致时显示「自定义」。
+    // 本机提供方：名字里带 ollama / local 的都算。其余按云端处理。
+    const isLocalProvider=name=>/ollama|local/i.test(String(name||''));
+    const localModels=listed.filter(entry=>isLocalProvider(entry.provider));
+    const cloudModels=listed.filter(entry=>!isLocalProvider(entry.provider));
     const providers=[autoProvider,organizeProvider,assistantProvider];
-    const allLocal=providers.every(item=>item===localProvider);
-    const allCloud=providers.every(item=>item!==localProvider);
+    const allLocal=providers.every(item=>isLocalProvider(item));
+    const allCloud=providers.every(item=>!isLocalProvider(item));
     const mode=allLocal?'local':(allCloud?'cloud':'mixed');
-    // 问助手会读到微信消息内容，所以「本地」这条对它尤其重要 —— 文案里说清。
-    async function setMode(next){
+    const firstCloud=cloudModels.find(entry=>entry.id==='deepseek-v4-flash')||cloudModels[0];
+    const cloudValue=cloudPick||(firstCloud?firstCloud.provider+'::'+firstCloud.id:'');
+    const localValue=localPick||(localModels[0]?localModels[0].provider+'::'+localModels[0].id:'');
+    const modeText=allLocal?'本机模型':(allCloud?'云端模型':'自定义（见高级设置）');
+
+    async function applySide(value){
       setModelError('');
-      const cloud='deepseek-official::'+(data?.model||'');
-      const local=localFirst?(localProvider+'::'+localFirst.id):'';
-      if(next==='local'&&!local){setModelError('还没有本地模型：先在下面装一个（本地模型那一步），或到「高级设置」里指定。');return;}
+      if(!value){setModelError('还没有可用的模型。装好之后再回来选。');return;}
       for(const task of ['auto','organize','assistant']){
-        await saveTaskModel(task,next==='local'?local:cloud);
+        await saveTaskModel(task,value);
       }
     }
+    const sideRow=(key,title,note,models,value,setValue)=>
+      h('div',{key,style:{border:'1px solid '+(mode===key?C.brand:C.border),borderRadius:12,
+        padding:'12px 14px',background:mode===key?C.hover:C.panel}},
+        h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:10,flexWrap:'wrap'}},
+          h('strong',{style:{fontSize:14,color:C.text}},title),
+          mode===key&&h('span',{style:{fontSize:12,color:C.brand}},'正在用')),
+        h('p',{style:{...hint,margin:'4px 0 10px'}},note),
+        h('div',{style:{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}},
+          // 云端一般有好几个模型，**让用户自己挑一个** —— 替他默认一个他不满意的，
+          // 下次还得回来改（用户实测就撞上过）。
+          h(Select,{value:'',minWidth:240,disabled:!!saving||!models.length,
+            placeholder:models.length?('选一个模型（'+models.length+' 个可用）'):'这一侧还没有模型',
+            groups:[{items:models.map(entry=>({value:entry.provider+'::'+entry.id,
+              label:(entry.name===entry.id?entry.id:entry.name+' · '+entry.id)}))}],
+            onChange:value2=>{setValue(value2);applySide(value2);}}),
+          !models.length&&h('span',{style:{fontSize:12,color:C.text3}},
+            key==='local'?'还没装本机模型（可选，见下面的说明）':'还没配置云端模型的密钥')));
+
     const modeCard=h('section',{style:{...card,marginTop:16}},
       h('h3',h3,'模型从哪来'),
       h('p',{style:{...hint,margin:'0 0 12px'}},
-        '助手要用的模型。选「本机模型」时，聊天内容不会离开这台电脑 —— 问助手会读到你的消息，介意的话就选它。'),
-      h('div',{style:{display:'flex',gap:10,flexWrap:'wrap'}},
-        [[ 'cloud','云端模型','快、效果好，内容会发给模型服务' ],
-         [ 'local','本机模型','不联网，内容不出这台电脑' ]].map(([value,label,note])=>
-          h('button',{key:value,onClick:()=>setMode(value),disabled:!!saving,
-            'aria-pressed':mode===value,
-            style:{...small(mode===value),flex:'1 1 200px',borderRadius:12,padding:'12px 14px',textAlign:'left',lineHeight:1.6}},
-            h('strong',{style:{display:'block',fontSize:14}},label),
-            h('span',{style:{fontSize:12,color:C.text3}},note)))),
-      mode==='mixed'&&h('p',{style:{...hint,margin:'10px 0 0'}},
-        '现在三条链路用的不是同一种来源（见下面的「高级设置」）。'),
+        h('span',null,'现在用的是「'+modeText+'」。'),
+        '选「本机模型」时，聊天内容不会离开这台电脑 —— 问助手会读到你的消息，介意的话就选它。'),
+      h('div',{style:{display:'flex',flexDirection:'column',gap:10}},
+        sideRow('cloud','云端模型','快、效果好，内容会发给模型服务。',cloudModels,cloudValue,setCloudPick),
+        sideRow('local','本机模型','不联网，内容不出这台电脑。',localModels,localValue,setLocalPick)),
       h('div',{style:{marginTop:12}},
         h('button',{onClick:()=>setAdvanced(value=>!value),style:{...small(false),borderRadius:99}},
           advanced?'收起高级设置':'高级设置（逐条链路的模型）')));
