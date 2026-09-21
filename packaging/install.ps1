@@ -49,8 +49,19 @@ function Ok($text)   { Say ("    [ok] " + $text) 'Green' }
 function Warn($text) { Say ("    [!]  " + $text) 'Yellow' }
 function Die($text)  { Say ''; Say ("安装没有完成：" + $text) 'Red'; Say '可以修好后再运行一次这个脚本，已经做过的步骤不会重复做。' 'DarkGray'; exit 1 }
 
-function Confirm($question, $default = $true) {
-  if ($Silent) { return $default }
+# 清空一个目录。**不能用 Remove-Item**：它和 Copy-Item 一样受 260 字符路径限制，
+# 引擎的 node_modules 里随手就是超长路径；拿空目录 robocopy /MIR 过去最稳。
+function Clear-Dir($path) {
+  if (-not (Test-Path -LiteralPath $path)) { return }
+  $empty = Join-Path $env:TEMP ('ma-empty-' + [Guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Force -Path $empty | Out-Null
+  & robocopy $empty $path /MIR /NFL /NDL /NJH /NJS /R:0 /W:0 | Out-Null
+  Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $empty -Recurse -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $path) { Die "清空目录失败：$path" }
+}
+
+function Confirm($question, $default = $true) {  if ($Silent) { return $default }
   $suffix = if ($default) { '[Y/n]' } else { '[y/N]' }
   $answer = Read-Host ("$question $suffix")
   if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
@@ -111,6 +122,35 @@ if (-not (Test-Path -LiteralPath (Join-Path $RuntimeRoot '.runtime-data\shared-s
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir, $DataDir | Out-Null
+
+# 是全新安装还是升级？升级时**程序文件更新、你的东西全保留**，所以先把这件事说清楚，
+# 免得用户以为又要从头配一遍。上一次装了什么版本记在 .install-info.json 里。
+$infoPath = Join-Path $InstallDir '.install-info.json'
+$previous = [ordered]@{}
+if (Test-Path -LiteralPath $infoPath) {
+  try { $previous = Get-Content -LiteralPath $infoPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $previous = [ordered]@{} }
+} elseif (Test-Path -LiteralPath (Join-Path $InstallDir 'config.json')) {
+  # 老版本没写过这个文件，但装过就一定有 config.json
+  $previous = [ordered]@{ version = '（更早的版本）' }
+}
+# 包里的 manifest.json 带着引擎归档的 sha256 —— 用它判断"引擎变没变"，
+# 不用自己重算（1.5GB 算一次要 8 分钟）。
+$packagedEngineHash = ''
+$manifest = [ordered]@{}
+$manifestPath = Join-Path $Source 'manifest.json'
+if (Test-Path -LiteralPath $manifestPath) {
+  try {
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $entry = $manifest.files | Where-Object { $_.path -eq 'engine/harness.tar' } | Select-Object -First 1
+    if ($entry) { $packagedEngineHash = $entry.sha256 }
+  } catch { }
+}
+if ($previous.version) {
+  Say ''
+  Say ("检测到这台电脑已经装过这个产品（上次：{0}）。" -f $previous.version) 'Cyan'
+  Say '  按**升级**处理：程序文件更新到新版，你的聊天数据、待办、密钥、模型配置全部保留。' 'White'
+  Say ("  你的数据在：{0}" -f $DataDir) 'DarkGray'
+}
 foreach ($sub in 'data', 'credentials', 'logs', 'harness', 'workspace') {
   New-Item -ItemType Directory -Force -Path (Join-Path $DataDir $sub) | Out-Null
 }
@@ -148,22 +188,41 @@ Copy-Item -LiteralPath (Join-Path $Source 'app') -Destination $appTarget -Recurs
 #     （runtimes\python\python\pythonw.exe），装完报"找不到 pythonw.exe"；
 #     正确做法是 -Destination 给**父目录**。
 #  2) 复制完必须**验证落地文件**，否则复制失败是静默的（第一次就是静静地产出了一个空壳）。
-function Copy-Component([string]$FromDir, [string]$ToParent, [string]$MustExist, [string]$Label) {
+function Copy-Component([string]$FromDir, [string]$ToParent, [string]$MustExist, [string]$Label,
+                        [switch]$Refresh) {
   if (-not (Test-Path -LiteralPath $FromDir)) { Die "安装包里缺少 $Label（$FromDir）。" }
   $target = Join-Path $ToParent (Split-Path $FromDir -Leaf)
-  if (Test-Path -LiteralPath (Join-Path $target $MustExist)) { Ok "$Label 已存在，跳过"; return $target }
+  if (-not $Refresh) {
+    if (Test-Path -LiteralPath (Join-Path $target $MustExist)) { Ok "$Label 已存在，跳过"; return $target }
+  }
   New-Item -ItemType Directory -Force -Path $ToParent | Out-Null
-  if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+  if (Test-Path -LiteralPath $target) { Clear-Dir $target }
   Copy-Item -LiteralPath $FromDir -Destination $ToParent -Recurse -Force
   if (-not (Test-Path -LiteralPath (Join-Path $target $MustExist))) { Die "复制 $Label 后没有找到 $MustExist，安装中止。" }
-  Ok "$Label 就位"
+  Ok $(if ($Refresh) { "$Label 已更新到新版" } else { "$Label 就位" })
   return $target
 }
 
 $nodeExe = Join-Path $InstallDir 'runtimes\node\node.exe'
-Copy-Component (Join-Path $Source 'runtimes\node') (Join-Path $InstallDir 'runtimes') 'node.exe' 'Node 运行时' | Out-Null
+# 运行时平时不变，所以"已存在就跳过"。但万一新版换了 Node/Python 版本，
+# 跳过就会让新程序跑在旧解释器上 —— 拿包里的版本号和装着的实际版本比一下，不一致就更新。
+$refreshNode = $false
+if (Test-Path -LiteralPath $nodeExe) {
+  $installedNode = (& $nodeExe '-v') 2>$null
+  $packagedNode = $manifest.components.node.version
+  $refreshNode = [bool]($packagedNode -and $installedNode -and ($installedNode.Trim() -ne $packagedNode.Trim()))
+  if ($refreshNode) { Warn "Node 版本要更新：$installedNode -> $packagedNode" }
+}
+Copy-Component (Join-Path $Source 'runtimes\node') (Join-Path $InstallDir 'runtimes') 'node.exe' 'Node 运行时' -Refresh:$refreshNode | Out-Null
 $pythonExe = Join-Path $InstallDir 'runtimes\python\pythonw.exe'
-Copy-Component (Join-Path $Source 'runtimes\python') (Join-Path $InstallDir 'runtimes') 'pythonw.exe' 'Python 运行时' | Out-Null
+$refreshPython = $false
+if (Test-Path -LiteralPath $pythonExe) {
+  $installedPython = (& (Join-Path $InstallDir 'runtimes\python\python.exe') '-c' 'import sys;print(sys.version.split()[0])') 2>$null
+  $packagedPython = $manifest.components.python.version
+  $refreshPython = [bool]($packagedPython -and $installedPython -and ($installedPython.Trim() -ne $packagedPython.Trim()))
+  if ($refreshPython) { Warn "Python 版本要更新：$installedPython -> $packagedPython" }
+}
+Copy-Component (Join-Path $Source 'runtimes\python') (Join-Path $InstallDir 'runtimes') 'pythonw.exe' 'Python 运行时' -Refresh:$refreshPython | Out-Null
 $dblabSrc = Join-Path $InstallDir 'components\wechat-db-lab\src'
 Copy-Component (Join-Path $Source 'components\wechat-db-lab\src') (Join-Path $InstallDir 'components\wechat-db-lab') 'wechat_db_lab\__init__.py' '取密钥/解密组件' | Out-Null
 
@@ -198,15 +257,32 @@ if ($EngineRoot -and (Test-Path -LiteralPath (Join-Path $EngineRoot 'apps\cli\sr
 } elseif (Test-Path -LiteralPath (Join-Path $Source 'engine\harness.tar')) {
   # 引擎以单个归档形式随包提供：一次解包，比逐文件复制快得多（Windows 10 起自带 tar）。
   $engineTarget = Join-Path $InstallDir 'engine\harness'
-  New-Item -ItemType Directory -Force -Path $engineTarget | Out-Null
-  Say '    正在解开消息引擎（体积大，请耐心等）…' 'DarkGray'
-  & tar -xf (Join-Path $Source 'engine\harness.tar') -C $engineTarget
-  if ($LASTEXITCODE -ne 0) { Die "解包引擎失败（tar 退出码 $LASTEXITCODE）。" }
-  foreach ($must in 'apps\cli\src\bin.ts', 'node_modules\tsx') {
-    if (-not (Test-Path -LiteralPath (Join-Path $engineTarget $must))) { Die "引擎解包后缺少 $must，安装中止。" }
+  #
+  # 升级的关键：**先清空再解包**，否则上一版删掉的文件会留在原地（新引擎少了一个包，
+  # 旧包里那个还在 → 解析到不该存在的模块）。同一版本重装则跳过，省掉一次 1.5GB 的搬运：
+  # 包的 manifest.json 里就有引擎归档的 sha256，不用自己重算（算一次要 8 分钟）。
+  $engineUnchanged = $false
+  if ($packagedEngineHash -and $previous.engineSha -and ($previous.engineSha -eq $packagedEngineHash) -and
+      (Test-Path -LiteralPath (Join-Path $engineTarget 'apps\cli\src\bin.ts'))) {
+    $engineUnchanged = $true
   }
-  $EngineRoot = $engineTarget
-  Ok '消息引擎就位'
+  if ($engineUnchanged) {
+    Ok '消息引擎与已装版本相同，跳过'
+  } else {
+    if (Test-Path -LiteralPath $engineTarget) {
+      Say '    清掉上一版引擎（避免旧文件残留）…' 'DarkGray'
+      Clear-Dir $engineTarget
+    }
+    New-Item -ItemType Directory -Force -Path $engineTarget | Out-Null
+    Say '    正在解开消息引擎（体积大，请耐心等）…' 'DarkGray'
+    & tar -xf (Join-Path $Source 'engine\harness.tar') -C $engineTarget
+    if ($LASTEXITCODE -ne 0) { Die "解包引擎失败（tar 退出码 $LASTEXITCODE）。" }
+    foreach ($must in 'apps\cli\src\bin.ts', 'node_modules\tsx') {
+      if (-not (Test-Path -LiteralPath (Join-Path $engineTarget $must))) { Die "引擎解包后缺少 $must，安装中止。" }
+    }
+    $EngineRoot = $engineTarget
+    Ok '消息引擎就位'
+  }
 } else {
   Die "安装包里没有消息引擎（也没找到 engine\harness.tar）。发给用户的包必须带引擎，请重新打包。"
 }
@@ -422,10 +498,25 @@ else {
     Ok '服务已就绪'
     $url = "http://127.0.0.1:3080/?token=$($token.Trim())"
     Say ''
-    Say '安装完成。' 'Green'
+    Say $(if ($previous.version) { '升级完成。' } else { '安装完成。' }) 'Green'
     Say '  以后使用：双击桌面的「消息助手」。' 'White'
     Say '  停止/重启：安装目录里的 stop.ps1 / restart.ps1。' 'White'
+    if ($previous.version) {
+      Say ("  你的数据、密钥、模型配置都在：{0}" -f $DataDir) 'White'
+      Say ("  要回到旧版：把旧版安装包解压后再运行一次它的 install.ps1（数据同样保留）。") 'DarkGray'
+    }
     if ($ModelLater) { Say '  别忘了在「设置 → 模型」里配好大模型。' 'Yellow' }
     if (-not $Silent) { Start-Process $url }
   }
 }
+
+# 记下"这次装的是哪一版"，下一次运行就能判断是升级、以及引擎要不要重装。
+# 装失败（Die）时不会走到这里 —— 半成品不该被记成"已安装这个版本"。
+$info = [ordered]@{
+  version    = $(if ($manifest.version) { $manifest.version } else { 'dev' })
+  engineSha  = $packagedEngineHash
+  node       = $(if ($manifest.components.node.version) { $manifest.components.node.version } else { '' })
+  python     = $(if ($manifest.components.python.version) { $manifest.components.python.version } else { '' })
+  installedAt = (Get-Date).ToString('s')
+}
+$info | ConvertTo-Json | Set-Content -LiteralPath $infoPath -Encoding UTF8
