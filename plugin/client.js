@@ -741,7 +741,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   }
   function usePoller(active,load,delay){
     const [state,setState]=useState({loading:true,data:null,error:'',errorCode:'',errorDev:null}),loadRef=useRef(load),[revision,setRevision]=useState(0),waitersRef=useRef([]);loadRef.current=load;
-    useEffect(()=>{if(!active)return;let stopped=false,timer,controller,wait=800;const run=async()=>{if(stopped)return;if(document.hidden){timer=setTimeout(run,5000);return;}controller=new AbortController();try{const data=await loadRef.current(controller.signal);if(!stopped){setState({loading:false,data,error:'',errorCode:'',errorDev:null});wait=delay;}}catch(error){if(!stopped&&error.name!=='AbortError'){setState(old=>({...old,loading:false,error:error.message,errorCode:error.code||'',errorDev:error.dev||null}));wait=Math.min(wait*2,30000);}}finally{if(!stopped){const waiters=waitersRef.current;waitersRef.current=[];waiters.forEach(resolve=>resolve());}}if(!stopped)timer=setTimeout(run,wait);};run();return()=>{stopped=true;clearTimeout(timer);controller&&controller.abort();};},[active,delay,revision]);
+    useEffect(()=>{if(!active)return;let stopped=false,timer,controller,wait=800;const once=delay<=0;const run=async()=>{if(stopped)return;if(document.hidden&&!once){timer=setTimeout(run,5000);return;}controller=new AbortController();try{const data=await loadRef.current(controller.signal);if(!stopped){setState({loading:false,data,error:'',errorCode:'',errorDev:null});wait=delay;}}catch(error){if(!stopped&&error.name!=='AbortError'){setState(old=>({...old,loading:false,error:error.message,errorCode:error.code||'',errorDev:error.dev||null}));wait=Math.min(wait*2,30000);}}finally{if(!stopped){const waiters=waitersRef.current;waitersRef.current=[];waiters.forEach(resolve=>resolve());}}if(!stopped&&!once)timer=setTimeout(run,wait);};run();return()=>{stopped=true;clearTimeout(timer);controller&&controller.abort();};},[active,delay,revision]);
     return {...state,refresh:()=>new Promise(resolve=>{waitersRef.current.push(resolve);setRevision(value=>value+1);})};
   }
 
@@ -1320,8 +1320,11 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   function OrganizeResult({result,busy,picked,added,onCheck,onAdd,onOpen}){
     const todos=result?.todos||[];
     const focus=result?.focus||[];
-    // 已加入 = 这次刚加的（added）或服务端说你早就记过了（alreadyAdded）。
-    // 后者是关键：刷新之后 added 丢了，没有它就会又出现一个能点的按钮。
+    // 已经处理过的条目在服务端就被摘掉了（见 reconcileSuggestions），这里只报个数，
+    // 让用户知道"不是没看见，是已经不用再看了"。
+    const hidden=result?.hiddenCount||0;
+    // 已加入（这一次会话里刚加的）。刷新之后服务端会直接把这条从建议里去掉，
+    // 所以不再需要靠 alreadyAdded 兜底。
     const isAdded=index=>!!added[index]||!!todos[index]?.alreadyAdded;
     const chosen=todos.map((item,index)=>index).filter(index=>picked[index]!==false&&!isAdded(index));
     return h('section',{style:card},
@@ -1356,7 +1359,9 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
                 (item.detail||'')+(item.conversation?((item.detail?' · ':'')+'来自 '+item.conversation):''))),
             isAdded(index)&&h('span',{style:{fontSize:12,color:C.ok,flexShrink:0}},'已加入')))),
         h('button',{onClick:onAdd,disabled:busy||!chosen.length,style:{...small(true),marginTop:12}},
-          busy?'正在记…':(chosen.length?('加入选中的 '+chosen.length+' 件'):'没有选中任何条目'))),
+          busy?'正在记…':(chosen.length?('加入选中的 '+chosen.length+' 件'):'没有选中任何条目')),
+        hidden?h('p',{style:{...hint,margin:'10px 0 0'}},
+          '另有 '+hidden+' 条已经记进待办（或已完成），这次没有再列出来。'):null),
       !todos.length&&!focus.length&&h('p',{style:{margin:0,fontSize:14,color:C.text2,lineHeight:1.8}},'这次整理没有给出可执行的事项。'),
       h('p',{style:{...hint,margin:'12px 0 0'}},'整理只看消息本身；不会打开微信窗口，也不会发送任何消息。'));
   }
@@ -1445,7 +1450,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
 
   /** 首页：关键信息 + 关键操作 + 对话。 */
   function HomePage({store,narrow}){
-    const home=usePoller(true,()=>api('home'),8000);
+    // 读消息**不轮询**：进页面读一次（刷新页面=重新读），之后靠「刷新」「整理」两个按钮。
+    // 原来每 8 秒重扫一次微信库，而对面的消息变化并不会那么快 —— 用户想看的时候自己会点，
+    // 按需读也让"整理"这一步的 token 花在他真正要的时候（用户明确要求）。
+    const home=usePoller(true,()=>api('home'),0);
     const [organizing,setOrganizing]=useState(false),[busy,setBusy]=useState(false);
     const [error,setError]=useState(''),[note,setNote]=useState('');
     const [picked,setPicked]=useState({}),[added,setAdded]=useState({});
@@ -1453,10 +1461,14 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const totals=data?.totals||{conversations:0,reading:0,waiting:0,todayMessages:0,todos:0,doing:0,automation:0};
     const result=data?.lastOrganize||null;
     const openConversation=(username,title,kind)=>store.set({tab:'home',contactKey:username,contactTitle:title,contactKind:kind});
+    // 整理要花 token（会读消息、让模型重新看一遍），所以加一个冷却：
+    // 连点两下不该跑两次，手滑重按也要等一下。读完的这一刻开始计时。
+    const [cooldown,setCooldown]=useState(0);
+    useEffect(()=>{if(!cooldown)return;const timer=setTimeout(()=>setCooldown(value=>value-1),1000);return()=>clearTimeout(timer);},[cooldown]);
     async function organize(){
-      if(organizing)return;
+      if(organizing||cooldown>0)return;
       setOrganizing(true);setError('');setNote('');setPicked({});setAdded({});
-      try{await api('home/organize',{});await home.refresh();}
+      try{await api('home/organize',{});await home.refresh();setCooldown(20);}
       catch(e){setError(e.message);}
       finally{setOrganizing(false);}
     }
@@ -1517,9 +1529,14 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',minWidth:0}},
         h('h1',{style:{...h1,fontSize:20,margin:0}},'消息'),
         data?.scanAt?h('span',{style:{fontSize:12,color:C.text3}},'更新于 '+relativeTime(data.scanAt)):null),
-      h('button',{onClick:organize,disabled:organizing,
+      // 主操作只有一条：整理消息。读消息不再轮询（刷新页面=重新读一次用来初始化），
+      // 整理要花 token，所以带冷却、不给连点。
+      h('button',{onClick:organize,disabled:organizing||cooldown>0,
+        title:cooldown>0?('刚整理过，'+cooldown+' 秒后可以再来一次'):'让助手读一遍消息，给出结论和待办建议',
         style:{...button(true),display:'inline-flex',alignItems:'center',justifyContent:'center',gap:8}},
-        organizing?h(Spinner,{size:14}):null,organizing?'正在整理…':'整理消息'));
+        organizing?h(Spinner,{size:14}):null,
+        organizing?'正在整理…':'整理消息',
+        cooldown>0?h('span',{style:{opacity:.75,fontSize:12}},'（'+cooldown+'s）'):null));
     const todoCard=h(HomeCard,{title:'待办',meta:'还没做完的 '+totals.todos+' 件',
       action:h('button',{onClick:()=>store.set({tab:'todos'}),style:small(false)},'全部待办')},
       h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.bg,overflow:'hidden'}},
@@ -1575,7 +1592,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     // with `key={username}`. Without that key React reuses the instance when the user picks
     // another contact and the fetched rows, errors and scroll position follow them around.
     const detail=usePoller(true,()=>api('home/conversation?username='+encodeURIComponent(username)
-      +'&title='+encodeURIComponent(title||'')+'&limit='+CHAT_LIMIT),10000);
+      +'&title='+encodeURIComponent(title||'')+'&limit='+CHAT_LIMIT),0);
     const data=detail.data,messages=data?.messages||[];
     const back=()=>store.set({contactKey:null,contactTitle:null,contactKind:null});
     // 和聊天软件一样：打开就停在最新一条，往上翻才看历史。
@@ -1972,7 +1989,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   }
 
   function TodayPage({store,ctx}){
-    const today=usePoller(true,()=>api('today'),8000),[busy,setBusy]=useState(false),[error,setError]=useState(''),[adding,setAdding]=useState(false);
+    const today=usePoller(true,()=>api('today'),0),[busy,setBusy]=useState(false),[error,setError]=useState(''),[adding,setAdding]=useState(false);
     // 刚勾掉的那条立刻从界面上拿掉，不等下一次轮询。
     // 用户的原话是「点击处理完了，红点过好久才会消失」—— 服务端当场就写好了，只有界面在等。
     // 这一份本地遮盖在 refresh() 真正回来之后清掉，服务端永远是最终依据。

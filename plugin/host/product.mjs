@@ -1012,24 +1012,42 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
     return loose ? {username: loose.username, kind: loose.kind} : null;
   }
   /**
-   * 整理结果里每条建议标上"是不是已经记过待办了"。
+   * 建议与待办的对应关系：判断"这条建议是不是已经处理过了"。
    *
-   * 为什么必须在服务端标：界面上的"已加入"只是这一次会话的内存状态，**刷新就没了** ——
-   * 于是用户看到又能点一次，以为会重复记（用户实测报的就是这个）。落库时有去重，
-   * 重复点不会真的多一条，但界面在骗人。
+   * 整理的痛点是**无状态**：每次都从同一批消息重新得出结论，于是已经记成待办、
+   * 甚至已经做完的事，下一次整理又冒出来（用户实测报的就是这个）。这里按标题做匹配，
+   * 匹配上就从建议里拿掉 —— 用户要看的是**还没做的事**，不是重复清单。
    *
-   * 判断口径与落库那条去重规则对齐：未完成 + 来源是助手 + 标题一致（标题按界面同样的
-   * 60 字截断）。宁可判"已加过"，也不要在用户面前显示一个他能点、点了却没反应的按钮。
+   * 匹配故意放宽一点（去掉标点空白后相等，或一方包含另一方）：模型换个说法重写同一条
+   * 是很常见的，措辞差异不该让去重失效。
    */
-  function markAddedSuggestions(result) {
+  const normalizeSuggestion = value => String(value ?? '')
+    .replace(/[\s，。、；：！？,.;:!?~～\-—…"'「」『』（）()【】\[\]]/g, '').trim();
+
+  function sameSuggestion(left, right) {
+    const a = normalizeSuggestion(left), b = normalizeSuggestion(right);
+    if (!a || !b) return false;
+    if (a === b) return true;
+    const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+    return shorter.length >= 8 && longer.includes(shorter);
+  }
+
+  /**
+   * 把建议里"已经处理过的"摘掉，并告诉界面摘掉了几条。
+   * 摘掉的口径：待办列表里存在同名条目（**不论是未完成还是已完成** —— 前者说明已经记下了，
+   * 后者说明已经做完了，两种都不该再提醒一次）。
+   */
+  function reconcileSuggestions(result, todos) {
     if (!result || !Array.isArray(result.todos) || !result.todos.length) return result;
-    const open = new Set(crm.listTodos({limit: 500})
-      .filter(todo => todo.state !== 'done')
-      .map(todo => (todo.title || '').trim()));
-    return {...result, todos: result.todos.map(item => ({
-      ...item,
-      alreadyAdded: open.has(String(item.title || '').split('\n')[0].trim().slice(0, 60))
-    }))};
+    const open = (todos ?? crm.listTodos({limit: 500})).map(todo => ({title: todo.title, state: todo.state}));
+    const kept = [];
+    let hidden = 0;
+    for (const item of result.todos) {
+      const done = open.some(todo => sameSuggestion(todo.title, item.title));
+      if (done) { hidden++; continue; }
+      kept.push({...item, alreadyAdded: false});
+    }
+    return {...result, todos: kept, hiddenCount: hidden};
   }
 
   async function homePayload() {
@@ -1037,9 +1055,10 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
     const {items} = await aggregate();
     const automation = items.filter(item => item.bucket === 'error'
       || (item.bucket === 'pending' && item.attentionKind !== 'draft'));
+    const todos = crm.listTodos({limit: 200});
     return homeOverview({
-      bundle, todos: crm.listTodos({limit: 200}), automation, account, scanAt,
-      lastOrganize: markAddedSuggestions(readJsonFile(organizePath, null)), now: Date.now() / 1000
+      bundle, todos, automation, account, scanAt,
+      lastOrganize: reconcileSuggestions(readJsonFile(organizePath, null), todos), now: Date.now() / 1000
     });
   }
 
@@ -1177,15 +1196,19 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
           throw Object.assign(new Error('本地数据库里没有读到可整理的会话，先确认微信已登录过、数据库已解锁'),
             {code: 'ORGANIZE_EMPTY'});
         }
-        const result = await organizeMessages({bundle, prompt: renderOrganizePrompt(bundle)});
+        // 已经处理过的条目（用户记成待办、或已经做完的）。提示词用它劝模型别重复，
+        // 落库前的过滤用它兜底 —— 整理的"记忆"就是这份待办列表，不需要另存一份状态。
+        const handled = crm.listTodos({limit: 200}).map(todo => todo.title);
+        const result = await organizeMessages({bundle, prompt: renderOrganizePrompt(bundle, {handled})});
         const located = {
           summary: result.summary,
           focus: result.focus.map(item => ({...item, ...(locate(bundle, item.conversation) ?? {})})),
           todos: result.todos.map(item => ({...item, ...(locate(bundle, item.conversation) ?? {})})),
           account, scannedAt: scanAt, sessionsRead: bundle.length, at: Date.now() / 1000
         };
-        writeJsonFile(organizePath, located);
-        respond(res, 200, located);
+        // 落库前先把"已经处理过的"摘掉：提示词只能劝，这一步才是保证。
+        writeJsonFile(organizePath, reconcileSuggestions(located, crm.listTodos({limit: 500})));
+        respond(res, 200, readJsonFile(organizePath, located));
         return true;
       }
       // 会话 key（sha256）-> 本地数据库身份（username）。待办、草稿、跟进记录里存的是 key，

@@ -105,11 +105,27 @@ export const ORGANIZE_SYSTEM = [
   '5) conversation 必须用给定的显示名原样填写，不要改写、不要加"微信"前缀。'
 ].join('\n');
 
-export function renderOrganizePrompt(bundle, {now = Date.now() / 1000} = {}) {
+/**
+ * 整理提示词。
+ *
+ * `handled` 是**已经处理过的条目**（用户已经把它记成待办、或者已经做完了）。
+ * 为什么必须告诉模型：整理是无状态的，每次都从同一批消息里重新得出结论，于是
+ * "听 Wencharm 的三条语音" 这种建议会被反复提出来 —— 用户明明已经记了待办、甚至处理完了
+ * （用户实测报的就是这个）。只靠事后过滤能挡住显示，但模型还是会花 token 重复生成，
+ * 所以两头都做：提示词里说清"别再提"，结果里再把漏网的滤掉。
+ */
+export function renderOrganizePrompt(bundle, {now = Date.now() / 1000, handled = []} = {}) {
   const head = `现在是 ${stamp(now)}。以下是用户最近有动静的会话（按最近时间排序）：`;
   const body = bundle.slice(0, ORGANIZE_SESSIONS)
     .map(session => renderSession(session, ORGANIZE_PER_SESSION)).join('\n\n');
-  return [head, '', body || '（没有可读的会话）'].join('\n');
+  const done = (Array.isArray(handled) ? handled : [])
+    .map(item => String(item ?? '').trim()).filter(Boolean).slice(0, 20);
+  const skip = done.length
+    ? ['', '下面这些**上一次已经提过，用户已经记成待办或已经做完了**，这次不要再提：',
+       ...done.map(item => '- ' + item),
+       '不要把它们换个说法再写一遍，也不要写进 todos。'].join('\n')
+    : '';
+  return [head, '', body || '（没有可读的会话）', skip].filter(part => part !== '').join('\n');
 }
 
 const clamp = (value, limit) => String(value ?? '').trim().slice(0, limit);
