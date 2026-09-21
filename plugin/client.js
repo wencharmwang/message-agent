@@ -1785,7 +1785,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const pagebar=h('div',{className:'lg-glass ma-pagebar'},
       h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',minWidth:0}},
         h('h1',{style:{...h1,fontSize:20,margin:0}},'消息'),
-        data?.scanAt?h('span',{style:{fontSize:12,color:C.text3}},'更新于 '+relativeTime(data.scanAt)):null),
+        // 显示「最新消息」而不是「更新于」：扫描时间每轮都变，等于永远说「刚刚」，没信息量。
+        data?.latestMessageAt?h('span',{style:{fontSize:12,color:C.text3}},'最新消息 '+relativeTime(data.latestMessageAt)):null),
       // 主操作只有一条：整理消息。读消息不再轮询（刷新页面=重新读一次用来初始化），
       // 整理要花 token，所以带冷却、不给连点。
       h('button',{onClick:organize,disabled:organizing||cooldown>0,

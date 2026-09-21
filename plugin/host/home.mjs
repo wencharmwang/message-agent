@@ -201,9 +201,14 @@ export function homeOverview({bundle = [], todos = [], automation = [], account 
   const recent = bundle.filter(session => session.messages.length || session.unread);
   const todayMessages = bundle.reduce((total, session) =>
     total + session.messages.filter(message => (message.at || 0) > now - DAY).length, 0);
+  // 最新一条消息是什么时候。页面顶部原来显示的是"扫描时间"，而扫描每轮都做 →
+  // 永远是"刚刚"，跟有没有新消息无关（用户实测指出来）。这条才是有信息量的。
+  const latestMessageAt = bundle.reduce((latest, session) =>
+    session.messages.reduce((inner, message) => Math.max(inner, message.at || 0), latest), 0);
   return {
     account,
     scanAt,
+    latestMessageAt,
     generatedAt: now,
     totals: {
       conversations: bundle.length,
