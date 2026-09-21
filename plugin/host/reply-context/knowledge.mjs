@@ -163,6 +163,20 @@ export class Knowledge {
     return before;
   }
 
+  /**
+   * 整份删掉一次导入（用户上传的一份文档）。
+   *
+   * 界面上"一个文档"其实是一批切片 —— 让它一条条删是不合理的：
+   * 切片是检索的实现细节，用户没理由知道。所以按 importId 一次清干净。
+   */
+  removeImport(workspaceId, importId) {
+    if (!importId) throw Object.assign(new Error('缺少文档标记'), {code: 'CONTEXT_INVALID'});
+    const rows = this.list(workspaceId).filter(item => item.metadata?.importId === importId);
+    if (!rows.length) throw Object.assign(new Error('没有这份文档'), {code: 'CONTEXT_NOT_FOUND'});
+    for (const row of rows) this.remove(workspaceId, row.id);
+    return {removed: rows.length, importId};
+  }
+
   /** Restore the previous revision snapshot as the current content (a new revision). */
   rollback(workspaceId, id, {toRevision} = {}) {
     const row = this.get(id, workspaceId);

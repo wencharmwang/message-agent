@@ -2936,6 +2936,47 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
             onAct(()=>mutate('context/knowledge/'+k.id,'DELETE'));},style:small(false,confirming)},confirming?'确认删除':'删除')));
   }
 
+  /**
+   * 一份导入的文档 = 界面上的**一条**知识。
+   *
+   * 用户实测：上传一个文档被切成很多切片，界面上一条条列着，删了好久才删完 ——
+   * "切片是知识库的运行逻辑，用户根本不需要理解"。
+   * 所以：默认只看文档（名字 + 几段 + 一次删掉整份）；想关心切片质量的，展开再看。
+   * **切片本身不删**：检索真的靠它。
+   */
+  function KnowledgeDocument({name, items, onAct}){
+    const [open,setOpen]=useState(false);
+    const [confirming,setConfirming]=useState(false);
+    const first=items[0]||{};
+    return h('article',{style:card},
+      h('div',{style:{display:'flex',justifyContent:'space-between',gap:12,alignItems:'center'}},
+        h('div',{style:{display:'flex',alignItems:'baseline',gap:10,minWidth:0,flexWrap:'wrap'}},
+          h('strong',{style:{fontSize:16,color:C.text,wordBreak:'break-word'}},name||first.title||'导入的文档'),
+          h('span',{style:{fontSize:13,color:C.text3,flexShrink:0}},'导入的文档 · 共 '+items.length+' 段')),
+        h('div',{style:{display:'flex',gap:8,alignItems:'center',flexShrink:0}},
+          h('span',{style:pill(items.some(i=>i.status==='published')?C.ok:null)},
+            items.some(i=>i.status==='published')?'已发布':'草稿'))),
+      h('p',{style:{...hint,margin:'8px 0 0'}},
+        '发给助手时按段落检索，不整篇塞进去。删除会一次删掉整份文档。'),
+      h('div',{style:{display:'flex',gap:10,flexWrap:'wrap',marginTop:12}},
+        h('button',{onClick:()=>{if(!confirming)return setConfirming(true);
+          onAct(()=>mutate('context/knowledge?importId='+encodeURIComponent(first.metadata?.importId||''),'DELETE'));},
+          style:small(false,confirming)},confirming?'确认删掉整份':'删除整份'),
+        items.some(i=>i.status!=='published')&&h('button',{
+          onClick:()=>onAct(()=>Promise.all(items.filter(i=>i.status!=='published')
+            .map(i=>api('context/knowledge/'+i.id+'/publish',{})))),style:small(true)},'全部发布'),
+        h('button',{onClick:()=>setOpen(value=>!value),style:small(false)},
+          open?'收起分段（'+items.length+'）':'看看分段（'+items.length+'）')),
+      open&&h('div',{style:{marginTop:10}},
+        items.map(item=>h('div',{key:item.id,style:{borderTop:'1px solid '+C.border,padding:'8px 0'}},
+          h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline'}},
+            h('strong',{style:{fontSize:13,color:C.text2,minWidth:0,wordBreak:'break-word'}},item.title),
+            h('button',{onClick:()=>onAct(()=>api('context/knowledge/'+item.id+'/retire',{})),
+              style:{...small(false,false,true),flexShrink:0}},item.status==='published'?'停用这段':'不用这段')),
+          h('p',{style:{margin:'4px 0 0',fontSize:12,color:C.text3,lineHeight:1.7,
+            display:'-webkit-box',WebkitBoxOrient:'vertical',WebkitLineClamp:3,overflow:'hidden'}},item.content)))));
+  }
+
   function KnowledgeSection({data,refresh,filter,setFilter}){
     const [open,setOpen]=useState(false),[importOpen,setImportOpen]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState('');
     const items=data?.items||[],shown=filter==='all'?items:items.filter(k=>k.status===filter);
@@ -2954,7 +2995,23 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       h('div',{style:{display:'flex',gap:8,flexWrap:'wrap',margin:'4px 0 14px'}},[['published','已发布'],['draft','草稿'],['retired','已停用'],['all','全部']].map(([value,text])=>
         h('button',{key:value,onClick:()=>setFilter(value),'aria-pressed':filter===value,style:{...pill(filter===value?C.brand:null),background:filter===value?C.hover:'transparent',cursor:'pointer',minHeight:36}},text))),
       !shown.length&&h('p',{style:hint},'还没有这个状态下的知识。点「＋ 新增」写一条，发布后助手遇到相关问题就能引用。'),
-      shown.map(k=>h(KnowledgeCard,{key:k.id,k,onAct:act})));
+      // 同一份文档的切片归成一条：用户上传的是一个文档，不是 N 条知识。
+      (()=>{
+        const groups=[];
+        for(const item of shown){
+          // 老数据没有 importId（那次导入时还没这个概念）：用 sourceRef 兜一下，
+          // 让从网址导入的那批也能一条看。实在认不出来的就先单独列着。
+          const importId=(item.metadata&&item.metadata.importId)
+            ||(item.sourceRef?('src:'+item.sourceRef):'');
+          if(!importId){groups.push({key:item.id,items:[item]});continue;}
+          const hit=groups.find(group=>group.key===importId);
+          if(hit)hit.items.push(item);
+          else groups.push({key:importId,items:[item],importName:item.metadata.importName||''});
+        }
+        return groups;
+      })().map(group=>group.items.length>1
+        ? h(KnowledgeDocument,{key:group.key,name:group.importName,items:group.items,onAct:act})
+        : h(KnowledgeCard,{key:group.key,k:group.items[0],onAct:act})));
   }
 
   /**

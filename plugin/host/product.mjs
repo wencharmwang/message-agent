@@ -288,6 +288,9 @@ async function importKnowledge(context, workspaceId, payload = {}) {
   let body = typeof text === 'string' ? text : '';
   let sourceType = 'paste';
   let sourceRef = '';
+  // 同一份文档切出来的所有切片共用一个 importId：界面据此把它们当成**一条知识**展示和删除
+  // （用户实测：一个个删切片太不合理）。切片本身照旧保留 —— 检索依赖它。
+  const importId = 'imp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   if (!body.trim() && typeof url === 'string' && url.trim()) {
     const page = await fetchPageText(url);
     body = page.text;
@@ -297,9 +300,11 @@ async function importKnowledge(context, workspaceId, payload = {}) {
   if (!body.trim()) throw Object.assign(new Error('请粘贴要导入的内容，或填一个网址'), { code: 'IMPORT_EMPTY' });
   const items = splitKnowledge(body, { mode });
   if (!items.length) throw Object.assign(new Error('没切出可用内容，请检查粘贴的内容'), { code: 'IMPORT_EMPTY' });
+  const importName = sourceRef ? sourceRef.slice(0, 120) : (items[0]?.title || '粘贴的内容');
   if (dryRun) return { items, total: items.length, sourceType, sourceRef };
   const created = items.map(item => context.knowledge.create(workspaceId, {
-    kind, title: item.title, content: item.content, riskLevel, sourceType, sourceRef
+    kind, title: item.title, content: item.content, riskLevel, sourceType, sourceRef,
+    metadata: {importId, importName}
   }));
   return { created: created.length, total: items.length, items: created, sourceType, sourceRef };
 }
@@ -1554,6 +1559,13 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
         }
           // 真删除（不用的知识可以删掉）。retire 只是停用，不是删除。
           if (id && req.method === 'DELETE') { respond(res, 200, {removed: context.knowledge.remove(ws, id).id}); return true; }
+          // 整份文档删除：`DELETE /api/context/knowledge?importId=imp_xxx`
+          if (!id && req.method === 'DELETE') {
+            const query = new URL(req.url, 'http://localhost');
+            const importId = query.searchParams.get('importId') || '';
+            respond(res, 200, context.knowledge.removeImport(ws, importId));
+            return true;
+          }
 
 
         if (resource === 'memories') {
