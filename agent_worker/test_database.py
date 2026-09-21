@@ -71,7 +71,8 @@ class StoreAddTests(unittest.TestCase):
             self.assertEqual(again, first)                # same identity: history stays meaningful
             rule = store.rule(again)
             self.assertEqual(rule['archived'], 0)
-            self.assertEqual(rule['enabled'], 0)          # re-added rules start paused
+            # 用户要求：加回来就是要开（原来写的是「重新加回来先暂停」，实测被指出不要这样）。
+            self.assertEqual(rule['enabled'], 1)
             self.assertEqual(rule['prompt'], '新说明')
 
     def test_missing_fields_are_reported_in_plain_language(self):
@@ -87,3 +88,44 @@ class StoreAddTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RuleStateTests(unittest.TestCase):
+    """规则状态：加了就开、改了不停。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self.tmp.name) / 'reply.db')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_new_rule_starts_listening(self):
+        """新增的规则**默认开启**：加了就是要它开始回，不用再点一次。"""
+        rule_id = self.store.add('wechat-main', 'u-new', '新朋友', 'direct', '用轻松的语气回')
+        rule = self.store.rule(rule_id)
+        self.assertEqual(rule['enabled'], 1)
+        self.assertNotEqual(rule['status'], 'paused')
+
+    def test_editing_a_rule_keeps_it_listening(self):
+        """改回复说明**不该把监听停掉**。
+
+        用户实测：一改规则就不监听了，还得手动再开一次。他改的是"怎么回"，
+        不是"要不要回"。这里钉住：改完仍然 enabled=1。
+        """
+        rule_id = self.store.add('wechat-main', 'u-edit', '老朋友', 'direct', '先说你好')
+        self.store.enable(rule_id, True)
+        self.store.edit(rule_id, '改成先问吃了没')
+        rule = self.store.rule(rule_id)
+        self.assertEqual(rule['enabled'], 1, '改完还得继续监听')
+        self.assertEqual(rule['prompt'], '改成先问吃了没')
+        self.assertEqual(rule['status'], 'starting', '重新起一次基线')
+
+    def test_editing_a_paused_rule_keeps_it_paused(self):
+        """本来是暂停的，改说明不该把它偷偷开起来。"""
+        rule_id = self.store.add('wechat-main', 'u-paused', '先不开的人', 'direct', '随便回')
+        self.store.enable(rule_id, False)
+        self.store.edit(rule_id, '改一下说明')
+        rule = self.store.rule(rule_id)
+        self.assertEqual(rule['enabled'], 0)
+        self.assertEqual(rule['status'], 'paused')

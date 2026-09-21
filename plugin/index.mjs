@@ -651,7 +651,8 @@ export function apply(ctx) {
       return;
     }
     if (req.headers['sec-fetch-site'] && req.headers['sec-fetch-site'] !== 'same-origin') { respond(res,403,{error:'Same origin required'});return; }
-    if (!['GET','POST','PATCH'].includes(req.method)) { respond(res,405,{error:'Method not allowed'}); return; }
+    // 允许 DELETE：知识库的「真删除」要用它（原来只放行 GET/POST/PATCH，删除一律 405）。
+    if (!['GET','POST','PATCH','DELETE'].includes(req.method)) { respond(res,405,{error:'Method not allowed'}); return; }
     if (req.method !== 'GET' && req.headers.origin !== `http://${authority}`) {respond(res,403,{error:'Origin required'});return;}
     if (!['/message-agent/api/conversations','/message-agent/api/search_contacts','/message-agent/api/settings','/message-agent/api/rules','/message-agent/api/enable','/message-agent/api/pause','/message-agent/api/edit','/message-agent/api/delete'].includes(path)) {
       // Stage-1 product business API (inbox, conversation detail, interactive session, drafts).

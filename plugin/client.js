@@ -2090,7 +2090,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('textarea',{value:prompt,onChange:event=>setPrompt(event.target.value),rows:5,style:{...field,resize:'vertical',lineHeight:1.7}}),
         h(StylePresetPicker,{disabled:busy,onPick:setPrompt}),
         h(RuleMemory,{rule}),
-        h('p',{style:{...hint,marginTop:8}},'只对这个人生效。保存后会先暂停自动回复，你确认没问题再重新开启。'),
+        h('p',{style:{...hint,marginTop:8}},'只对这个人生效。改完按新规矩继续回复，不用重新开启。'),
         h('div',{style:{display:'flex',gap:10}},
           h('button',{disabled:busy,onClick:()=>run('edit',{id:rule.id,prompt}),style:button(true)},busy?'正在保存…':'保存'),
           h('button',{disabled:busy,onClick:()=>{setEditing(false);setPrompt(rule.prompt);},style:button(false)},'取消')))
@@ -2207,7 +2207,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           h('label',{style:fieldLabel},'2. 要自动回复的话，告诉助手怎么回'),
           h('textarea',{value:prompt,onChange:event=>setPrompt(event.target.value),rows:5,style:{...field,resize:'vertical',lineHeight:1.7}}),
           !crm&&h(StylePresetPicker,{disabled:busy,onPick:setPrompt}),
-          h('p',{style:{...hint,marginTop:8}},crm?'不想让它自动回复也可以，保持关闭就行。':'每个联系人都可以写得不一样。添加后默认关闭，检查无误再开启。'))),
+          h('p',{style:{...hint,marginTop:8}},crm?'不想让它自动回复也可以，保持关闭就行。':'每个联系人都可以写得不一样。加好即开始监听，想停就暂停。'))),
       h('div',{style:{display:'flex',gap:10,marginTop:18,paddingTop:16,borderTop:'1px solid var(--lg-card-line)'}},
         h('button',{onClick:add,disabled:busy,style:button(true)},busy?'请稍等…':'确认'),
         h('button',{onClick:()=>setOpen(false),disabled:busy,style:button(false)},'取消')));
@@ -2968,10 +2968,12 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const presets=usePoller(true,()=>api('reply-style'),300000);
     const list=presets.data?.presets||[];
     if(!list.length)return null;
+    // 四个按钮换成下拉：省地方，也不会让人以为"点了就等于选定了"。
     return h('div',{style:{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginTop:8}},
       h('span',{style:{fontSize:12,color:C.text3}},'照着写'),
-      ...list.map(item=>h('button',{key:item.id,type:'button',disabled,style:small(false),
-        onClick:()=>onPick(item.text)},item.name)));
+      h(Select,{value:'',minWidth:200,disabled,placeholder:'选一个现成的，再按这个人改',
+        groups:[{items:list.map(item=>({value:item.id,label:item.name}))}],
+        onChange:id=>{const hit=list.find(item=>item.id===id);if(hit)onPick(hit.text);}}));
   }
 
   /**

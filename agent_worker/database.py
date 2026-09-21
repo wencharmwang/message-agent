@@ -87,13 +87,17 @@ class Store:
             if existing:
                 # Re-adding a deleted contact revives the old row: the delivery audit and
                 # job history under it stay meaningful, and the UNIQUE identity is reused.
-                db.execute("""UPDATE reply_rules SET archived=0,enabled=0,revision=revision+1,status='paused',
+                # 重新加回来也直接开着（同上：加了就是要开）。
+                db.execute("""UPDATE reply_rules SET archived=0,enabled=1,revision=revision+1,status='starting',
                               detail='',prompt=?,title=?,kind=?,baseline=NULL,candidate=NULL,candidate_since=NULL
                               WHERE id=?""", (prompt, title, kind, existing['id']))
                 return existing['id']
             rule_id = str(uuid.uuid4())
-            db.execute('INSERT INTO reply_rules(id,provider,conversation,title,kind,prompt) VALUES(?,?,?,?,?,?)',
-                       (rule_id, provider, conversation, title, kind, prompt))
+            # **加了就是要开**（用户明确要求）：默认 enabled=1 + starting，
+            # 不用再点一次"开启"。不想让它回就删掉或手动暂停。
+            db.execute('INSERT INTO reply_rules(id,provider,conversation,title,kind,prompt,enabled,status) '
+                       'VALUES(?,?,?,?,?,?,1,?)',
+                       (rule_id, provider, conversation, title, kind, prompt, 'starting'))
         return rule_id
 
     def enable(self, rule_id, enabled):
@@ -105,10 +109,22 @@ class Store:
             db.execute('DELETE FROM reply_activity WHERE rule_id=?', (rule_id,))
 
     def edit(self, rule_id, prompt):
+        """改回复说明。
+
+        **改完继续按新规则监听** —— 以前这里顺手把 enabled 置 0、状态改成 paused，
+        于是用户每改一次规则就要手动再开一次（实测被指出来："修改了规则怎么就停止监听了"）。
+        用户的期待是：改的是「怎么回」，不是「要不要回」。
+        """
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4000:
             raise ValueError('Invalid reply instructions')
         with self.connect() as db:
-            db.execute("UPDATE reply_rules SET prompt=?,enabled=0,revision=revision+1,status='paused',detail='',baseline=NULL,candidate=NULL WHERE id=?", (prompt, rule_id))
+            row = db.execute('SELECT enabled FROM reply_rules WHERE id=?', (rule_id,)).fetchone()
+            if row is None:
+                raise ValueError('没有这条规则')
+            # 状态跟着"开没开"走：开着就重新起一次基线（starting），没开就还是暂停。
+            status = 'starting' if row['enabled'] else 'paused'
+            db.execute("UPDATE reply_rules SET prompt=?,revision=revision+1,status=?,detail='',baseline=NULL,candidate=NULL WHERE id=?",
+                       (prompt, status, rule_id))
             db.execute("UPDATE reply_jobs SET state='cancelled',detail='Rule edited',finished_at=? WHERE rule_id=? AND state IN ('queued','generating','ready')", (time.time(), rule_id))
             db.execute('DELETE FROM reply_activity WHERE rule_id=?', (rule_id,))
 
