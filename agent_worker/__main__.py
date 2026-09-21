@@ -110,6 +110,8 @@ def handler(worker, token):
             # 「整理消息」是**另一个任务**：它要归纳、要判断轻重，和"像人一样回一句话"的
             # 需求不一样，所以单独一份配置。缺省跟自动回复一致（都是官方默认模型）。
             'organize_model': worker.store.setting('organize_model', worker.config['model']),
+            'assistant_provider': worker.store.setting('assistant_provider', 'deepseek-official'),
+            'assistant_model': worker.store.setting('assistant_model', ''),
             'organize_provider': worker.store.setting('organize_provider', 'deepseek-official'),
             'observe_enabled': worker.observe_enabled(),
             'dev_diagnostics': dev_diagnostics(),
@@ -424,6 +426,16 @@ def handler(worker, token):
                         if not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}', model):
                             raise ValueError('Invalid organize_model')
                         worker.store.set_setting('organize_model', model)
+                    if 'assistant_provider' in data:
+                        provider = data['assistant_provider']
+                        if not isinstance(provider, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}', provider):
+                            raise ValueError('Invalid assistant_provider')
+                        worker.store.set_setting('assistant_provider', provider)
+                    if 'assistant_model' in data:
+                        model = data['assistant_model']
+                        if not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}', model):
+                            raise ValueError('Invalid assistant_model')
+                        worker.store.set_setting('assistant_model', model)
                         changed = True
                     if 'organize_provider' in data:
                         provider = data['organize_provider']

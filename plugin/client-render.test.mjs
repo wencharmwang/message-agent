@@ -252,12 +252,21 @@ test('两个任务各配各的模型（自动回复 / 整理消息），都支�
   assert.match(picker, /groups\.unshift\(\{label:'当前',items:\[\{value:provider\+'::'\+model/);
   // 当前组合不在目录里时也要显示得出来，不然触发器会说"请选择"，用户以为设置被改了。
   assert.match(picker, /groups\.unshift\(\{label:'当前'/);
-  // 两个任务两行，各存各的字段 —— 只存一个总开关等于逼用户二选一。
-  assert.match(settings, /title:'自动回复模型'/);
-  assert.match(settings, /title:'整理消息模型'/);
-  assert.match(settings, /api\('settings',task==='auto'\?\{auto_provider:provider,auto_model:model\}/);
-  assert.match(settings, /:\{organize_provider:provider,organize_model:model\}\)/);
-  assert.match(settings, /organize_provider/);
+  // **顶层只问一次**「云端还是本地」：三条链路各配一次让人困惑（用户提出来的）。
+  assert.match(settings, /选择「云端模型」|'cloud','云端模型'/);
+  assert.match(settings, /'local','本机模型'/);
+  assert.match(settings, /async function setMode\(next\)\{/);
+  // 细调收进「高级设置」：三条链路各一行，各存各的字段。
+  assert.match(settings, /advanced\?'收起高级设置':'高级设置（逐条链路的模型）'/);
+  assert.match(settings, /advanced&&h\(TaskModelPicker,\{title:'自动回复模型'/);
+  assert.match(settings, /advanced&&h\(TaskModelPicker,\{title:'整理消息模型'/);
+  // **问助手必须能单独设模型**：它会读到微信消息内容，用户要求能把这条放到本地模型上。
+  assert.match(settings, /advanced&&h\(TaskModelPicker,\{title:'问助手模型'/);
+  assert.match(settings, /onPick:value=>saveTaskModel\('assistant',value\)/);
+  assert.match(settings, /assistant_provider:provider,assistant_model:model/);
+  assert.match(settings, /assistant_provider\|\|'deepseek-official'/);
+  // 本地那一条的说明要点出"内容不出这台电脑"
+  assert.match(settings, /不联网，内容不出这台电脑/);
   assert.match(settings, /organize_model/);
 });
 

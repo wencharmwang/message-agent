@@ -127,6 +127,15 @@ export function apply(ctx) {
   // Interactive sessions are the "ask the assistant about this contact" surface. They
   // are created on demand, resumed after a restart, and always keep the same preset so
   // a workbench question can never fall into the automatic-reply flow.
+  /** 问助手用哪个模型：设置里配了就照它，没配就用默认。 */
+  const assistantAgentOptions = async () => {
+    const settings = await worker.settings().then(result => result?.settings ?? {}).catch(() => ({}));
+    const provider = typeof settings.assistant_provider === 'string' && settings.assistant_provider
+      ? settings.assistant_provider : 'deepseek-official';
+    const model = typeof settings.assistant_model === 'string' && settings.assistant_model
+      ? settings.assistant_model : config.model;
+    return {provider, model, maxTokens: config.max_tokens};
+  };
   const ensureInteractiveSession = async ({sessionId, identity}) => {
     const preset = await ctx.agentPresets.resolve('message-agent');
     const workspace = await ctx.workspaceRegistry.create(config.agent_workspace);
@@ -145,7 +154,9 @@ export function apply(ctx) {
       observation?.[Symbol.dispose]();
     }
     const composition = {
-      agentOptions: {provider: 'deepseek-official', model: config.model, maxTokens: config.max_tokens},
+      // 问助手会读到微信消息内容，所以它的模型**必须能单独设**（用户要求：
+      // 要能把这条链路整个放到本地模型上）。设置里没配就退回默认。
+      agentOptions: await assistantAgentOptions(),
       setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, preset.id); }
     };
     const handle = persisted

@@ -1093,6 +1093,95 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
    * 同一句话，用户看到的就是同一件事写了两遍（实测被指出来过）。所以正文里把这些行摘掉，
    * 只留下真正是结论的文字；待办统一由清单那一处呈现，勾选即可。
    */
+  /**
+   * 助手答案的轻量 Markdown 渲染。
+   *
+   * 为什么自己做：助手（尤其是走 agent 的那条链路）经常回 `**结论：…**`、`1. …`、`- …`
+   * 这种标记，直接当纯文本显示就会把 `**` 原样摆给用户看（用户实测提出来过）。
+   * 又不能用现成的 markdown 库：这是插件页面，**不联网、没有构建步骤**，
+   * 引 CDN 或打包器都不合适。支持常用的一小撮就够，代码不到百行、可控。
+   *
+   * 安全：全程生成 React 元素，**不用 innerHTML**，所以模型在回答里写 `<script>` 也没关系。
+   */
+  // 规则统一成 (captures, key) => element：捕获组一律传数组，谁要几个自己取。
+  const INLINE_RULES=[
+    [/\*\*([^*]+)\*\*/g,(g,key)=>h('strong',{key,style:{fontWeight:600}},g[0])],
+    [/(?<!\*)\*([^*\n]+)\*(?!\*)/g,(g,key)=>h('em',{key},g[0])],
+    [/`([^`\n]+)`/g,(g,key)=>h('code',{key,style:{padding:'1px 5px',borderRadius:4,
+      background:'var(--lg-inset-bg)',fontFamily:'var(--font-mono)',fontSize:13}},g[0])],
+    [/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,(g,key)=>h('a',{key,href:g[1],target:'_blank',
+      rel:'noreferrer',style:{color:C.brand}},g[0])]
+  ];
+  /** 把一行里的行内标记切成 React 节点；没有标记时返回纯字符串。 */
+  function inlineNodes(line,keyPrefix){
+    let parts=[String(line??'')];
+    for(const [pattern,build] of INLINE_RULES){
+      const next=[];
+      for(const part of parts){
+        if(typeof part!=='string'){next.push(part);continue;}
+        let last=0,match;
+        pattern.lastIndex=0;
+        while((match=pattern.exec(part))!==null){
+          if(match.index>last)next.push(part.slice(last,match.index));
+          next.push(build(match.slice(1),keyPrefix+'-'+match.index));
+          last=match.index+match[0].length;
+        }
+        if(last<part.length)next.push(part.slice(last));
+      }
+      parts=next;
+    }
+    // 元素自己带了 key；纯字符串在数组里不需要 key
+    return parts.filter(part=>part!=='');
+  }
+  /**
+   * 整段答案 -> 一组块级节点。
+   *
+   * 只认这几种：标题、无序/有序列表、引用、分隔线、普通段落。**认不出的原样输出**，
+   * 半懂不懂地"清理"标记比不处理更糟（会把用户该看到的内容吃掉）。
+   */
+  function renderMarkdown(text){
+    const lines=String(text||'').split('\n');
+    const blocks=[];
+    let list=null, listItems=[];
+    const flush=()=>{if(list){blocks.push(h(list.type,list.props,...listItems));list=null;listItems=[];}};
+    lines.forEach((raw,index)=>{
+      const line=raw.replace(/\s+$/,'');
+      const key='md'+index;
+      const bullet=/^\s*[-*+]\s+(.*)$/.exec(line);
+      const ordered=/^\s*(\d+)[.、)]\s+(.*)$/.exec(line);
+      if(bullet||ordered){
+        const orderedList=!!ordered;
+        if(!list||list.props.ordered!==orderedList)flush();
+        if(!list)list={type:'ul',props:{key:key+'-list',ordered:orderedList,
+          style:{margin:'4px 0',paddingLeft:20,listStyle:orderedList?'decimal':'disc'}}};
+        const content=bullet?bullet[1]:ordered[2];
+        listItems.push(h('li',{key,style:{marginBottom:2}},inlineNodes(content,key)));
+        return;
+      }
+      flush();
+      if(!line.trim()){return;}
+      const heading=/^(#{1,4})\s+(.*)$/.exec(line);
+      if(heading){
+        const size=[15,14,14,13][heading[1].length-1]||13;
+        blocks.push(h('div',{key,style:{fontSize:size,fontWeight:600,color:C.text,margin:'6px 0 2px'}},
+          inlineNodes(heading[2],key)));
+        return;
+      }
+      if(/^\s*([-*_])\1{2,}\s*$/.test(line)){blocks.push(h('hr',{key,style:{border:'none',
+        borderTop:'1px solid '+C.border,margin:'8px 0'}}));return;}
+      const quote=/^\s*>\s?(.*)$/.exec(line);
+      if(quote){
+        blocks.push(h('div',{key,style:{borderLeft:'3px solid '+C.border,paddingLeft:10,
+          color:C.text2,margin:'4px 0'}},inlineNodes(quote[1],key)));
+        return;
+      }
+      blocks.push(h('div',{key,style:{margin:'3px 0'}},inlineNodes(line,key)));
+    });
+    flush();
+    // 段落之间不要空一块：空行已经用小 margin 表达了
+    return blocks.length?blocks:null;
+  }
+
   function answerBody(text){
     const items=new Set(answerListItems(text));
     const kept=String(text||'').split('\n').filter(line=>!items.has(listItemText(line)));
@@ -1495,7 +1584,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         border:'1px solid '+(mine?'transparent':'var(--lg-card-line)'),
         backgroundColor:mine?'var(--ma-primary-soft)':FIELD_BG,color:C.text,
         fontSize:14,lineHeight:1.75,whiteSpace:'pre-wrap',wordBreak:'break-word'}},
-        body||null,
+        mine?(body||null):(renderMarkdown(body)||body||null),
         !mine&&!!item.tools?.length&&h('div',{style:{marginTop:6,fontSize:12,color:C.text3}},'（'+toolText(item.tools)+'）'),
         !mine&&!!todos.length&&h('button',{onClick:()=>onAddTodos(todos),style:{...small(false),marginTop:9}},'把上面 '+todos.length+' 条记成待办')));
   }
@@ -2821,17 +2910,62 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const autoProvider=settings.data?.settings?.auto_provider||'deepseek-official';
     const organizeModel=settings.data?.settings?.organize_model||data?.model||'';
     const organizeProvider=settings.data?.settings?.organize_provider||'deepseek-official';
+    const assistantModel=settings.data?.settings?.assistant_model||data?.model||'';
+    const assistantProvider=settings.data?.settings?.assistant_provider||'deepseek-official';
     async function saveTaskModel(task,value){
       const split=value.indexOf('::');
       if(split<0)return;
       const provider=value.slice(0,split),model=value.slice(split+2);
       setSaving(task);setModelError('');
       try{
-        await api('settings',task==='auto'?{auto_provider:provider,auto_model:model}
-          :{organize_provider:provider,organize_model:model});
+        // 三条链路各存各的：自动回复 / 整理消息 / 问助手。
+        const patch=task==='auto'?{auto_provider:provider,auto_model:model}
+          :task==='assistant'?{assistant_provider:provider,assistant_model:model}
+          :{organize_provider:provider,organize_model:model};
+        await api('settings',patch);
         settings.refresh();status.refresh();
       }catch(e){setModelError(e.message);}finally{setSaving('');}
     }
+    // ---- 模型从哪来：只问一次「云端还是本地」 --------------------------------
+    // 三条链路（自动回复 / 整理消息 / 问助手）本来各配一次，用户容易困惑；
+    // 这里给一个大选择，需要细调的再去「高级设置」。
+    const [advanced,setAdvanced]=useState(false);
+    const localProvider='ollama-local';
+    const listed=catalog.data?.models||[];
+    const localFirst=listed.find(entry=>entry.provider===localProvider);
+    // 以自动回复那条为准判断「现在整体是云端还是本地」；三条不一致时显示「自定义」。
+    const providers=[autoProvider,organizeProvider,assistantProvider];
+    const allLocal=providers.every(item=>item===localProvider);
+    const allCloud=providers.every(item=>item!==localProvider);
+    const mode=allLocal?'local':(allCloud?'cloud':'mixed');
+    // 问助手会读到微信消息内容，所以「本地」这条对它尤其重要 —— 文案里说清。
+    async function setMode(next){
+      setModelError('');
+      const cloud='deepseek-official::'+(data?.model||'');
+      const local=localFirst?(localProvider+'::'+localFirst.id):'';
+      if(next==='local'&&!local){setModelError('还没有本地模型：先在下面装一个（本地模型那一步），或到「高级设置」里指定。');return;}
+      for(const task of ['auto','organize','assistant']){
+        await saveTaskModel(task,next==='local'?local:cloud);
+      }
+    }
+    const modeCard=h('section',{style:{...card,marginTop:16}},
+      h('h3',h3,'模型从哪来'),
+      h('p',{style:{...hint,margin:'0 0 12px'}},
+        '助手要用的模型。选「本机模型」时，聊天内容不会离开这台电脑 —— 问助手会读到你的消息，介意的话就选它。'),
+      h('div',{style:{display:'flex',gap:10,flexWrap:'wrap'}},
+        [[ 'cloud','云端模型','快、效果好，内容会发给模型服务' ],
+         [ 'local','本机模型','不联网，内容不出这台电脑' ]].map(([value,label,note])=>
+          h('button',{key:value,onClick:()=>setMode(value),disabled:!!saving,
+            'aria-pressed':mode===value,
+            style:{...small(mode===value),flex:'1 1 200px',borderRadius:12,padding:'12px 14px',textAlign:'left',lineHeight:1.6}},
+            h('strong',{style:{display:'block',fontSize:14}},label),
+            h('span',{style:{fontSize:12,color:C.text3}},note)))),
+      mode==='mixed'&&h('p',{style:{...hint,margin:'10px 0 0'}},
+        '现在三条链路用的不是同一种来源（见下面的「高级设置」）。'),
+      h('div',{style:{marginTop:12}},
+        h('button',{onClick:()=>setAdvanced(value=>!value),style:{...small(false),borderRadius:99}},
+          advanced?'收起高级设置':'高级设置（逐条链路的模型）')));
+
     return h('div',{style:{width:'100%',overflowY:'auto'}},
       h('div',{style:{padding:'24px clamp(18px,4vw,48px) 60px',maxWidth:760,margin:'0 auto',boxSizing:'border-box'}},
         // 功能层：页面标题条。sticky + 玻璃，卡片从它背后过。
@@ -2849,14 +2983,22 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         // 初始化完成后这块自己消失（用户要求：已经读过就别再显示，免得反复点触发风险）。
         h(WeChatInitSection,{}),
         h(ModelSetupCard,{}),
-        h(TaskModelPicker,{title:'自动回复模型',
+        modeCard,
+        advanced&&h(TaskModelPicker,{title:'自动回复模型',
           description:'管的是后台自动回复由谁来写。选本地模型（如「本地 Qwen」）时，那一轮回复的内容不会离开这台电脑。修改后从下一条新消息开始生效。',
           catalog,provider:autoProvider,model:autoModel,saving:saving==='auto',
           onPick:value=>saveTaskModel('auto',value)}),
-        h(TaskModelPicker,{title:'整理消息模型',
+        advanced&&h(TaskModelPicker,{title:'整理消息模型',
           description:'管的是点「整理消息」时由谁来读消息、归纳要点。这个任务要读懂整段上下文并判断轻重，换成本地小模型时容易读偏，建议先试几次再定。',
           catalog,provider:organizeProvider,model:organizeModel,saving:saving==='organize',
           onPick:value=>saveTaskModel('organize',value)}),
+        h('p',{style:{...hint,margin:'10px 2px 0'}},'「起草回复」和首页对话暂时固定用云端模型。'),
+        // 语音放在整块模型配置之后：上面全是「选模型」，下面才是语音。
+        h(VoiceCard,{}),
+        advanced&&h(TaskModelPicker,{title:'问助手模型',
+          description:'管的是点「问助手」时由谁来读消息、归纳要点。这个任务要读懂整段上下文并判断轻重，换成本地小模型时容易读偏，建议先试几次再定。',
+          catalog,provider:assistantProvider,model:assistantModel,saving:saving==='assistant',
+          onPick:value=>saveTaskModel('assistant',value)}),
         h('p',{style:{...hint,margin:'10px 2px 0'}},'「起草回复」和首页对话暂时固定用云端模型。'),
         // 语音放在整块模型配置之后：上面全是「选模型」，下面才是语音。
         h(VoiceCard,{}),
