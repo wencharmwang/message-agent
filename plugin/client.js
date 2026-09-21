@@ -2471,7 +2471,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
             foldJobRuns(visibleJobs).slice(0,15).map(renderJob)))));
   }
 
-  // ---- 回复配置：说话方式 + 产品与政策 ----------------------------------------
+  // ---- 回复配置：说话方式 + 知识库 ----------------------------------------
   const PROFILE_STATUS={draft:'草稿',active:'使用中',retired:'已停用'};
   const KNOWLEDGE_STATUS={draft:'草稿',published:'已发布',retired:'已停用'};
   const KNOWLEDGE_KINDS=[['faq','常见问题'],['product_usage','产品说明'],['policy','政策规则'],['playbook','话术流程'],['other','其他']];
@@ -2621,7 +2621,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       .split('\n').map(line=>line.trim()).join('\n').replace(/\n{3,}/g,'\n\n').trim();
   }
 
-  // 批量导入：产品与政策多半早就写好了（文档、在线文档、网站条款），一条条手敲不现实。
+  // 批量导入：知识库多半早就写好了（文档、在线文档、网站条款），一条条手敲不现实。
   // 粘贴文本、拖入文件、或填一个网址 → 自动切分成多条草稿 → 先预览再入库。
   function KnowledgeImport({onDone,onCancel}){
     const [raw,setRaw]=useState(''),[kind,setKind]=useState('faq'),[risk,setRisk]=useState('low');
@@ -2749,7 +2749,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const act=async fn=>{setBusy(true);setError('');try{await fn();refresh();}catch(e){setError(e.message);}finally{setBusy(false);}};
     return h('section',{style:{marginBottom:20}},
       h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:10,marginBottom:12}},
-        h('div',null,h('h2',{style:{...h2,margin:0}},'产品与政策'),h('span',{style:{fontSize:13,color:C.text3}},'助手能引用的事实，发布后才生效')),
+        h('div',null,h('h2',{style:{...h2,margin:0}},'知识库'),h('span',{style:{fontSize:13,color:C.text3}},'助手能引用的事实，发布后才生效')),
         h('div',{style:{display:'flex',gap:8,flexShrink:0}},
           h('button',{onClick:()=>{setImportOpen(value=>!value);setOpen(false);},style:small(!importOpen)},importOpen?'收起':'批量导入'),
           h('button',{onClick:()=>{setOpen(value=>!value);setImportOpen(false);},style:small(!open)},open?'收起':'＋ 新增'))),
@@ -2774,7 +2774,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         // 同自动回复页：滚动区里的 sticky 元素不做折射（每帧重跑滤镜，见那边的说明）。
         h('div',{className:'lg-glass ma-pagebar'},
           h('h1',{style:{...h1,margin:0}},'回复配置')),
-        h('p',{style:{margin:'0 0 4px',color:C.text2,fontSize:14,lineHeight:1.8,maxWidth:640}},'这里决定助手「像谁、知道什么」。说话方式控制语气和禁用词；产品与政策是它能引用的可靠事实。没配的时候，助手按通用方式自然回复，涉及退款、报价、时间承诺这些会主动交给你。'),
+        h('p',{style:{margin:'0 0 4px',color:C.text2,fontSize:14,lineHeight:1.8,maxWidth:640}},'这里决定助手「像谁、知道什么」。说话方式控制语气和禁用词；知识库是它能引用的可靠事实。没配的时候，助手按通用方式自然回复，涉及退款、报价、时间承诺这些会主动交给你。'),
         h(Notice,{error:profiles.error||knowledge.error}),
         h(ProfilesSection,{data:profiles.data,refresh:profiles.refresh}),
         h(KnowledgeSection,{data:knowledge.data,refresh:knowledge.refresh,filter:kFilter,setFilter:setKFilter})));
