@@ -419,7 +419,7 @@ export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [
  * (architecture §6). Returns true when the request was handled. index.mjs applies
  * the same-origin guards before delegating here.
  */
-export function createProductApi({config, token, runtime: runtimeInjected, conversations, bindingsPath, respond, readBody, ensureInteractiveSession, askAssistant, crm: crmInjected, context: contextSystem, messageCenter: messageCenterInjected, classifyMessages, draftReply, analyzeStyle, organizeMessages}) {
+export function createProductApi({config, token, runtime: runtimeInjected, conversations, bindingsPath, respond, readBody, ensureInteractiveSession, askAssistant, crm: crmInjected, context: contextSystem, messageCenter: messageCenterInjected, classifyMessages, draftReply, analyzeStyle, organizeMessages, judgeDuplicateTodos}) {
   const runtime = runtimeInjected ?? new RuntimeAdapter({controlPort: config.control_port, token});
   const drafts = new Drafts(join(dirname(config.database), 'drafts.json'));
   const crm = crmInjected ?? createCrm(join(dirname(config.database), 'crm.db'));
@@ -1084,6 +1084,35 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
     return {...result, todos: kept, hiddenCount: hidden};
   }
 
+  /**
+   * 让模型判断"这条建议是不是已经记过的同一件事"。
+   *
+   * 为什么字符串匹配不够：用户实测——
+   *   已有待办：「回复 Wencharm，说明看不到链接内容并请其文字说明」
+   *   这次建议：「回复 Wencharm，说明能否处理语音并回应链接」
+   * 两句话没有一个词能对上（"看不到链接"vs"能否处理语音"），但要做的是同一件事。
+   * 于是用户觉得自己被耍：明明记过了，又被提醒一次。
+   *
+   * 规则：**判重失败就保持原样**。多提一次只是烦，把真正要做的事吞掉是错。
+   */
+  async function semanticReconcile(result, todos) {
+    const items = result?.todos ?? [];
+    if (!items.length || !judgeDuplicateTodos) return result;
+    const existing = (todos ?? []).map(todo => todo.title).filter(Boolean).slice(0, 40);
+    if (!existing.length) return result;
+    try {
+      const drop = await judgeDuplicateTodos({existing, suggestions: items.map(item => item.title)});
+      if (!drop.length) return result;
+      return {
+        ...result,
+        todos: items.filter((_, index) => !drop.includes(index)),
+        hiddenCount: (result.hiddenCount || 0) + drop.length
+      };
+    } catch (error) {
+      return result;
+    }
+  }
+
   async function homePayload() {
     const {account, scanAt, bundle} = await dbSnapshot();
     const {items} = await aggregate();
@@ -1255,7 +1284,10 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
           account, scannedAt: scanAt, sessionsRead: bundle.length, at: Date.now() / 1000
         };
         // 落库前先把"已经处理过的"摘掉：提示词只能劝，这一步才是保证。
-        writeJsonFile(organizePath, reconcileSuggestions(located, crm.listTodos({limit: 500})));
+        // 两道：先按标题做便宜的字面过滤，再让模型判"是不是同一件事"（措辞不同也算）。
+        const todos = crm.listTodos({limit: 500});
+        const byText = reconcileSuggestions(located, todos);
+        writeJsonFile(organizePath, await semanticReconcile(byText, todos));
         respond(res, 200, readJsonFile(organizePath, located));
         return true;
       }
