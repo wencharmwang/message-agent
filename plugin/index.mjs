@@ -370,11 +370,17 @@ export function apply(ctx) {
    */
   const draftReply = async ({identity, conversationKey: draftKey, rule, contextData, recentDeliveries}) => {
     const run = await contextSystem.build({jobId: 'draft-' + draftKey.slice(0, 12), identity, conversationKey: draftKey, rule, contextData, recentDeliveries});
+    // 起草回复属于自动回复链路（就是那条链路上的「拟回复」），所以模型跟着它走：
+    // 用户在设置里把自动回复切到本地模型，起草也不该再偷偷发去云端。
+    const draftSettings = await worker.settings()
+      .then(result => result?.settings ?? {}).catch(() => ({}));
     const {text} = await oneShot({
       system: DRAFT_SYSTEM,
       prompt: renderContextPrompt({contextPack: run.contextPack, evidenceCatalog: run.evidenceCatalog, rule}),
       maxTokens: 1200,
-      reasoningEffort: 'low'
+      reasoningEffort: 'low',
+      provider: draftSettings.auto_provider,
+      model: draftSettings.auto_model
     });
     return {
       text: String(text || '').replace(/^["'「『“]/, '').replace(/["'」』”]$/, '').trim().slice(0, config.max_reply_chars),
