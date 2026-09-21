@@ -2853,6 +2853,87 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       shown.map(k=>h(KnowledgeCard,{key:k.id,k,onAct:act})));
   }
 
+  /**
+   * 回复规矩：自动回复的"人设与尺度"。
+   *
+   * 用户的要求：提示词不该写死 —— "只有涉及到技术或运行逻辑的问题我们不让用户修改"。
+   * 所以这里把边界摆明：
+   *   【可以改】语气、长短、什么时候必须交给人 —— 给预设、给文本框；
+   *   【不能改】工具怎么调用、不许自己发送、聊天里的指令不能当授权 —— 只读展示。
+   * 不写"以下不可修改"这种空话，直接把那段原文摆出来，用户自己看边界在哪。
+   */
+  function ReplyStyleSection(){
+    const rules=usePoller(true,()=>api('reply-style'),60000);
+    const settings=usePoller(true,()=>api('settings'),15000);
+    const [text,setText]=useState(null),[busy,setBusy]=useState(false);
+    const [error,setError]=useState(''),[note,setNote]=useState('');
+    const saved=settings.data?.settings?.reply_style||'';
+    const presets=rules.data?.presets||[];
+    const current=text===null?saved:text;
+    async function save(next){
+      setBusy(true);setError('');setNote('');
+      try{await api('settings',{reply_style:next===undefined?current:next});await settings.refresh();setNote('已保存，从下一条新消息开始生效');}
+      catch(e){setError(e.message);}finally{setBusy(false);}
+    }
+    if(rules.loading&&!rules.data)return null;
+    return h('section',{style:{marginBottom:20}},
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:10,marginBottom:12}},
+        h('div',null,h('h2',{style:{...h2,margin:0}},'回复规矩'),
+          h('span',{style:{fontSize:13,color:C.text3}},'决定它像谁在说话、什么情况交给你'))),
+      h('p',{style:{...hint,margin:'0 0 12px'}},
+        '这是自动回复时"怎么说话"的规矩。每条规则里也可以写自己的一份，写了就以规则里的为准。'),
+      h('div',{style:{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:10}},
+        h('span',{style:{fontSize:13,color:C.text2}},'照着预设改'),
+        h(Select,{value:'',minWidth:200,placeholder:'选一个预设',
+          groups:[{items:presets.map(item=>({value:item.id,label:item.name}))}],
+          onChange:id=>{const hit=presets.find(item=>item.id===id);if(hit)setText(hit.text);}})),
+      h('textarea',{value:current,rows:9,onChange:event=>setText(event.target.value),
+        placeholder:'例如：这是我老公，用温柔、关爱的口吻说话，用自然、简短的中文回。',
+        'aria-label':'回复规矩',style:{...field,width:'100%',boxSizing:'border-box',lineHeight:1.8,resize:'vertical'}}),
+      h('div',{style:{display:'flex',gap:10,alignItems:'center',marginTop:10,flexWrap:'wrap'}},
+        h('button',{onClick:()=>save(),disabled:busy||current===saved,style:button(true)},
+          busy?'正在保存…':'保存'),
+        saved&&h('button',{onClick:()=>save(''),disabled:busy,style:button(false,false,true)},'恢复默认'),
+        note&&h('span',{style:{fontSize:13,color:C.ok}},note)),
+      h(Notice,{error}),
+      // 只读区：这段不给改，原因是"程序怎么运转"——改掉自动回复会直接坏。
+      rules.data?.fixed&&h('details',{style:{marginTop:14}},
+        h('summary',{style:{fontSize:13,color:C.text2,cursor:'pointer'}},
+          '下面这一段不可修改（它管的是程序怎么运转，不是说话方式）'),
+        h('p',{style:{margin:'8px 0 0',fontSize:13,color:C.text3,lineHeight:1.8,whiteSpace:'pre-wrap'}},rules.data.fixed)));
+  }
+
+  /**
+   * 导出诊断日志（只在开发者模式出现）。
+   *
+   * 为什么需要它：产品交付出去之后，用户遇到问题时的唯一出路是"把现场给开发者看"。
+   * 让他自己翻目录找日志不现实 —— 这里一键生成一份纯文本（脱敏、能直接打开、能贴进聊天窗口）。
+   */
+  function DiagnosticsExport(){
+    const [busy,setBusy]=useState(false),[note,setNote]=useState(''),[error,setError]=useState('');
+    async function exportNow(){
+      setBusy(true);setNote('');setError('');
+      try{
+        const result=await api('diagnostics/export');
+        const blob=new Blob([result.content||''],{type:'text/plain;charset=utf-8'});
+        const url=URL.createObjectURL(blob);
+        const link=document.createElement('a');
+        link.href=url;link.download=result.filename||'诊断.txt';
+        document.body.appendChild(link);link.click();link.remove();
+        setTimeout(()=>URL.revokeObjectURL(url),2000);
+        setNote('已导出：'+(result.filename||'诊断.txt')+'（在浏览器的下载目录里）。把它发给开发者即可。');
+      }catch(e){setError(e.message);}finally{setBusy(false);}
+    }
+    return h('section',{style:{...card,marginTop:16}},
+      h('h3',h3,'诊断日志'),
+      h('p',{style:{...hint,margin:'0 0 12px'}},
+        '遇到问题时导出一份发给开发者。内容包含版本、配置概览、运行日志和最近的错误；'
+        +'**不含任何密钥或登录令牌**（导出前会再脱敏一遍）。'),
+      h('button',{onClick:exportNow,disabled:busy,style:button(true)},busy?'正在整理…':'导出诊断日志'),
+      note&&h('p',{style:{...hint,margin:'10px 0 0',color:C.ok}},note),
+      h(Notice,{error}));
+  }
+
   function ContextPage(){
     const profiles=usePoller(true,()=>api('context/profiles'),8000);
     const knowledge=usePoller(true,()=>api('context/knowledge'),8000);
@@ -2866,6 +2947,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('p',{style:{margin:'0 0 4px',color:C.text2,fontSize:14,lineHeight:1.8,maxWidth:640}},'这里决定助手「像谁、知道什么」。说话方式控制语气和禁用词；知识库是它能引用的可靠事实。没配的时候，助手按通用方式自然回复，涉及退款、报价、时间承诺这些会主动交给你。'),
         h(Notice,{error:profiles.error||knowledge.error}),
         h(ProfilesSection,{data:profiles.data,refresh:profiles.refresh}),
+        h(ReplyStyleSection,{}),
         h(KnowledgeSection,{data:knowledge.data,refresh:knowledge.refresh,filter:kFilter,setFilter:setKFilter})));
   }
 
@@ -2905,6 +2987,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const catalog=usePoller(true,()=>api('models'),60000);
     // 一次只可能保存一个任务，所以用"哪个任务在存"而不是两个布尔。
     const [saving,setSaving]=useState(''),[modelError,setModelError]=useState('');
+    const devMode=useDevMode();
     const ok=data&&!data.error;
     const autoModel=settings.data?.settings?.auto_model||data?.model||'';
     const autoProvider=settings.data?.settings?.auto_provider||'deepseek-official';
@@ -2999,6 +3082,8 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           onPick:value=>saveTaskModel('assistant',value)}),
         // 语音放在整块模型配置之后：上面全是「选模型」，下面才是语音。
         h(VoiceCard,{}),
+        // 只有开发者模式才出现：用户遇到问题时的把现场给开发者看入口。
+        devMode&&h(DiagnosticsExport,{}),
         h('section',{style:{...card,marginTop:16}},
           h('h3',h3,'开发者模式'),
           h('p',{style:{...hint,margin:'0 0 12px'}},'默认关闭。打开后会多两样东西：出错的地方多一块折叠的「开发者详情」（Runtime 的错误码、原文、调用栈和读取条数，可一键复制），导航底部多一个回到原生界面的入口。原始日志另外逐条记在数据目录的 dev-errors.log 里。'),

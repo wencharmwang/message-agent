@@ -112,6 +112,7 @@ def handler(worker, token):
             'organize_model': worker.store.setting('organize_model', worker.config['model']),
             'assistant_provider': worker.store.setting('assistant_provider', 'deepseek-official'),
             'assistant_model': worker.store.setting('assistant_model', ''),
+            'reply_style': worker.store.setting('reply_style', ''),
             'organize_provider': worker.store.setting('organize_provider', 'deepseek-official'),
             'observe_enabled': worker.observe_enabled(),
             'dev_diagnostics': dev_diagnostics(),
@@ -431,6 +432,11 @@ def handler(worker, token):
                         if not isinstance(provider, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}', provider):
                             raise ValueError('Invalid assistant_provider')
                         worker.store.set_setting('assistant_provider', provider)
+                    if 'reply_style' in data:
+                        style = data['reply_style']
+                        if not isinstance(style, str) or len(style) > 4000:
+                            raise ValueError('Invalid reply_style')
+                        worker.store.set_setting('reply_style', style.strip())
                     if 'assistant_model' in data:
                         model = data['assistant_model']
                         if not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}', model):

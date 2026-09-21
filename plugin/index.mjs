@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
-import { REPLY_POLICY, modelContext, validateSubmission } from './reply-policy.mjs';
+import { DEFAULT_REPLY_STYLE, REPLY_POLICY_FIXED, modelContext, validateSubmission } from './reply-policy.mjs';
 import { ConversationSessions, automaticRequestConfig, conversationKey, completedDecision } from './conversation-sessions.mjs';
 import { createProductApi, identityKey } from './host/product.mjs';
 import { RuntimeAdapter } from './host/runtime.mjs';
@@ -368,6 +368,19 @@ export function apply(ctx) {
    * draft is grounded in the same evidence and can use the same knowledge and voice.
    * Output is always a draft: nothing here sends anything.
    */
+  /**
+   * 这一轮自动回复用什么"规矩"。
+   *
+   * 顺序：规则自己带的 → 设置里的全局一份 → 内置默认。
+   * 后面永远拼上 REPLY_POLICY_FIXED（工具契约与安全），那部分**不给用户改** ——
+   * 它是"程序怎么运转"，改掉会直接坏（模型不交决定、或自己乱发、或被聊天里的指令牵着走）。
+   */
+  const replyStyleEnabled = rule => {
+    const own = typeof rule?.prompt === 'string' ? rule.prompt.trim() : '';
+    if (own) return own;
+    return DEFAULT_REPLY_STYLE;
+  };
+
   const draftReply = async ({identity, conversationKey: draftKey, rule, contextData, recentDeliveries}) => {
     const run = await contextSystem.build({jobId: 'draft-' + draftKey.slice(0, 12), identity, conversationKey: draftKey, rule, contextData, recentDeliveries});
     // 起草回复属于自动回复链路（就是那条链路上的「拟回复」），所以模型跟着它走：
@@ -557,7 +570,7 @@ export function apply(ctx) {
         // webhook kept it out of DSH's durable lastPromptAt projection, so a
         // visibly updated conversation remained buried at its creation time.
         const message = createUserMessage({source:{kind:'user'},
-          content:[{type:'text',text:modelContext(REPLY_POLICY+'\n'+renderContextPrompt({contextPack:contextRun.contextPack,evidenceCatalog:contextRun.evidenceCatalog,rule}))}]});
+          content:[{type:'text',text:modelContext(replyStyleEnabled(rule)+'\n'+REPLY_POLICY_FIXED+'\n'+renderContextPrompt({contextPack:contextRun.contextPack,evidenceCatalog:contextRun.evidenceCatalog,rule}))}]});
         const start = handle.agent.session.events.length;
         handle.agent.followup(message);
         await Promise.race([handle.agent.whenIdle(),new Promise((_,reject)=>{timer=setTimeout(()=>{handle.agent.cancel({kind:'user'});reject(new Error('Task timed out'));},config.response_timeout_seconds*1000);})]);

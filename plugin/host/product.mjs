@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Drafts, readBindings, validateDraftText } from './storage.mjs';
 import { RuntimeAdapter } from './runtime.mjs';
+import { DEFAULT_REPLY_STYLE, REPLY_POLICY_FIXED, REPLY_STYLE_PRESETS } from '../reply-policy.mjs';
 import { createCrm } from './crm.mjs';
 import { CLASSIFICATIONS, ORDERS, SCOPES, createMessageCenter, isSystemEntry } from './message-center.mjs';
 import { classifyIntent, detectRiskTags, maxRiskGrade, DEFAULT_DECISION_POLICY } from './reply-context/risk-gate.mjs';
@@ -1010,6 +1011,57 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
 
   const organizePath = join(dirname(config.database), 'organize.json');
   const chatLogPath = join(dirname(config.database), 'chat-log.json');
+  /**
+   * 一份"发给开发者"的诊断文本。
+   *
+   * 原则：
+   * - **脱敏**：token、API key 一律不出现（正则兜底 + 只列配置的键名）；
+   * - **够用**：版本、系统、配置概览、日志尾部、数据规模、最近的错误；
+   * - **能直接读**：按小节排的纯文本，不压缩、不加密 —— 用户看得懂才敢发。
+   */
+  const sizeOfSafe = value => { try { return String(value).slice(0, 120); } catch { return '（无法显示）'; } };
+  function diagnosticsText() {
+    const dataDir = dirname(config.database);
+    const lines = [];
+    const section = title => { lines.push('', '==== ' + title + ' ====', ''); };
+    const push = (label, value) => lines.push('  ' + label + ': ' + value);
+    const tail = (path, count) => {
+      try {
+        const text = readFileSync(path, 'utf8');
+        return text.split(/\r?\n/).filter(Boolean).slice(-count);
+      } catch { return []; }
+    };
+    const sizeOf = path => { try { return Math.round(statSync(path).size / 1024) + ' KB'; } catch { return '不存在'; } };
+
+    section('概览');
+    push('导出时间', new Date().toLocaleString());
+    push('程序目录', dirname(dirname(dirname(fileURLToPath(import.meta.url)))));
+    push('数据目录', dataDir);
+    push('Node', process.version);
+    push('系统', `${process.platform} ${process.arch}`);
+
+    section('配置（只列键名，值可能含路径/令牌，不逐条导出）');
+    for (const key of Object.keys(config).sort()) {
+      const value = config[key];
+      push(key, typeof value === 'object' ? '（对象）' : (key.toLowerCase().includes('token') ? '（已隐藏）' : sizeOfSafe(value)));
+    }
+
+    section('数据规模');
+    for (const file of ['reply.db', 'crm.db', 'inbox.db', 'reply-context.db']) {
+      push(file, sizeOf(join(dataDir, file)));
+    }
+
+    section('最近的错误（data/dev-errors.log 尾部）');
+    lines.push(...tail(join(dataDir, 'dev-errors.log'), 40).map(line => '  ' + line));
+    if (!lines.length) lines.push('  （没有）');
+
+    section('运行日志（harness.log 尾部 120 行）');
+    lines.push(...tail(join(dirname(config.database), '..', 'harness.log'), 120).map(line => '  ' + line));
+
+    const body = lines.join('\n').replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, '[凭据已隐藏]');
+    return body + '\n';
+  }
+
   const readJsonFile = (path, fallback) => {
     try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return fallback; }
   };
@@ -1174,6 +1226,22 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
         respond(res, 200, {ok: true, provider: 'deepseek-official'});
         return true;
       }
+      // 「回复规矩」：哪些能改、哪些不能改，连预设一起给界面。
+      // 用户的要求是"只有技术或运行逻辑不让改" —— 所以固定段也照样返回，
+      // 界面把它显示成只读区，让用户看得见边界在哪。
+      if (path === '/message-agent/api/reply-style' && req.method === 'GET') {
+        respond(res, 200, {default: DEFAULT_REPLY_STYLE, fixed: REPLY_POLICY_FIXED, presets: REPLY_STYLE_PRESETS});
+        return true;
+      }
+      // 导出诊断日志：交付给用户之后，出问题得让他有地方拿到能发给开发者的东西。
+      // 一个纯文本文件（能直接打开、能贴进聊天窗口），内容脱敏，不含 token / 密钥。
+      if (path === '/message-agent/api/diagnostics/export' && req.method === 'GET') {
+        const stampText = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const name = '消息助手诊断-' + stampText + '.txt';
+        respond(res, 200, {filename: name, content: diagnosticsText()});
+        return true;
+      }
+
       // 语音转文字：只是用户的偏好 + 本机装没装，读写都很轻，不碰微信。
       if (path === '/message-agent/api/voice' && req.method === 'GET') {
         respond(res, 200, voiceState());
