@@ -2040,6 +2040,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('label',{style:fieldLabel},'希望助手怎样回复这个人？'),
         h('textarea',{value:prompt,onChange:event=>setPrompt(event.target.value),rows:5,style:{...field,resize:'vertical',lineHeight:1.7}}),
         h(StylePresetPicker,{disabled:busy,onPick:setPrompt}),
+        h(RuleMemory,{rule}),
         h('p',{style:{...hint,marginTop:8}},'只对这个人生效。保存后会先暂停自动回复，你确认没问题再重新开启。'),
         h('div',{style:{display:'flex',gap:10}},
           h('button',{disabled:busy,onClick:()=>run('edit',{id:rule.id,prompt}),style:button(true)},busy?'正在保存…':'保存'),
@@ -2064,6 +2065,53 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
    * 于是标题被挤到最左边、表单从中间开始，左侧留出一大片空白（实测被指出来过）。
    * 改成受控模式：open 由页面给，表单永远长在内容区，标题在上、字段在下。
    */
+  /**
+   * 助手对这个人记住了什么（读 / 不再记）。
+   *
+   * 为什么放在规则编辑里：目前只有自动回复在监听这个人，
+   * 产品里也没有独立的"联系人列表"（用户明确说先放这里）。
+   * 「不再记这条」走 resolve 而不是删库 —— 留着历史，只是不再进提示词。
+   */
+  const MEMORY_KIND_LABEL={fact:'事实',preference:'偏好',commitment:'答应过',open_loop:'未了的事',event:'事件'};
+  function RuleMemory({rule}){
+    const [open,setOpen]=useState(false);
+    const [items,setItems]=useState(null),[busy,setBusy]=useState(false),[error,setError]=useState('');
+    async function load(){
+      setBusy(true);setError('');
+      try{
+        const query='context/memory?provider='+encodeURIComponent(rule.provider||'wechat-main')
+          +'&conversation='+encodeURIComponent(rule.conversation||'');
+        const result=await api(query);
+        setItems(result.items||[]);
+      }catch(e){setError(e.message);}finally{setBusy(false);}
+    }
+    async function drop(id){
+      setBusy(true);setError('');
+      try{await api('context/memory/'+encodeURIComponent(id)+'/resolve',{});await load();}
+      catch(e){setError(e.message);setBusy(false);}
+    }
+    const alive=(items||[]).filter(item=>item.status!=='resolved');
+    return h('div',{style:{marginTop:10}},
+      h('button',{type:'button',disabled:busy,style:{...small(false),borderRadius:99},
+        onClick:()=>{const next=!open;setOpen(next);if(next&&items===null)load();}},
+        open?'收起「记住的事」':'助手记住了什么'),
+      open&&h('div',{style:{marginTop:10,border:'1px solid '+C.border,borderRadius:10,padding:'10px 12px',background:C.panel}},
+        items===null?h('p',{style:{...hint,margin:0}},busy?'正在读取…':'还没读过'):
+          (alive.length?alive.map(item=>h('div',{key:item.id,style:{display:'flex',gap:10,
+              alignItems:'flex-start',justifyContent:'space-between',padding:'6px 0'}},
+              h('div',{style:{minWidth:0}},
+                h('span',{style:{fontSize:11,color:C.text3,marginRight:6}},
+                  MEMORY_KIND_LABEL[item.kind]||item.kind),
+                h('span',{style:{fontSize:13,color:item.status==='confirmed'?C.text:C.text2}},item.content),
+                item.status!=='confirmed'&&h('span',{style:{fontSize:11,color:C.text3,marginLeft:6}},'（还没确认，暂不参与回复）')),
+              h('button',{type:'button',disabled:busy,onClick:()=>drop(item.id),
+                style:{...small(false,false,true),flexShrink:0}},'不再记')))
+            :h('p',{style:{...hint,margin:0}},'还没有记住什么。聊几句之后它会自己总结值得长期记的事。')),
+        h('p',{style:{...hint,margin:'8px 0 0'}},
+          '每次回复完，助手会在后台从对话里提炼值得长期记住的事（身份、偏好、答应过的事），下次回复时带上。'),
+        h(Notice,{error})));
+  }
+
   function AddContactTrigger({purpose,onOpen}){
     return h('button',{onClick:onOpen,style:button(true)},purpose==='crm'?'＋ 添加要跟进的联系人':'＋ 自动回复');
   }

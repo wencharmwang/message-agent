@@ -1455,6 +1455,28 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
           if (req.method === 'GET') { respond(res, 200, {items: context.profiles.listBindings(ws)}); return true; }
           if (req.method === 'POST') { respond(res, 201, context.profiles.bind(ws, await readBody(req))); return true; }
         }
+        if (resource === 'memory') {
+          // 这个人的长期记忆。目前只有自动回复在写它（也只在自动回复里监听），
+          // 所以界面入口放在规则编辑里，不另做"联系人列表"。
+          if (!id && req.method === 'GET') {
+            const url = new URL(req.url, 'http://localhost');
+            const provider = url.searchParams.get('provider') || 'wechat-main';
+            const conversation = url.searchParams.get('conversation') || '';
+            if (!conversation) throw Object.assign(new Error('缺少会话'), {code: 'CONTEXT_INVALID'});
+            const key = identityKey(provider, conversation);
+            const items = context.memory.list(ws, {conversationKey: key});
+            respond(res, 200, {items: items.map(item => ({id: item.id, kind: item.kind, content: item.content,
+              status: item.status, updatedAt: item.updatedAt}))});
+            return true;
+          }
+          // 「不再记这条」用 resolve 而不是删库：留着历史，只是不再进提示词
+          // （提示词只取 confirmed，本就不含已解决的）。
+          if (id && action === 'resolve' && req.method === 'POST') {
+            respond(res, 200, context.memory.resolve(ws, id));
+            return true;
+          }
+        }
+
         if (resource === 'knowledge') {
           // 批量导入要抢在 create 之前判断：路径里的 'import' 会被解析成 id。
           if (id === 'import' && !action && req.method === 'POST') {

@@ -47,7 +47,11 @@ export function sameMemory(left, right) {
 }
 
 export function buildMemoryPrompt({existing = [], messages = []}) {
-  const lines = ['已有的记忆（不要重复记录）：'];
+  const lines = [
+    '已有的记忆。**判断重复看的是"说的是不是同一件事"，不是措辞**：',
+    '「喜欢吃辣」和「爱吃辣」是同一条；「他在做跨境电商」和「他有个跨境项目」也是同一条。',
+    '只要下面已经表达过同样的意思，**就不要输出**。拿不准时倾向于不输出 —— 重复记比少记更糟。'
+  ];
   if (existing.length) {
     existing.forEach(item => lines.push('- [' + item.kind + '] ' + item.content));
   } else {
