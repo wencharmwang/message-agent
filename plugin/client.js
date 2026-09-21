@@ -798,6 +798,13 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
 
   // Monochrome icons: they inherit the surrounding text colour via currentColor, so the
   // same glyph reads correctly on a light or dark host theme. Colour emoji cannot do that.
+  /** 发送用的向上箭头（主流 agent 的通用记号）。 */
+  function SendArrow({size=18,color='currentColor'}){
+    return h('svg',{width:size,height:size,viewBox:'0 0 24 24',fill:'none','aria-hidden':'true'},
+      h('path',{d:'M12 19V5M12 5l-6 6M12 5l6 6',stroke:color,strokeWidth:2,
+        strokeLinecap:'round',strokeLinejoin:'round'}));
+  }
+
   const ICONS={
     // 导航图标。消息 = 一个消息气泡；待办 = 方框里一个勾。
     messages:'M4 5.5h12a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H9.6L6 17.4v-2.9H4A1.5 1.5 0 0 1 2.5 13V7A1.5 1.5 0 0 1 4 5.5Z',
@@ -1672,8 +1679,11 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         event.preventDefault();
         onSubmit();
       },
-      style:{...field,flex:'1 1 auto',minWidth:0,resize:'none',lineHeight:lineHeight+'px',
-        height:lineHeight+padding,maxHeight:cap,overflowY:'hidden',boxSizing:'border-box'}});
+      // 外层那个圆角框就是它唯一的边框：这里不再画一遍（否则框里套框）。
+      style:{flex:'1 1 auto',minWidth:0,resize:'none',lineHeight:lineHeight+'px',
+        height:lineHeight+2,maxHeight:cap,overflowY:'hidden',boxSizing:'border-box',
+        border:'none',outline:'none',background:'transparent',color:C.text,
+        fontFamily:'inherit',fontSize:14,padding:0}});
   }
 
   function HomeChat({narrow}){
@@ -1726,13 +1736,24 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         items.map((item,index)=>h(ChatBubble,{key:index,item,onAddTodos:addTodos})),
         asking&&h('div',{style:{display:'flex',alignItems:'center',gap:9,color:C.text2,fontSize:13,padding:'6px 0'}},
           h(Spinner,{size:14}),'助手在想，通常十几秒…')),
-      h('div',{style:{padding:'0 18px 16px',flexShrink:0}},
+      // 输入区与上面消息之间留出间隔（用户实测：多行时会贴上去）。
+      h('div',{style:{padding:'0 18px 16px',flexShrink:0,marginTop:10}},
         h(Notice,{error}),
         h(Result,{text:note}),
-        h('div',{style:{display:'flex',gap:8,alignItems:'center'}},
-          h(GrowingAskField,{value:text,onChange:setText,onSubmit:submit,
-            placeholder:'问助手任何关于你消息的事…（Enter 发送，Shift+Enter 换行）',ariaLabel:'问助手'}),
-          h('button',{onClick:()=>submit(),disabled:asking||!text.trim(),style:{...button(true),flexShrink:0}},asking?'…':'发送'))));
+        // 一个整体的圆角框：文字在左，发送箭头贴在**框内**右下角。
+        // 按钮不再单独占一列 —— 多行时它不会漂在中间（用户实测指出过）。
+        h('div',{style:{display:'flex',alignItems:'flex-end',gap:8,padding:'8px 8px 8px 12px',
+            border:'1px solid var(--lg-card-line)',borderRadius:18,background:FIELD_BG}},
+          h(GrowingAskField,{value:text,onChange:setText,onSubmit:submit,ariaLabel:'问助手',
+            placeholder:'问助手任何关于你消息的事…'}),
+          h('button',{type:'button',onClick:()=>submit(),disabled:asking||!text.trim(),
+            'aria-label':'发送',title:'发送',
+            style:{width:34,height:34,borderRadius:'50%',flexShrink:0,border:'none',
+              cursor:asking||!text.trim()?'default':'pointer',
+              display:'flex',alignItems:'center',justifyContent:'center',
+              background:asking||!text.trim()?C.hover:C.brand,
+              color:asking||!text.trim()?C.text3:'#fff'}},
+            asking?h(Spinner,{size:14}):h(SendArrow,{size:18})))));
   }
 
   /** 首页：关键信息 + 关键操作 + 对话。 */
