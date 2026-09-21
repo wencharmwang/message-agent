@@ -1664,11 +1664,16 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     const ref=useRef(null);
     const lineHeight=22, padding=16;
     const cap=maxRows*lineHeight+padding;
+    const oneLine=lineHeight+2;
     const resize=()=>{
       const el=ref.current;
       if(!el)return;
+      // 空的时候**强制一行**：空 textarea 的 scrollHeight 往往大于一行，
+      // 用它算高度会让框比一行高（删空之后尤其明显）——用户实测说"看起来很怪"。
+      if(!String(value??'').length){el.style.height=oneLine+'px';el.style.overflowY='hidden';return;}
       el.style.height='auto';
-      el.style.height=Math.min(el.scrollHeight,cap)+'px';
+      const wanted=Math.min(el.scrollHeight,cap);
+      el.style.height=Math.max(oneLine,wanted)+'px';
       el.style.overflowY=el.scrollHeight>cap?'auto':'hidden';
     };
     useEffect(resize,[value]);
@@ -1681,9 +1686,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       },
       // 外层那个圆角框就是它唯一的边框：这里不再画一遍（否则框里套框）。
       style:{flex:'1 1 auto',minWidth:0,resize:'none',lineHeight:lineHeight+'px',
-        height:lineHeight+2,maxHeight:cap,overflowY:'hidden',boxSizing:'border-box',
+        height:oneLine,maxHeight:cap,overflowY:'hidden',boxSizing:'border-box',
         border:'none',outline:'none',background:'transparent',color:C.text,
-        fontFamily:'inherit',fontSize:14,padding:0}});
+        // 右边留出箭头的宽度，长句换行时不会钻到箭头底下。
+        fontFamily:'inherit',fontSize:14,padding:'0 40px 0 0'}});
   }
 
   function HomeChat({narrow}){
@@ -1742,14 +1748,16 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h(Result,{text:note}),
         // 一个整体的圆角框：文字在左，发送箭头贴在**框内**右下角。
         // 按钮不再单独占一列 —— 多行时它不会漂在中间（用户实测指出过）。
-        h('div',{style:{display:'flex',alignItems:'flex-end',gap:8,padding:'8px 8px 8px 12px',
+        h('div',{style:{position:'relative',padding:'8px 8px 8px 12px',
             border:'1px solid var(--lg-card-line)',borderRadius:18,background:FIELD_BG}},
           h(GrowingAskField,{value:text,onChange:setText,onSubmit:submit,ariaLabel:'问助手',
             placeholder:'问助手任何关于你消息的事…'}),
+          // 箭头绝对定位在右下角：一行时它自然落在视觉中心，多行时贴在右下角，
+          // 不会再因为 flex 对齐而在不同状态下"跳位置"。
           h('button',{type:'button',onClick:()=>submit(),disabled:asking||!text.trim(),
             'aria-label':'发送',title:'发送',
-            style:{width:34,height:34,borderRadius:'50%',flexShrink:0,border:'none',
-              cursor:asking||!text.trim()?'default':'pointer',
+            style:{position:'absolute',right:6,bottom:6,width:32,height:32,borderRadius:'50%',
+              border:'none',padding:0,cursor:asking||!text.trim()?'default':'pointer',
               display:'flex',alignItems:'center',justifyContent:'center',
               background:asking||!text.trim()?C.hover:C.brand,
               color:asking||!text.trim()?C.text3:'#fff'}},
