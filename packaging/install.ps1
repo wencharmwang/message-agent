@@ -225,6 +225,8 @@ if (Test-Path -LiteralPath $pythonExe) {
 Copy-Component (Join-Path $Source 'runtimes\python') (Join-Path $InstallDir 'runtimes') 'pythonw.exe' 'Python 运行时' -Refresh:$refreshPython | Out-Null
 $dblabSrc = Join-Path $InstallDir 'components\wechat-db-lab\src'
 Copy-Component (Join-Path $Source 'components\wechat-db-lab\src') (Join-Path $InstallDir 'components\wechat-db-lab') 'wechat_db_lab\__init__.py' '取密钥/解密组件' | Out-Null
+# 语音解码器：75 KB 的预编译可执行文件，随包走、零安装。没有它就只能"读不到语音内容"。
+Copy-Component (Join-Path $Source 'components\silk') (Join-Path $InstallDir 'components') 'silk-decoder-x64.exe' '语音解码组件' | Out-Null
 
 # 脚本与说明：**按类型整体复制，不列白名单**。
 # 原来这里和 build-package.ps1 各写一份清单，加 wechat_keys.py 时只改了这里 ——

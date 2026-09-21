@@ -154,8 +154,8 @@ test('未完成的待办可以双击改文案、改到期时间', () => {
   // 双击标题进入编辑；做完的不开放（已经是记录，改它没意义）。
   assert.match(row, /onDoubleClick:done\?undefined:startEdit/);
   // 编辑态：文案 + 到期时间（**要能定到几点**）+ 回车保存 / Esc 取消。
-  assert.match(row, /type:'datetime-local'/);
-  assert.match(row, /'aria-label':'到期时间'/);
+  assert.match(row, /h\(DateTimeField,\{value:dueDraft/);
+  assert.match(row, /'aria-label':'到期时间'|h\(DateTimeField,\{value:dueDraft/);
   assert.match(row, /toDateTimeInput\(new Date\(todo\.dueAt\*1000\)\)/);
   assert.match(row, /fromDateTimeInput\(dueDraft\)\.toISOString\(\)/);
   // Esc / 回车都要**拦住冒泡**：全局那个 Esc 监听会顺手收起整个面板
@@ -164,8 +164,11 @@ test('未完成的待办可以双击改文案、改到期时间', () => {
   assert.match(row, /if\(event\.key==='Enter'\)\{event\.stopPropagation\(\);save\(\);\}/);
   // 空标题不提交（服务端也会拒）。
   assert.match(row, /if\(!title\|\|busy\)return;/);
-  // 还有一个不依赖双击的入口：鼠标党不一定想得到要双击。
-  assert.match(row, /h\('button',\{onClick:startEdit/);
+  // **不再有「修改」按钮**（用户要求：按钮太多不好看，双击就够了）。
+  // 所以这里反过来钉住：一旦有人把按钮加回来，这条测试会提醒他先想清楚。
+  assert.doesNotMatch(row, /onClick:startEdit/);
+  // 双击是唯一入口这件事必须写在界面上，否则鼠标党根本想不到能改。
+  assert.match(row, /'双击修改'/);
   // 落库走 POST /api/todos/<id>（服务端按字段合并，只传这两个字段）。
   const page = source.slice(source.indexOf('function TodayPage('), source.indexOf('function CustomersPage('));
   assert.match(page, /action==='edit'\)await api\('todos\/'\+id,\{title:patch\.title,dueAt:patch\.dueAt\}\)/);
@@ -180,11 +183,11 @@ test('到期时间能定到几点', () => {
   assert.match(source, /function fromDateTimeInput\(value\)\{return value\?new Date\(value\):null;\}/);
   // 两处到期控件都换成能选小时的（新建表单与待办编辑）。
   const composer = source.slice(source.indexOf('function Composer('), source.indexOf('function ContextRow('));
-  assert.match(composer, /type:'datetime-local'/);
+  assert.match(composer, /h\(DateTimeField,\{value:due/);
   assert.match(composer, /toDateTimeInput\(dayStart\(0\)\)/, '「今天」要连带时间一起填');
   assert.match(composer, /fromDateTimeInput\(due\)\.toISOString\(\)/);
   const row = source.slice(source.indexOf('function TodoRow('), source.indexOf('function TodayPage('));
-  assert.match(row, /type:'datetime-local'/);
+  assert.match(row, /h\(DateTimeField,\{value:dueDraft/);
   // 列表上的到期提示也要带几点，否则刚填的小时等于白填。
   const due = source.slice(source.indexOf('function dueInfo('), source.indexOf('function firstLine('));
   assert.match(due, /pad2\(due\.getHours\(\)\)\+':'\+pad2\(due\.getMinutes\(\)\)/);
@@ -412,4 +415,19 @@ test('界面约定：单一勾选框、无对勾符号、没有分类、没有�
   assert.match(source, /function Result\(\{text,tone\}\)/, '结果要有一个统一样式的回执块');
   assert.match(source, /'\/doing'/);
   assert.doesNotMatch(source, /const NAV=.*\['messages','消息'\]/, '首版导航不再暴露消息整理页');
+});
+
+
+test('到期时间控件是自绘的，但仍然能定到几点', () => {
+  // 用户实测：原生 <input type="datetime-local"> 展开是系统画的，和玻璃界面两个风格。
+  // 换成自绘之后，**"能定到几点"这个需求一点都不能少** —— 下面是这条需求的落点。
+  const field = source.slice(source.indexOf('function DateTimeField('), source.indexOf('function HomeCard('));
+  assert.match(field, /Array\.from\(\{length:24\}/, '要有 24 小时可选');
+  assert.match(field, /\[0,15,30,45\]/, '分钟要能选 15 分钟粒度');
+  assert.match(field, /h\(Select,\{value:String\(current\?current\.h:9\)/, '小时用自绘下拉，不是原生控件');
+  // 弹出层要和 Select 一样：fixed 定位、点空白关闭、Esc 关闭并拦住冒泡
+  assert.match(field, /position:'fixed',left:box\.left/);
+  assert.match(field, /const onKey=event=>\{if\(event\.key==='Escape'\)\{event\.stopPropagation\(\);setOpen\(false\);\}\}/);
+  // 界面上不该再有原生日期控件
+  assert.doesNotMatch(source, /type:'datetime-local'/);
 });

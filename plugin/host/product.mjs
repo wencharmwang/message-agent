@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Drafts, readBindings, validateDraftText } from './storage.mjs';
 import { RuntimeAdapter } from './runtime.mjs';
 import { createCrm } from './crm.mjs';
@@ -974,6 +975,39 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
   // 列表拿到候选名，再让模型逐个 conversation_id 去读，读一次要开一次会话。识别不准、
   // 抢占前台、只能覆盖滚动的十来行，这正是当初把这块功能撤掉的原因。
 
+  // ---- 语音转文字 -----------------------------------------------------------
+  // 解码器（75 KB）随包走，识别模型（~470MB）由用户自己决定装不装 —— 所以状态要分开报：
+  // "能不能解出声音"和"能不能听懂内容"是两件事。
+  const voicePath = join(dirname(config.database), 'voice.json');
+  const voicePrefs = () => {
+    const raw = readJsonFile(voicePath, null);
+    return {enabled: raw?.enabled === true, model: typeof raw?.model === 'string' ? raw.model : 'small'};
+  };
+  const voiceState = () => {
+    const dataDir = dirname(config.database);
+    // 本模块在 <安装目录>pp\plugin\host\ 下，往上三层就是安装目录
+    // 本模块的位置有两种可能，往上几层是安装目录/仓库根都不一样：
+    //   安装后：<安装目录>/app/plugin/host/product.mjs  -> 往上三层
+    //   开发时：<仓库>/plugin/host/product.mjs          -> 往上两层
+    // 两边都要认，否则在本机体验时会显示"缺组件"（实测踩到）。
+    const here = dirname(fileURLToPath(import.meta.url));
+    const roots = [join(here, '..', '..', '..'), join(here, '..', '..')];
+    const hasFile = relative => roots.some(root => existsSync(join(root, relative)));
+    const decoder = hasFile(join('components', 'silk', 'silk-decoder-x64.exe'))
+      || hasFile(join('packaging', 'components', 'silk', 'silk-decoder-x64.exe'));
+    const transcriber = existsSync(join(dataDir, 'voice', 'lib'))
+      || existsSync(join(dataDir, 'voice', 'venv', 'Scripts', 'python.exe'));
+    const prefs = voicePrefs();
+    return {
+      ...prefs, decoder, transcriber,
+      // 开了开关但没装 = 不会生效，界面要直说，别让用户以为开了就行
+      active: prefs.enabled && decoder && transcriber,
+      hint: !transcriber
+        ? '还没有装识别环境。右键运行安装目录里的 install-voice.ps1（约 470 MB，只下一次）。'
+        : (!decoder ? '缺少语音解码组件，重新装一次消息助手可以补上。' : '')
+    };
+  };
+
   const organizePath = join(dirname(config.database), 'organize.json');
   const chatLogPath = join(dirname(config.database), 'chat-log.json');
   const readJsonFile = (path, fallback) => {
@@ -1135,6 +1169,20 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
         await runtime.setModelKey({key});
         process.env.DEEPSEEK_API_KEY = key;
         respond(res, 200, {ok: true, provider: 'deepseek-official'});
+        return true;
+      }
+      // 语音转文字：只是用户的偏好 + 本机装没装，读写都很轻，不碰微信。
+      if (path === '/message-agent/api/voice' && req.method === 'GET') {
+        respond(res, 200, voiceState());
+        return true;
+      }
+      if (path === '/message-agent/api/voice' && req.method === 'POST') {
+        const payload = await readBody(req);
+        const prefs = voicePrefs();
+        if (typeof payload?.enabled === 'boolean') prefs.enabled = payload.enabled;
+        if (typeof payload?.model === 'string' && payload.model.trim()) prefs.model = payload.model.trim();
+        writeJsonFile(voicePath, prefs);
+        respond(res, 200, voiceState());
         return true;
       }
       // 拖拽/置顶之后的顺序。只存 id 顺序，不碰规则本身。

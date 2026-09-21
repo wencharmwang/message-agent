@@ -1016,7 +1016,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   }
 
   // ---- shared composer: 记跟进 or 加待办 --------------------------------------
-  function Composer({mode,setMode,busy,onSubmit,idleHint,fixedMode}){
+  function Composer({mode,setMode,busy,onSubmit,idleHint,fixedMode,onCancel}){
     const [text,setText]=useState(''),[due,setDue]=useState(''),[error,setError]=useState('');
     async function submit(){
       if(!text.trim()){setError('先写点内容再保存');return;}
@@ -1033,11 +1033,12 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('span',{style:{fontSize:13,color:C.text2}},'什么时候做'),
         h('button',{onClick:()=>setDue(toDateTimeInput(dayStart(0))),style:{...small(false),borderRadius:99}},'今天'),
         h('button',{onClick:()=>setDue(toDateTimeInput(dayStart(1))),style:{...small(false),borderRadius:99}},'明天'),
-        h('input',{type:'datetime-local',value:due,onChange:event=>setDue(event.target.value),'aria-label':'到期时间',style:dateField}),
+        h(DateTimeField,{value:due,onChange:setDue,placeholder:'选择时间'}),
         due&&h('button',{onClick:()=>setDue(''),style:{...small(false,false,true),borderRadius:99}},'清除时间')),
       h(Notice,{error}),
       h('div',{style:{display:'flex',gap:10,alignItems:'center',marginTop:12,flexWrap:'wrap'}},
-        h('button',{onClick:submit,disabled:busy,style:button(true)},busy?'正在保存…':(isTodo?'添加待办':'保存这条跟进')),
+        h('button',{onClick:submit,disabled:busy,style:button(true)},busy?'正在保存…':(isTodo?'添加':'保存这条跟进')),
+        h('button',{onClick:onCancel,disabled:busy,style:button(false,false,true)},'取消'),
         idleHint&&h('span',{style:hint},idleHint)));
   }
 
@@ -1190,6 +1191,35 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
    * 所以做成"选一家 + 贴 key"：预设由后端给（供应商目录），用户不用知道协议、地址这些。
    * 「其它」那一项留了地址和模型名，任何 OpenAI 兼容的服务都能接。
    */
+  /**
+   * 语音转文字（可选）。
+   *
+   * 拆成两件事，因为这决定谁为它付代价：
+   *   · 把语音解成声音波形 —— 解码器只有 75 KB，随包走，人人都有；
+   *   · 听懂说的是什么 —— 要一个几百 MB 的模型，**由用户自己决定装不装**。
+   * 所以这里既有开关，也如实报"装了没有"，并给出安装命令。
+   */
+  function VoiceCard(){
+    const voice=usePoller(true,()=>api('voice'),20000);
+    const [busy,setBusy]=useState(false),[error,setError]=useState('');
+    const data=voice.data,on=!!data?.enabled;
+    async function toggle(){
+      setBusy(true);setError('');
+      try{await api('voice',{enabled:!on});await voice.refresh();}
+      catch(e){setError(e.message);}finally{setBusy(false);}
+    }
+    return h('section',{style:card},
+      h('h2',{style:{...h2,margin:'0 0 6px'}},'语音'),
+      h('p',{style:{...hint,margin:'0 0 10px'}},
+        '对方发来的语音，助手默认读不到内容（微信里存的是声音，没有文字）。'
+        +'打开这个开关，它会先在这台电脑上把语音转成文字再处理 —— 不联网、不花钱。'),
+      h(Toggle,{on,onClick:toggle,busy,disabled:!data?.decoder,label:'把语音转成文字'}),
+      data?.hint&&h('p',{style:{...hint,margin:'10px 0 0',color:C.warn}},data.hint),
+      !data?.hint&&h('p',{style:{...hint,margin:'10px 0 0'}},
+        on?'已开启：语音会先转成文字，再按普通消息处理。':'已关闭：语音只提示"需要你自己听一遍"。'),
+      h(Notice,{error}));
+  }
+
   function ModelSetupCard(){
     const status=usePoller(true,()=>api('status'),20000);
     const catalog=usePoller(true,()=>api('models'),60000);
@@ -1286,6 +1316,89 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       h('h2',{style:{...h2,margin:'0 0 6px'}},'微信数据'),
       h('p',{style:{...hint,margin:'0 0 10px'}},'助手要读消息，先初始化一次。'),
       h(WeChatInitCard,{}));
+  }
+
+  /**
+   * 日期时间选择（自绘）。
+   *
+   * 为什么不用 <input type="datetime-local">：那是系统画的，和这块玻璃界面是两个风格
+   * （用户实测："日历控件就是原生的，风格不协调"）。自己做一个月历 + 时间选择，
+   * 和 Select 用同一套弹出逻辑（fixed 定位、点空白关闭、Esc 关闭并拦住冒泡）。
+   *
+   * 值格式沿用 datetime-local 的 'YYYY-MM-DDTHH:mm'，调用方不用改。
+   */
+  function DateTimeField({value,onChange,placeholder='选择时间',ariaLabel='到期时间'}){
+    const [open,setOpen]=useState(false),[box,setBox]=useState(null),ref=useRef(null);
+    const parse=text=>{
+      const match=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(String(text||''));
+      return match?{y:+match[1],m:+match[2]-1,d:+match[3],h:+match[4],mi:+match[5]}:null;
+    };
+    const current=parse(value);
+    const today=new Date();
+    const [cursor,setCursor]=useState(()=>current?new Date(current.y,current.m,1):new Date(today.getFullYear(),today.getMonth(),1));
+    useEffect(()=>{
+      if(!open)return;
+      const onDoc=event=>{if(ref.current&&!ref.current.contains(event.target))setOpen(false);};
+      const onKey=event=>{if(event.key==='Escape'){event.stopPropagation();setOpen(false);}};
+      const onScroll=()=>setOpen(false);
+      document.addEventListener('mousedown',onDoc);
+      document.addEventListener('keydown',onKey,true);
+      window.addEventListener('resize',onScroll);
+      window.addEventListener('scroll',onScroll,true);
+      return()=>{document.removeEventListener('mousedown',onDoc);document.removeEventListener('keydown',onKey,true);window.removeEventListener('resize',onScroll);window.removeEventListener('scroll',onScroll,true);};
+    },[open]);
+    function openPanel(){
+      const rect=ref.current.getBoundingClientRect();
+      const height=352,below=window.innerHeight-rect.bottom;
+      const up=below<height+12&&rect.top>below;
+      setBox({left:rect.left,width:Math.max(rect.width,272),...(up?{bottom:window.innerHeight-rect.top+6}:{top:rect.bottom+6})});
+      setOpen(true);
+    }
+    const emit=(y,m,d,h,mi)=>onChange(y+'-'+String(m+1).padStart(2,'0')+'-'+String(d).padStart(2,'0')+'T'+String(h).padStart(2,'0')+':'+String(mi).padStart(2,'0'));
+    const pick=day=>emit(cursor.getFullYear(),cursor.getMonth(),day,current?current.h:9,current?current.mi:0);
+    const first=new Date(cursor.getFullYear(),cursor.getMonth(),1);
+    const lead=(first.getDay()+6)%7;                              // 周一开头，和国内习惯一致
+    const days=new Date(cursor.getFullYear(),cursor.getMonth()+1,0).getDate();
+    const cells=[];
+    for(let i=0;i<lead;i++)cells.push(null);
+    for(let d=1;d<=days;d++)cells.push(d);
+    const sameDay=(a,b)=>a.getFullYear()===b.getFullYear()&&a.getMonth()===b.getMonth()&&a.getDate()===b.getDate();
+    const isPicked=day=>!!current&&current.d===day&&sameDay(new Date(current.y,current.m,current.d),new Date(cursor.getFullYear(),cursor.getMonth(),day));
+    const show=current?((current.m+1)+'月'+current.d+'日 '+String(current.h).padStart(2,'0')+':'+String(current.mi).padStart(2,'0')):'';
+    const hours=Array.from({length:24},(_,i)=>({value:String(i),label:String(i).padStart(2,'0')+' 点'}));
+    const minutes=[0,15,30,45].map(i=>({value:String(i),label:String(i).padStart(2,'0')+' 分'}));
+    return h('div',{ref,style:{position:'relative',display:'inline-flex'}},
+      h('button',{onClick:openPanel,type:'button','aria-label':ariaLabel,
+        style:{...small(false),borderRadius:99,display:'inline-flex',alignItems:'center',gap:7}},
+        h('span',{style:{color:show?C.text:C.text3}},show||placeholder),
+        h('span',{style:{fontSize:10,color:C.text3}},'▾')),
+      open&&box&&h('div',{style:{position:'fixed',left:box.left,width:box.width,zIndex:60,
+          ...(box.top!==undefined?{top:box.top}:{bottom:box.bottom}),
+          padding:12,borderRadius:14,background:C.panel,border:'1px solid '+C.border,
+          boxShadow:'0 18px 40px rgba(24,60,42,.18)'}},
+        h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}},
+          h('button',{onClick:()=>setCursor(new Date(cursor.getFullYear(),cursor.getMonth()-1,1)),type:'button',style:iconButton},'‹'),
+          h('strong',{style:{fontSize:14,color:C.text}},cursor.getFullYear()+'年'+(cursor.getMonth()+1)+'月'),
+          h('button',{onClick:()=>setCursor(new Date(cursor.getFullYear(),cursor.getMonth()+1,1)),type:'button',style:iconButton},'›')),
+        h('div',{style:{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:2,marginBottom:4}},
+          ['一','二','三','四','五','六','日'].map(week=>h('span',{key:week,style:{fontSize:11,color:C.text3,textAlign:'center'}},week))),
+        h('div',{style:{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:2}},
+          cells.map((day,index)=>day===null?h('span',{key:'p'+index}):
+            h('button',{key:day,type:'button',onClick:()=>pick(day),
+              style:{padding:'6px 0',border:'none',borderRadius:8,fontSize:13,cursor:'pointer',
+                background:isPicked(day)?C.brand:'transparent',
+                color:isPicked(day)?'#fff':(sameDay(new Date(cursor.getFullYear(),cursor.getMonth(),day),today)?C.brand:C.text)}},String(day)))),
+        h('div',{style:{display:'flex',gap:8,alignItems:'center',marginTop:10,flexWrap:'wrap'}},
+          h('span',{style:{fontSize:12,color:C.text2}},'时间'),
+          h(Select,{value:String(current?current.h:9),groups:[{items:hours}],minWidth:96,
+            onChange:next=>emit(current?current.y:today.getFullYear(),current?current.m:today.getMonth(),current?current.d:today.getDate(),+next,current?current.mi:0)}),
+          h(Select,{value:String(current?current.mi:0),groups:[{items:minutes}],minWidth:96,
+            onChange:next=>emit(current?current.y:today.getFullYear(),current?current.m:today.getMonth(),current?current.d:today.getDate(),current?current.h:9,+next)})),
+        h('div',{style:{display:'flex',gap:8,marginTop:10,flexWrap:'wrap'}},
+          h('button',{type:'button',onClick:()=>{const moment=new Date();emit(moment.getFullYear(),moment.getMonth(),moment.getDate(),moment.getHours(),0);setCursor(new Date(moment.getFullYear(),moment.getMonth(),1));},
+            style:{...small(false),borderRadius:99}},'今天'),
+          value&&h('button',{type:'button',onClick:()=>{onChange('');setOpen(false);},style:{...small(false,false,true),borderRadius:99}},'清除'),
+          h('button',{type:'button',onClick:()=>setOpen(false),style:{...small(true),borderRadius:99,marginLeft:'auto'}},'完成'))));
   }
 
   function HomeCard({title,meta,action,children}){
@@ -1773,7 +1886,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
       h(Notice,{error:actionError||error}),
 
       h(Section,{title:'待办',meta:todos.length?('未完成 '+todos.length+' 件'):'',action:h('button',{onClick:()=>setTodoOpen(value=>!value),style:small(!todoOpen)},todoOpen?'收起':'＋ 加一条待办')},
-        todoOpen&&h(Composer,{mode:'todo',fixedMode:true,setMode:()=>{},busy,onSubmit:addTodo}),
+        todoOpen&&h(Composer,{mode:'todo',fixedMode:true,setMode:()=>{},busy,onSubmit:addTodo,onCancel:()=>setTodoOpen(false)}),
         !todos.length&&!todoOpen&&h('p',{style:hint},'没有未完成的待办。'),
         !!todos.length&&h('div',{style:{border:'1px solid '+C.border,borderRadius:12,background:C.panel,overflow:'hidden'}},todos.map(todoLine)),
         doneTodos.length?h('button',{onClick:()=>setShowDone(value=>!value),style:{...small(false,false,true),marginTop:8}},showDone?'收起已完成':'已完成 '+doneTodos.length+' 件'):null,
@@ -1950,8 +2063,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           h('button',{onClick:()=>setEditing(false),disabled:busy,style:small(false)},'取消')),
         h('div',{style:{display:'flex',gap:8,alignItems:'center',marginTop:9,flexWrap:'wrap'}},
           h('span',{style:{fontSize:13,color:C.text2}},'到期时间'),
-          h('input',{type:'datetime-local',value:dueDraft,onChange:event=>setDueDraft(event.target.value),
-            'aria-label':'到期时间',style:{...field,width:'auto'}}),
+          h(DateTimeField,{value:dueDraft,onChange:setDueDraft,placeholder:'选择时间'}),
           dueDraft&&h('button',{onClick:()=>setDueDraft(''),disabled:busy,style:small(false)},'清除'),
           h('span',{style:{fontSize:12,color:C.text3}},'回车保存，Esc 取消')));
     }
@@ -1982,7 +2094,6 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           done&&h('button',{onClick:()=>onAction('delete',todo),disabled:busy,className:'ma-iconbtn',
             title:'删除这条待办','aria-label':'删除这条待办',style:iconButton},h(Icon,{name:'trash',size:16})))),
       !done&&h('div',{style:{display:'flex',gap:6,flexShrink:0}},
-        h('button',{onClick:startEdit,disabled:busy,style:small(false),title:'修改文案和到期时间'},'修改'),
         h('button',{onClick:()=>onAction(doing?'reopen':'doing',todo),disabled:busy,style:small(false)},doing?'放回待办':'在做'),
         h('button',{onClick:()=>onAction('tomorrow',todo),disabled:busy,style:small(false)},'明天'),
         h('button',{onClick:()=>onAction('delete',todo),disabled:busy,style:small(false,true)},'删除')));
@@ -2080,7 +2191,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
             !items.length&&h('p',{style:{...hint,padding:'10px 0'}},'还没有待办。点右上角「＋ 待办」，或者在「消息」里把一件事记成待办。'),
             !!items.length&&h('div',{style:{border:'1px solid '+C.border,borderRadius:14,background:C.panel,overflow:'hidden'}},
               items.map(entry=>{
-                if(entry.kind==='new')return h('div',{key:'new',style:{padding:'13px 15px'}},h(Composer,{mode:'todo',fixedMode:true,setMode:()=>{},busy,onSubmit:addTodo}));
+                if(entry.kind==='new')return h('div',{key:'new',style:{padding:'13px 15px'}},h(Composer,{mode:'todo',fixedMode:true,setMode:()=>{},busy,onSubmit:addTodo,onCancel:()=>setAdding(false)}));
                 if(entry.kind==='todo')return h(TodoRow,{key:entry.id,todo:entry,onAction:act,busy});
                 const due=entry.expiresAt&&entry.expiresAt*1000<Date.now()+3600000;
                 return h(Row,{key:entry.id,title:entry.title,right:relativeTime(entry.updatedAt),meta:entry.detail,
@@ -2728,6 +2839,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         // 初始化完成后这块自己消失（用户要求：已经读过就别再显示，免得反复点触发风险）。
         h(WeChatInitSection,{}),
         h(ModelSetupCard,{}),
+        h(VoiceCard,{}),
         h(TaskModelPicker,{title:'自动回复模型',
           description:'管的是后台自动回复由谁来写。选本地模型（如「本地 Qwen」）时，那一轮回复的内容不会离开这台电脑。修改后从下一条新消息开始生效。',
           catalog,provider:autoProvider,model:autoModel,saving:saving==='auto',

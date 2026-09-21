@@ -6,6 +6,7 @@
 - 发走 UI：个人微信无官方 API，发送仍走 messaging-runtime 的 OCR 后台点行+后台发送。
 - 决策复用 harness：规则/状态机/DeepSeek 决策不变。
 """
+import base64
 import json
 from pathlib import Path
 import threading
@@ -676,6 +677,11 @@ class Worker:
         """把一条事件记入内存历史；返回 (是否触发回复, canonical 消息)。"""
         username = event.get('username') or ''
         message = self._canonical(event)
+        # 语音先试着转成文字。用户开了这个开关、并且自己装好了识别环境，才走这条路；
+        # 转不出来（没装/太短/不是 SILK）就保持原样，由 _note_unhandled 说明情况。
+        transcript = self._transcribe(event)
+        if transcript:
+            message = {**message, 'content': transcript, 'type': 'text'}
         history = self._history.setdefault(username, [])
         history.append(message)
         if len(history) > HISTORY_LIMIT:
@@ -689,9 +695,46 @@ class Worker:
             if seq_int > self._history_seq.get(username, 0):
                 self._history_seq[username] = seq_int
         should_reply = (event.get('direction') == 'incoming'
-                        and event.get('local_type') == 1
-                        and bool(event.get('text')))
+                        and bool(message.get('content'))
+                        and (event.get('local_type') == 1 or bool(transcript)))
         return should_reply, message
+
+    def _data_dir(self) -> Path:
+        return Path(self.config['control_token_file']).parent
+
+    def _transcribe(self, event) -> str:
+        """语音消息 -> 文字。只有用户开了开关、并且真的装好了识别环境才会成功。"""
+        if event.get('direction') != 'incoming' or event.get('local_type') != 34:
+            return ''
+        try:
+            prefs = voice.load_prefs(self._data_dir())
+        except Exception:
+            return ''
+        if not prefs.get('enabled'):
+            return ''
+        runtime = voice.voice_python(self._data_dir())
+        if runtime is None:
+            return ''
+        python_exe, lib_dir = runtime
+        blob = event.get('voice_data')
+        if isinstance(blob, str):          # 事件里可能是 base64（子进程只能给文本）
+            try:
+                blob = base64.b64decode(blob)
+            except Exception:
+                return ''
+        if not isinstance(blob, (bytes, bytearray)) or not blob:
+            return ''
+        try:
+            wav = voice.silk_to_wav(blob, self._data_dir() / 'voice' / 'last.wav',
+                                    self.config.get('app_root') or Path(__file__).resolve().parent.parent)
+            text = voice.transcribe(wav, str(python_exe), prefs.get('model') or voice.DEFAULT_MODEL,
+                                    lib_dir=lib_dir)
+            self.last_voice_error = ''
+            return text
+        except Exception as error:
+            # 转不出来不是故障：设置里会显示原因，消息本身仍旧按"读不到内容"处理
+            self.last_voice_error = str(error)[:200]
+            return ''
 
     def _rules_by_username(self):
         out = {}
@@ -735,6 +778,10 @@ class Worker:
             return
         tail = '需要你自己听一遍。' if local_type == 34 else '需要你自己看一下。'
         detail = f'对方发来的是一条{label}，我读不到里面的内容；{tail}'
+        # 语音在"开了转文字但没成功"时，多给一句为什么 —— 否则用户看着开关是开的、
+        # 却还是"读不到"，会以为坏了。
+        if local_type == 34 and getattr(self, 'last_voice_error', ''):
+            detail = f'对方发来的是一条语音，这次没能转成文字（{self.last_voice_error}）；需要你自己听一遍。'
         for rule in rules_by_username.get(username, []):
             if rule['status'] in ('queued', 'generating', 'ready', 'sending'):
                 continue
