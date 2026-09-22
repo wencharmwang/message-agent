@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>message-agent 数据卡</title>
+<style>
+  /* 1180 宽 = 1080 画布 + 两侧留白，方便截图时正好裁出 1080×1440 */
+  html,body{margin:0;padding:0;background:#0a0f0d;}
+  body{
+    /* 与 message-agent 深色主题同一套 token */
+    --ma-canvas:#0f1513;--ma-surface:#18201c;--ma-ink:#f1f6f3;--ma-muted:#a9b6ad;
+    --ma-subtle:#7c8b82;--ma-line:#2c3630;--ma-primary:#2bd67b;--ma-primary-soft:#16321f;
+    /* 玻璃 token（与界面里那份一致） */
+    --lg-blur-md:16px;--lg-r-lg:18px;--lg-r-xl:26px;
+    --lg-tint:rgba(255,255,255,.06);--lg-edge:rgba(255,255,255,.14);
+    --lg-shadow-2:0 16px 42px rgba(0,0,0,.34);--lg-grain-opacity:.1;
+    --lg-grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23g)' opacity='.9'/%3E%3C/svg%3E");
+    display:flex;justify-content:center;font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  }
+  .canvas{
+    position:relative;width:1080px;height:1440px;overflow:hidden;
+    background:
+      radial-gradient(720px 520px at 22% 12%, rgba(43,214,123,.20), transparent 62%),
+      radial-gradient(680px 560px at 88% 78%, rgba(31,158,117,.16), transparent 64%),
+      linear-gradient(168deg,#0f1513 0%,#121a16 55%,#0d1310 100%);
+  }
+  /* 噪点：和界面里那层颗粒一样，材质感的关键 */
+  .canvas::before{
+    content:'';position:absolute;inset:0;
+    background-image:var(--lg-grain);background-size:140px 140px;opacity:var(--lg-grain-opacity);
+  }
+  .inner{position:relative;padding:96px 88px;height:100%;box-sizing:border-box;display:flex;flex-direction:column;}
+
+  .brand{display:flex;align-items:center;gap:14px;}
+  .mark{width:46px;height:46px;border-radius:14px;display:flex;align-items:center;justify-content:center;
+    background:linear-gradient(150deg,#2bd67b,#1d9e75);box-shadow:0 8px 22px rgba(43,214,123,.28);}
+  .brandname{font-size:26px;font-weight:500;color:var(--ma-ink);letter-spacing:.2px;}
+  .kicker{margin-top:26px;font-size:20px;color:var(--ma-subtle);letter-spacing:.06em;}
+
+  h1{margin:12px 0 0;font-size:82px;line-height:1.16;font-weight:500;color:var(--ma-ink);letter-spacing:-1px;}
+  h1 em{font-style:normal;color:var(--ma-primary);}
+
+  .hero{display:flex;align-items:baseline;gap:18px;margin-top:44px;}
+  .hero .big{font-size:150px;line-height:1;font-weight:500;color:var(--ma-ink);letter-spacing:-4px;}
+  .hero .unit{font-size:34px;color:var(--ma-muted);}
+  .hero-note{margin-top:12px;font-size:22px;color:var(--ma-subtle);}
+
+  /* 玻璃面板：与 client.js 里的 .lg-glass 同一套做法 */
+  .glass{
+    position:relative;isolation:isolate;margin-top:52px;border-radius:var(--lg-r-xl);
+    background:var(--lg-tint);border:1px solid var(--lg-edge);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.16),var(--lg-shadow-2);
+    -webkit-backdrop-filter:blur(var(--lg-blur-md)) saturate(180%) brightness(1.06);
+    backdrop-filter:blur(var(--lg-blur-md)) saturate(180%) brightness(1.06);
+    padding:46px 48px;display:grid;grid-template-columns:1fr 1fr;gap:38px 40px;
+  }
+  .glass::after{
+    content:'';position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
+    background:linear-gradient(135deg,rgba(255,255,255,.13),rgba(255,255,255,.03) 32%,transparent 64%);
+  }
+  .stat .n{font-size:62px;line-height:1.05;font-weight:500;color:var(--ma-ink);letter-spacing:-1.5px;}
+  .stat .n small{font-size:26px;color:var(--ma-muted);margin-left:8px;letter-spacing:0;}
+  .stat .l{margin-top:10px;font-size:21px;color:var(--ma-muted);line-height:1.5;}
+
+  .foot{margin-top:auto;padding-top:46px;display:flex;justify-content:space-between;align-items:flex-end;}
+  .tags{display:flex;gap:12px;flex-wrap:wrap;}
+  .tag{font-size:20px;padding:11px 20px;border-radius:999px;color:var(--ma-primary);
+    background:var(--ma-primary-soft);border:1px solid rgba(43,214,123,.34);}
+  .stamp{font-size:19px;color:var(--ma-subtle);text-align:right;line-height:1.6;}
+</style>
+</head>
+<body>
+<div class="canvas"><div class="inner">
+
+  <div class="brand">
+    <span class="mark">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7A2.5 2.5 0 0 1 17.5 16H10l-4.6 3.4A.6.6 0 0 1 4.5 19V6.5Z"
+          stroke="#06301c" stroke-width="1.8" stroke-linejoin="round"/>
+        <circle cx="9" cy="10" r="1.35" fill="#06301c"/><circle cx="15" cy="10" r="1.35" fill="#06301c"/>
+      </svg>
+    </span>
+    <span class="brandname">message-agent</span>
+  </div>
+
+  <div class="kicker">微信消息助手 · 一个人 + AI 协作</div>
+  <h1>13 天<br><em>22,567</em> 行代码</h1>
+  <div class="hero">
+    <span class="big">171</span><span class="unit">条测试，全绿</span>
+  </div>
+  <div class="hero-note">不是堆量：34 个接口配 171 条测试</div>
+
+  <div class="glass">
+    <div class="stat"><div class="n">97<small>个文件</small></div><div class="l">产品代码 + 测试 + 文档</div></div>
+    <div class="stat"><div class="n">16,918<small>行</small></div><div class="l">产品代码（另有测试 2,241 行）</div></div>
+    <div class="stat"><div class="n">34<small>个</small></div><div class="l">HTTP 接口</div></div>
+    <div class="stat"><div class="n">23<small>张</small></div><div class="l">数据库表，4 个库</div></div>
+    <div class="stat"><div class="n">75<small>次</small></div><div class="l">提交，跨 13 天（单日最多 31 次）</div></div>
+    <div class="stat"><div class="n">1<small>个文件</small></div><div class="l">整个前端：不用构建，刷新即生效</div></div>
+  </div>
+
+  <div class="foot">
+    <div class="tags">
+      <span class="tag">本地数据库读消息</span>
+      <span class="tag">不打开微信窗口</span>
+      <span class="tag">171 条测试全绿</span>
+    </div>
+    <div class="stamp">2026.09.09 — 09.21<br>统计不含构建产物与依赖</div>
+  </div>
+
+</div></div>
+</body>
+</html>
