@@ -190,6 +190,15 @@ body[data-ds-dark-theme] [data-ma="root"]{
   opacity:var(--lg-grain-opacity);
 }
 
+/* 品牌插槽的窗口期遮罩：宿主先渲染它自己的 fallback（带构建版本号），
+   我们的品牌注册是异步的 —— 不遮的话刷新时那一瞬间会闪出宿主的名字。
+   我们的品牌挂载后给 <html> 打上 ma-brand-ready 即显示；3 秒兜底（见脚本）。 */
+html:not(.ma-brand-ready) [data-slot="sidebar.brand.mark"],
+html:not(.ma-brand-ready) [data-slot="sidebar.brand.name"],
+html:not(.ma-brand-ready) [data-slot="conversation.hero.brand.mark"]{
+  visibility:hidden !important;
+}
+
 /* ===== 3. 玻璃基类（Regular 变体，全站只用这一种） ===== */
 [data-ma] .lg-glass{
   position:relative;isolation:isolate;border-radius:var(--lg-r-lg);
@@ -839,6 +848,11 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   /** Product name beside the mark. The shell's own fallback is replaced here so
    *  the harness brand and its build-version badge never reach the user. */
   function BrandName(){
+    useEffect(()=>{
+      // 我们的品牌到了 —— 解除遮罩（见样式里那段窗口期说明）。
+      document.documentElement.classList.add('ma-brand-ready');
+      return ()=>document.documentElement.classList.remove('ma-brand-ready');
+    },[]);
     return h('span',{style:{fontSize:17,fontWeight:600,letterSpacing:0,whiteSpace:'nowrap',color:'inherit'}},'Message Agent');
   }
 
@@ -3488,7 +3502,17 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   }
   const TOOL_NAMES=['mcp__messaging__list_conversations','mcp__messaging__read_messages','mcp__messaging__sync_conversation','mcp__messaging__search_messages','mcp__messaging__send_message','mcp__messaging__reply_message','mcp__messaging__get_send_status','submit_reply_decision'];
   return{inject:['slots','sessions'],apply(ctx){
-    const saved=readSaved(),allowedTabs=['home','todos','automation','context','settings'],store=createStore({open:saved.open===undefined?true:saved.open,cover:saved.cover===undefined?true:saved.cover,tab:allowedTabs.includes(saved.tab)?saved.tab:'home',contactKey:null,contactTitle:null,contactKind:null,customerKey:null,filter:'all',scope:'attention',order:'recent',pending:0});
+      // 浏览器标签标题：刷新时也会先露出一瞬间宿主的名字，这里尽早改成"消息助手"，
+    // 并且它是"我们自己的名字"，宿主后来改回去也照样纠正（有变化才动，不做无意义的写）。
+    const wantedTitle='消息助手';
+    const pinTitle=()=>{if(document.title!==wantedTitle)document.title=wantedTitle;};
+    pinTitle();
+    document.addEventListener('visibilitychange',pinTitle);
+    // 兜底：插件正常时品牌会立刻挂载并解除遮罩；万一注入失败，3 秒后无条件显示，
+    // 不能让侧边栏一直空着（遮罩只在"我们自己就快好了"的前提下才成立）。
+    setTimeout(()=>document.documentElement.classList.add('ma-brand-ready'),3000);
+
+  const saved=readSaved(),allowedTabs=['home','todos','automation','context','settings'],store=createStore({open:saved.open===undefined?true:saved.open,cover:saved.cover===undefined?true:saved.cover,tab:allowedTabs.includes(saved.tab)?saved.tab:'home',contactKey:null,contactTitle:null,contactKind:null,customerKey:null,filter:'all',scope:'attention',order:'recent',pending:0});
     ctx.slots.inject('sidebar.footer.action',()=>ctx.slots.register({name:'sidebar.footer.action',id:'message-agent-workbench',order:5,label:()=> '自动回复'},({wide})=>h(NavEntry,{store,wide})));
     ctx.slots.inject('shell.overlay',()=>ctx.slots.register({name:'shell.overlay',id:'message-agent-workbench',order:20},()=>h(Workbench,{ctx,store})));
     ctx.slots.inject('tool.call.toolview',function*(){for(const key of TOOL_NAMES)yield ctx.slots.register({name:'tool.call.toolview',key},MessageToolCard);});
