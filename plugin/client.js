@@ -190,6 +190,11 @@ body[data-ds-dark-theme] [data-ma="root"]{
   opacity:var(--lg-grain-opacity);
 }
 
+/* 宿主的启动页（wordmark "HARNESS" + "Loading plugins…"）是**写死在宿主代码里**的，
+   在我们的插件加载之前就渲染了 —— 插件无法阻止它出现。但它的根节点带一个稳定属性
+   data-dsh-boot 属性，所以我们一加载就把可能残留的启动页收掉（正常情况下宿主自己会移除它）。 */
+[data-dsh-boot]{display:none !important;}
+
 /* 品牌插槽的窗口期遮罩：宿主先渲染它自己的 fallback（带构建版本号），
    我们的品牌注册是异步的 —— 不遮的话刷新时那一瞬间会闪出宿主的名字。
    我们的品牌挂载后给 <html> 打上 ma-brand-ready 即显示；3 秒兜底（见脚本）。 */

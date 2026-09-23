@@ -93,7 +93,9 @@ export function apply(ctx) {
         },
         output: {
           schema: {type: 'object', additionalProperties: false, properties: {text: {type: 'string', required: true}}},
-          render: result => [{type: 'text', text: result.text}]
+          // **签名是 (args, value)**，不是 (result) —— 写成单参数时第二个参数永远取不到，
+          // value.text 是 undefined，DSH 直接判"output.render returned non-lossless JSON"。
+          render: (_args, value) => [{type: 'text', text: value.text}]
         },
         async execute(args) {
           const keyword = String(args?.conversation ?? '').trim();
