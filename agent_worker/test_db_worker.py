@@ -257,3 +257,34 @@ class VoiceWiringTests(WorkerDbWatchTests):
             self.assertEqual(self.worker._voice_queue.qsize(), 1, '失败过的不再排')
         finally:
             voice_module.voice_python = original
+
+
+class MessageTimeTests(unittest.TestCase):
+    """消息必须带时间。
+
+    用户实测：周一说了"准备回家"，周三还在按"他还在路上"回复（"路上注意安全"）。
+    根因就是这里 —— canonical_messages 把 at 丢了，模型看到的一串话没有先后，
+    提示词里"不要把历史状态当作现在的状态"那条规矩因此执行不了。
+    """
+
+    def test_keeps_timestamp(self):
+        from .service import canonical_messages
+
+        out = canonical_messages([
+            {'direction': 'incoming', 'content': '准备回家了', 'sender': None, 'type': 'text', 'at': 1789973708}
+        ])
+        self.assertEqual(out[0]['at'], 1789973708)
+
+    def test_falls_back_to_sort_seq_then_zero(self):
+        from .service import canonical_messages
+
+        # 老数据只有 sort_seq（毫秒级时间戳）时用它兜底
+        out = canonical_messages([
+            {'direction': 'incoming', 'content': '在吗', 'sender': None, 'type': 'text', 'sort_seq': 123}
+        ])
+        self.assertEqual(out[0]['at'], 123)
+        # 什么都没有就是 0 —— **不要编一个时间**，宁可让模型知道"这条没有时间"
+        out = canonical_messages([
+            {'direction': 'incoming', 'content': '在吗', 'sender': None, 'type': 'text'}
+        ])
+        self.assertEqual(out[0]['at'], 0)

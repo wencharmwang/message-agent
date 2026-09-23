@@ -145,8 +145,11 @@ def canonical_messages(messages):
     for m in messages:
         if m.get('direction') not in ('incoming', 'outgoing') or not isinstance(m.get('content'), str):
             raise ValueError('Message direction or content is unknown')
+        # **at 必须留着**：模型要靠它判断"这是什么时候说的"。
+        # 少了它，几天前的一句"准备回家"和刚说的话看起来一样新（实测踩过）。
         result.append({'direction': m['direction'], 'content': unicodedata.normalize('NFC', m['content']).strip(),
-                       'sender': m.get('sender'), 'type': m.get('type', 'unknown')})
+                       'sender': m.get('sender'), 'type': m.get('type', 'unknown'),
+                       'at': int(m.get('at') or m.get('sort_seq') or 0)})
     return without_ui_noise(result)
 
 

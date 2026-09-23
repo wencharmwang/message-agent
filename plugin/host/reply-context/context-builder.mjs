@@ -76,7 +76,7 @@ export function createContextBuilder({db, workspaceId = 'local', crm = null, res
   const resolvers = resolverRegistry ?? createResolverRegistry();
   const policy = decisionPolicy ?? DEFAULT_DECISION_POLICY;
 
-  async function build({jobId, identity, conversationKey, rule, contextData, recentDeliveries = []}) {
+  async function build({jobId, identity, conversationKey, rule, contextData, recentDeliveries = [], now = Math.floor(Date.now() / 1000)}) {
     // 1. Identity consistency (spec §7 step 1): server-side binding only.
     if (!identity || !identity.provider || !identity.conversation) {
       throw Object.assign(new Error('会话身份不完整'), {code: 'CONTEXT_INVALID'});
@@ -93,13 +93,17 @@ export function createContextBuilder({db, workspaceId = 'local', crm = null, res
     const messages = Array.isArray(contextData?.messages) ? contextData.messages : [];
     const recent = messages.slice(-RECENT_MESSAGE_LIMIT).map(m => ({
       role: m.direction === 'incoming' ? 'contact' : 'sent',
-      text: typeof m.content === 'string' ? m.content : ''
+      text: typeof m.content === 'string' ? m.content : '',
+      // 时间跟着消息一起给模型 —— 否则"什么时候说的"全靠猜（实测把几天前的话当成现在）。
+      at: Number(m.at) || 0
     }));
     const lastIncoming = [...messages].reverse().find(m => m.direction === 'incoming');
     const currentQuestion = lastIncoming && typeof lastIncoming.content === 'string' ? lastIncoming.content : '';
     const deliveries = (recentDeliveries ?? []).slice(0, 3).map(d => ({state: d.state ?? 'unknown', text: d.text ?? ''}));
 
     // 3. CRM projection + open loops (spec §5.3).
+    // "现在"也要给模型：有了消息时间 + 当前时刻，它才能算"这是几天前说的"。
+    const at = now;
     const contact = memory.contactContext(conversationKey);
     // 3.5 这个人的长期记忆。**只取 confirmed**：candidate 是模型猜的、还没被确认，
     //     当成事实喂回去比不喂更糟（聊天稳不稳，很大程度取决于"喂进去的是不是真的"）。
@@ -183,7 +187,9 @@ export function createContextBuilder({db, workspaceId = 'local', crm = null, res
       conversation: {
         recent: trimRecent(recent, CONTEXT_BUDGET.conversation),
         currentQuestion,
-        recentDeliveries: deliveries
+        recentDeliveries: deliveries,
+        // 当前时刻：渲染时要拿它算这是几天前说的。
+        at
       },
       knowledge: trimArray(knowledgeForModel.map(k => ({id: k.id, kind: k.kind, title: k.title, content: k.content, riskLevel: k.riskLevel})),
         CONTEXT_BUDGET.knowledge, k => k.title + k.content),

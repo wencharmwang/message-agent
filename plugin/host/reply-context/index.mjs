@@ -61,6 +61,24 @@ export function createReplyContextSystem({databasePath, workspaceId = 'local', c
  * [SYSTEM BOUNDARY] is supplied by REPLY_POLICY in reply-policy.mjs; everything here is marked
  * as data, not instructions that can alter system rules or widen tool permissions (spec §9).
  */
+/**
+ * 消息时间的展示方式：绝对时间 + 相对时间。
+ *
+ * 两个都要：绝对时间给出"哪天几点"（周一说的话得看得出来是周一），
+ * 相对时间给出"多久以前"（"3 天前"比"09-20 20:15"更容易让模型意识到那是旧信息）。
+ */
+export function messageStamp(at, now) {
+  if (!at) return '';
+  const date = new Date(at * 1000);
+  const pad = value => String(value).padStart(2, '0');
+  const clock = `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  if (!now) return `[${clock}]`;
+  // 时间戳比"现在"还新（时钟误差之类）就按今天算，别写出"-1 天前"
+  const days = Math.max(0, Math.floor((now - at) / 86400));
+  const ago = days === 0 ? '今天' : (days === 1 ? '昨天' : `${days} 天前`);
+  return `[${clock}，${ago}]`;
+}
+
 export function renderContextPrompt({contextPack, evidenceCatalog = [], rule = {}}) {
   const kbEvidence = new Map(evidenceCatalog.filter(e => e.kind === 'published_knowledge').map(e => [e.sourceRef, e.id]));
   const lines = [];
@@ -127,8 +145,15 @@ export function renderContextPrompt({contextPack, evidenceCatalog = [], rule = {
   lines.push('[REAL CONVERSATION SNAPSHOT]');
   const conv = contextPack.conversation ?? {};
   const recent = conv.recent ?? [];
+  // 当前时刻只给绝对时间（说"今天"没有意义，它本来就是现在）
+  if (conv.at) lines.push('当前时刻：' + messageStamp(conv.at, 0));
   if (recent.length) {
-    for (const m of recent) lines.push(`${m.role === 'contact' ? '对方' : '我方'}：${m.text}`);
+    // 每条都带时间：模型必须能一眼看出"这句是几天前说的"。
+    for (const m of recent) {
+      const stamp = messageStamp(m.at, conv.at);
+      lines.push(stamp ? `${stamp} ${m.role === 'contact' ? '对方' : '我方'}：${m.text}`
+        : `${m.role === 'contact' ? '对方' : '我方'}：${m.text}`);
+    }
   } else {
     lines.push('（空）');
   }
