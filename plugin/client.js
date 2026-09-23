@@ -3339,7 +3339,6 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         data&&h('details',{style:{marginTop:16,color:C.text2}},
           h('summary',{style:{cursor:'pointer',fontSize:15}},'高级信息'),
           h('div',{style:{marginTop:12,padding:16,borderRadius:10,background:C.panel,fontSize:14,lineHeight:2,color:C.text2}},
-            h('div',null,'处理引擎：'+data.agent),
             h('div',null,'当前模型：'+data.model),
             h('div',null,'服务启动时间：'+new Date(data.started_at*1000).toLocaleString('zh-CN')),
             h('div',null,'接入联系人：'+data.rules.length+' 个')))));

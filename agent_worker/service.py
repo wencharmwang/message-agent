@@ -939,7 +939,8 @@ class Worker:
             return
         if not self.store.transition(job['id'], 'queued', 'generating'):
             return
-        self.store.status(rule['id'], rule['revision'], 'generating', 'DeepSeek Harness 正在处理新消息')
+        # 这句会直接显示在界面上，所以只说「消息助手」—— 用户不需要知道底层是谁在跑。
+        self.store.status(rule['id'], rule['revision'], 'generating', '消息助手正在处理新消息')
         try:
             try:
                 decision = self.harness.run(rule, job)

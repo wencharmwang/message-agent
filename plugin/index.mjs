@@ -553,7 +553,7 @@ export function apply(ctx) {
         sessionId = SessionId(await conversations.select(key, payload.legacy_session_ids, exists));
         const persisted = await exists(sessionId);
         const live = ctx.agents.get(sessionId);
-        if (live && live.status !== 'idle') throw new Error('Conversation is busy in Harness');
+        if (live && live.status !== 'idle') throw new Error('这个会话正在处理上一条消息');
         const composition = {
           agentOptions:{provider:autoProvider,model:autoModel,maxTokens:config.max_tokens},
           setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx,preset.id); }
@@ -641,7 +641,7 @@ export function apply(ctx) {
       } catch (error) {
         ctx.logger.warn('Messaging task failed: ' + (error instanceof Error ? error.message : 'unknown'));
         console.error('Messaging task failure:', error instanceof Error ? error.stack : 'unknown');
-        respond(res,503,{error:'消息任务未完成，请查看 Harness 任务记录',session_id:sessionId});
+        respond(res,503,{error:'这条消息没处理完，可以稍后再试',session_id:sessionId});
       } finally {
         clearTimeout(timer);
         for (const dispose of cleanup.reverse()) dispose();

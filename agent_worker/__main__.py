@@ -151,7 +151,7 @@ def handler(worker, token):
             if self.path == '/api/status':
                 rules = [{k: v for k, v in r.items() if k not in ('baseline', 'candidate')} for r in worker.store.rules()]
                 self.response(200, {'rules': rules, 'jobs': worker.store.recent(), 'error': worker.last_error,
-                                    'agent': 'DeepSeek Harness', 'model': current_settings()['auto_model'], 'started_at': worker.started_at})
+                                    'agent': '消息助手', 'model': current_settings()['auto_model'], 'started_at': worker.started_at})
             elif self.path == '/api/settings':
                 self.response(200, {'settings': current_settings()})
             elif self.path == '/api/conversations':
