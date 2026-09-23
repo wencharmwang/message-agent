@@ -2847,7 +2847,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         h('div',null,h('strong',{style:{display:'block',fontSize:13}},'正在后台读取聊天'),
           h('span',{style:{display:'block',fontSize:12,marginTop:2}},'可以留在当前页面；只读取，不会发送消息'))),
       result&&h('div',{style:{marginTop:12,border:'1px solid var(--lg-card-line)',borderRadius:'var(--lg-r-md)',padding:14,backgroundColor:FIELD_BG}},
-        h('div',{style:{fontSize:14,color:C.text,marginBottom:6}},'已生成「'+result.profile.name+'」（草稿，'+result.outgoingCount+' 条我方消息）'),
+        h('div',{style:{fontSize:14,color:C.text,marginBottom:6}},'已生成「'+result.profile.name+'」（草稿，确认后启用）'),
         result.summary&&h('p',{style:{margin:0,fontSize:14,color:C.text2,lineHeight:1.7}},result.summary),
         (result.profile.rules?.preference||[]).length>0&&h('p',{style:{margin:'6px 0 0',fontSize:13,color:C.text3,lineHeight:1.7}},'风格：'+(result.profile.rules.preference.join('；'))),
         h('button',{onClick:onDone,style:{...small(true),marginTop:10}},'去查看并确认')),

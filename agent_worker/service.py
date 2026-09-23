@@ -495,7 +495,7 @@ class Worker:
                 pass
         return sessions
 
-    def db_messages(self, username, limit=200):
+    def db_messages(self, username, limit=500):
         """读 DB 里某个会话的最近消息（username 定位），返回 canonical 格式。
 
         供「分析说话方式」等用户点名功能使用：直接读明文 message_N.db，不再 OCR

@@ -68,3 +68,39 @@ test('buildStylePrompt only feeds the model my own messages', () => {
   assert.match(prompt, /在的，你说/);
   assert.doesNotMatch(prompt, /在吗/);  // 对方的话不作为"我的说话方式"喂进去
 });
+
+
+test('分析说话方式：样本给足（120 条），超长才从最旧的开始丢', async () => {
+  const {buildStylePrompt, STYLE_SAMPLE_MESSAGES, STYLE_SAMPLE_CHARS} = await import('./style-analysis.mjs');
+  const identity = {title: 'Wencharm', kind: 'direct'};
+
+  // 我方 300 条 → 只用最近 120 条（用户要求"多分析一点"，读本地库很便宜）
+  const many = Array.from({length: 300}, (_, index) => ({
+    direction: 'outgoing', content: '第' + (index + 1) + '条'
+  }));
+  const prompt = buildStylePrompt({identity, messages: many});
+  assert.match(prompt, /我（用户本人）发出的消息共 120 条/);
+  assert.match(prompt, /第300条/, '最近的要保留');
+  assert.doesNotMatch(prompt, /第179条/, '第 180 条之前的要被裁掉（只留最近 120）');
+
+  // 对方的消息完全不参与（分析的是"我"怎么说话）
+  const mixed = [
+    {direction: 'incoming', content: '对方说的话不该出现'},
+    {direction: 'outgoing', content: '我说的话'}
+  ];
+  const onlyMine = buildStylePrompt({identity, messages: mixed});
+  assert.doesNotMatch(onlyMine, /对方说的话不该出现/);
+  assert.match(onlyMine, /我说的话/);
+
+  // 超长：从最旧的开始丢，保住最近的话
+  const long = Array.from({length: 100}, (_, index) => ({
+    direction: 'outgoing', content: '消息' + (index + 1) + 'x'.repeat(400)
+  }));
+  const trimmed = buildStylePrompt({identity, messages: long});
+  const body = trimmed.split('共 ')[1].split(' 条')[0];
+  const used = Number(body);
+  assert.ok(used >= 1 && used <= STYLE_SAMPLE_MESSAGES, '条数要在样本上限以内');
+  assert.match(trimmed, /消息100/, '最近的一条必须还在');
+  assert.doesNotMatch(trimmed, /消息1x/, '最旧的先被丢掉');
+  assert.ok(trimmed.length < STYLE_SAMPLE_CHARS + 2000, '整体长度受字符上限约束');
+});

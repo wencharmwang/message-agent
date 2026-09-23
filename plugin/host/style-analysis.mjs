@@ -22,11 +22,20 @@ export const STYLE_SYSTEM = [
 ].join('\n');
 
 /** The user's own messages are the only input that matters for "how I talk". */
+/** 一次分析最多看多少条我方消息。 */
+export const STYLE_SAMPLE_MESSAGES = 120;
+/** 这些消息拼起来最多多少字符（兜底，防止超长会话把提示词撑爆）。 */
+export const STYLE_SAMPLE_CHARS = 12000;
+
 export function buildStylePrompt({identity, messages}) {
   const mine = (messages ?? [])
     .filter(message => message?.direction === 'outgoing' && typeof message.content === 'string')
     .map(message => message.content.trim()).filter(Boolean);
-  const lines = mine.slice(-40);
+  // 样本给足：读本地库很便宜（不打开微信、不联网、不动前台）。
+  // 仍留一个字符上限兜底 —— 提示词过长的代价是真实的，而且超过一定量以后
+  // 边际收益很小。超了就**从最旧的开始丢**：说话方式最近的最有代表性。
+  let lines = mine.slice(-STYLE_SAMPLE_MESSAGES);
+  while (lines.length > 1 && lines.join('').length > STYLE_SAMPLE_CHARS) lines = lines.slice(1);
   const parts = [
     `会话：${identity?.title ?? '这个会话'}（${identity?.kind === 'group' ? '群聊' : '单聊'}）`,
     `我（用户本人）发出的消息共 ${lines.length} 条：`

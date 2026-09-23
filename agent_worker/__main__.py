@@ -258,7 +258,8 @@ def handler(worker, token):
                     if not isinstance(username, str) or not username:
                         raise ValueError('请指定要分析的会话')
                     limit = data.get('limit')
-                    limit = max(5, min(limit, 300)) if isinstance(limit, int) and not isinstance(limit, bool) else 200
+                    # 默认 500：读本地库很便宜，样本大一点分析更准（用户要求「多分析一点」）。
+                    limit = max(5, min(limit, 800)) if isinstance(limit, int) and not isinstance(limit, bool) else 500
                     self.response(200, worker.db_messages(username, limit))
                 elif self.path == '/api/db_recent':
                     # 首页与消息整理：一次取回最近有动静的若干会话 + 各自最近消息。
