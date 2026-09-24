@@ -384,6 +384,15 @@ def handler(worker, token):
                         raise ValueError('正文太长了，请精简后再发')
                     if not isinstance(request_id, str) or not request_id.strip():
                         request_id = str(uuid.uuid4())
+                    # 发送前先把微信窗口从托盘/最小化拉回来。
+                    # 运行时的 restore_window 说明里写明 "never happens implicitly" ——
+                    # 它故意不隐式恢复窗口，得调用方自己做。自动回复那条链路一直是这么干的
+                    # （service.py），手工发送漏了这一步，于是微信缩到托盘时就报
+                    # provider_unavailable。拉不起来也照样往下走：真正的错误让 send_message 报。
+                    try:
+                        worker.mcp.call('restore_window', {'provider': provider})
+                    except Exception:
+                        pass
                     try:
                         outcome = worker.mcp.call('send_message', {'provider': provider,
                             'conversation_id': conversation, 'text': text,
