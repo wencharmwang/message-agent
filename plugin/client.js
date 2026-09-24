@@ -1589,7 +1589,10 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         const sent=await api('send',{provider:draftMeta.provider,conversation:draftMeta.title||draftMeta.conversation,text:draftText.trim()});
         if(sent&&sent.status==='not_sent'){
           // **失败不收起来**：输入框和发送按钮留着，用户可以直接再点一次或取消。
-          setDraftNote('没有发出去：'+(SEND_FAIL_REASON[sent.code]||sent.code||'未知原因'));
+          // 人话在前，**原始错误码/详情在后**（上次只给人话，码丢了，只能显示"未知原因" ✗）。
+          // 失败时这两个都要留着：人话告诉你下一步做什么，码告诉我到底哪一步出问题。
+          setDraftNote('没有发出去：'+(SEND_FAIL_REASON[sent.code]||'原因未知')
+            +'（'+(sent.code||sent.detail||'没有错误码')+'）');
         }else{
           setDraftNote('已发送给 '+draftMeta.title);
           setDraftOf('');
