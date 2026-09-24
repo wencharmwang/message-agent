@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -425,6 +425,18 @@ export function projectToday({items = [], drafts = [], todoBuckets = {overdue: [
  * (architecture §6). Returns true when the request was handled. index.mjs applies
  * the same-origin guards before delegating here.
  */
+/**
+ * 手工发送用的请求 id。
+ *
+ * **必须是 UUID**：运行时（`MessagingService.cs`）会校验
+ * `request_id must be a UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)`，
+ * 不合格式直接以 `invalid_arguments` 拒掉。自动回复那条链路用的是 uuid4，
+ * 所以一直没问题；手工发送这里曾经写成 `manual-xxx` 被拒（实测报错过）。
+ */
+export function newSendRequestId() {
+  return randomUUID();
+}
+
 export function createProductApi({config, token, runtime: runtimeInjected, conversations, bindingsPath, respond, readBody, ensureInteractiveSession, askAssistant, crm: crmInjected, context: contextSystem, messageCenter: messageCenterInjected, classifyMessages, draftReply, analyzeStyle, organizeMessages}) {
   const runtime = runtimeInjected ?? new RuntimeAdapter({controlPort: config.control_port, token});
   const drafts = new Drafts(join(dirname(config.database), 'drafts.json'));
@@ -1279,7 +1291,7 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
         if (!body) throw Object.assign(new Error('正文不能为空'), {code: 'PRODUCT_API_ERROR'});
         const provider = typeof payload?.provider === 'string' ? payload.provider : 'wechat-main';
         const result = await runtime.sendMessage({provider, conversation,
-          text: body, requestId: 'manual-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)});
+          text: body, requestId: newSendRequestId()});
         respond(res, 200, result ?? {status: 'sent'});
         return true;
       }
