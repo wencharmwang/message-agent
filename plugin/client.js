@@ -1569,13 +1569,31 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
         setDraftError(e.message);setDraftOf('');
       }finally{setDraftBusy('');}
     }
+    /** 发送失败的原因翻成人话 —— 用户最需要的是"下一步该做什么"。 */
+    const SEND_FAIL_REASON={
+      policy_denied:'这台电脑的发送策略不允许，检查一下运行时的发送设置',
+      provider_unavailable:'微信窗口用不了（可能被最小化到托盘了）',
+      layout_unverified:'认不出微信窗口的布局，把微信窗口放大一些再试',
+      layout_changed:'微信窗口布局变了，等它稳定一下再试',
+      window_changed:'微信窗口切走了，让它保持在前台再试',
+      conversation_not_found:'微信里没找到这个联系人，确认一下他的名字',
+      invalid_text:'正文太长或为空',
+      uncertain:'不确定有没有发出去，去微信里看一眼再决定'
+    };
     async function sendDraft(){
       if(!draftMeta||!draftText.trim())return;
       setDraftBusy('send');setDraftError('');setDraftNote('');
       try{
-        const sent=await api('send',{provider:draftMeta.provider,conversation:draftMeta.conversation,text:draftText.trim()});
-        setDraftNote(sent&&sent.status==='not_sent'?'没有发出去（'+(sent.code||'消息窗口不可用')+'）':'已发送给 '+draftMeta.title);
-        setDraftOf('');
+        // 收件人要用**显示名/备注名**，不能用 wxid —— 微信的全局搜索只认昵称和微信号
+        // （自动回复那条链路一直发的是 rule['title']，就是显示名；这里曾经传了 username 被搜不到）。
+        const sent=await api('send',{provider:draftMeta.provider,conversation:draftMeta.title||draftMeta.conversation,text:draftText.trim()});
+        if(sent&&sent.status==='not_sent'){
+          // **失败不收起来**：输入框和发送按钮留着，用户可以直接再点一次或取消。
+          setDraftNote('没有发出去：'+(SEND_FAIL_REASON[sent.code]||sent.code||'未知原因'));
+        }else{
+          setDraftNote('已发送给 '+draftMeta.title);
+          setDraftOf('');
+        }
       }catch(e){setDraftError(e.message);}finally{setDraftBusy('');}
     }
     const todos=result?.todos||[];

@@ -459,3 +459,21 @@ test('新增规则时预设要露出来（规矩初始为空）', () => {
   // 预设本身仍只在空的时候出现
   assert.match(source, /if\(String\(value\?\?''\)\.trim\(\)\)return null;/);
 });
+
+test('手工发送：用显示名搜索；失败不收起输入区', () => {
+  // 一、收件人必须是**显示名/备注名** —— 微信的全局搜索只认昵称和微信号，不认 wxid。
+  //     自动回复那条链路一直发的是 rule['title']（显示名）；手工发送曾经传 username，搜不到。
+  assert.match(source, /conversation:draftMeta\.title\|\|draftMeta\.conversation/, '要用显示名');
+  assert.doesNotMatch(source, /conversation:draftMeta\.conversation,\s*text:draftText/, '不能直接用 username');
+
+  // 二、发送失败**不能**把输入区收起来：留着输入框和按钮，用户可以再点一次或取消。
+  const send = source.slice(source.indexOf('async function sendDraft'), source.indexOf('const todos=result?'));
+  assert.match(send, /if\(sent&&sent\.status==='not_sent'\)/, '失败要单独处理');
+  assert.match(send, /setDraftOf\(''\)/, '成功才收起');
+  // 失败分支里不能出现 setDraftOf('')
+  const failBranch = send.slice(send.indexOf("status==='not_sent'"), send.indexOf('}else{'));
+  assert.ok(!failBranch.includes("setDraftOf('')"), '失败分支里不许收起输入区');
+
+  // 三、错误码要翻成人话（用户需要知道下一步做什么）
+  assert.match(source, /layout_unverified:'认不出微信窗口的布局/);
+});
