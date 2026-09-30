@@ -471,8 +471,11 @@ test('手工发送：用显示名搜索；失败不收起输入区', () => {
   assert.match(send, /if\(sent&&sent\.status==='not_sent'\)/, '失败要单独处理');
   assert.match(send, /setDraftOf\(''\)/, '成功才收起');
   // 失败分支里不能出现 setDraftOf('')
-  const failBranch = send.slice(send.indexOf("status==='not_sent'"), send.indexOf('}else{'));
+  const failBranch = send.slice(send.indexOf("status==='not_sent'"), send.indexOf('}else if'));
   assert.ok(!failBranch.includes("setDraftOf('')"), '失败分支里不许收起输入区');
+  assert.match(send, /else if\(sent\?\.status==='sent'\)/, '只有明确 sent 才算成功');
+  const uncertainBranch = send.slice(send.indexOf('}else{'));
+  assert.ok(!uncertainBranch.includes("setDraftOf('')"), '未知结果必须保留拟稿');
 
   // 三、错误码要翻成人话（用户需要知道下一步做什么）
   assert.match(source, /layout_unverified:'认不出微信窗口的布局/);

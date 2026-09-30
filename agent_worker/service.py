@@ -19,6 +19,7 @@ import re
 import difflib
 from .database import Store
 from .harness import Harness
+from .send_outcome import normalize_send_outcome
 from . import voice
 
 
@@ -997,9 +998,10 @@ class Worker:
                     outcome = self.mcp.call('get_send_status', {'request_id': job['request_id']})
                 except Exception:
                     outcome = {'status': 'uncertain'}
-            state = outcome.get('status', 'uncertain')
+            outcome = normalize_send_outcome(outcome)
+            state = outcome['status']
             if state != 'sent':
-                self.store.finish(job, state, 'Sending stopped; inspect Runtime receipt before retrying')
+                self.store.finish(job, state, 'Runtime: ' + outcome['code'])
                 self.store.status(rule['id'], rule['revision'], 'listening',
                                   '上一条回复没有确认发出；不会自动重发，已继续监听新消息')
                 return

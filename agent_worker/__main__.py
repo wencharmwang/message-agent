@@ -11,6 +11,7 @@ import time
 import uuid
 from .service import Worker, RuntimeToolError, is_system_entry, error_trace, names_match, name_key, strip_ocr_noise
 from .harness import Harness
+from .send_outcome import normalize_send_outcome
 from . import wechat_keys
 from . import secrets_store
 from . import model_providers
@@ -409,7 +410,8 @@ def handler(worker, token):
                             outcome = worker.mcp.call('get_send_status', {'request_id': request_id})
                         except Exception:
                             outcome = {'status': 'uncertain'}
-                    self.response(200, {'status': outcome.get('status', 'uncertain'),
+                    outcome = normalize_send_outcome(outcome)
+                    self.response(200, {'status': outcome['status'], 'code': outcome['code'],
                                         'request_id': request_id,
                                         'detail': outcome.get('detail', '')})
                 elif self.path == '/api/settings':

@@ -1571,6 +1571,14 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     }
     /** 发送失败的原因翻成人话 —— 用户最需要的是"下一步该做什么"。 */
     const SEND_FAIL_REASON={
+      window_blank:'微信窗口尚未画好，请让窗口完整显示后再试',
+      input_failed:'文字没有进入微信输入框，请保持微信在前台后再试',
+      send_failed:'微信没有完成输入或发送，请检查窗口中的草稿',
+      draft_mismatch:'输入框内容未能核对，请先检查微信里的草稿',
+      composer_not_empty:'微信输入框已有草稿，请先处理草稿再试',
+      foreground_unavailable:'无法激活微信，请将微信切到前台后再试',
+      foreground_lost:'输入时微信失去焦点，请保持微信在前台后再试',
+      contact_not_found:'微信搜索没有找到联系人，请确认显示名或备注',
       policy_denied:'这台电脑的发送策略不允许，检查一下运行时的发送设置',
       provider_unavailable:'微信窗口用不了（可能被最小化到托盘了）',
       layout_unverified:'认不出微信窗口的布局，把微信窗口放大一些再试',
@@ -1593,9 +1601,11 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
           // 失败时这两个都要留着：人话告诉你下一步做什么，码告诉我到底哪一步出问题。
           setDraftNote('没有发出去：'+(SEND_FAIL_REASON[sent.code]||'原因未知')
             +'（'+(sent.code||sent.detail||'没有错误码')+'）');
-        }else{
+        }else if(sent?.status==='sent'){
           setDraftNote('已发送给 '+draftMeta.title);
           setDraftOf('');
+        }else{
+          setDraftNote('发送结果尚未确认，请先到微信核对，避免重复发送（'+(sent?.code||sent?.status||'uncertain')+'）');
         }
       }catch(e){setDraftError(e.message);}finally{setDraftBusy('');}
     }
