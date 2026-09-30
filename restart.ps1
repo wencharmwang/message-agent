@@ -5,6 +5,44 @@ $RuntimeRoot = 'C:\Users\Wencharm\Documents\projects\messaging-runtime'
 $AgentRoot   = 'C:\Users\Wencharm\Documents\projects\message-agent'
 $Pythonw     = Join-Path $RuntimeRoot 'runtime\python\pythonw.exe'
 
+# Readiness is decided by the harness health endpoint, not by netstat.
+# netstat only proves *something* holds the port; it does not prove the plugin
+# answered, and every restart left supervisors racing for 8766 so a listener
+# could be a stale host from a window station that cannot see user windows.
+# Observed on 2026-09-30: all three ports were LISTENING and the app worked,
+# yet restart.ps1 still printed the failure line.
+$HealthUrl   = 'http://127.0.0.1:3080/message-agent/health'
+$TokenFile   = Join-Path $AgentRoot 'data\control.token'
+
+function Get-ControlToken {
+  if (-not (Test-Path -LiteralPath $TokenFile)) { return $null }
+  return (Get-Content -LiteralPath $TokenFile -Raw).Trim()
+}
+
+function Test-ServiceReady {
+  param([string]$Token)
+  if (-not $Token) { return $false }
+  try {
+    $response = Invoke-WebRequest -Uri $HealthUrl -Method GET `
+      -Headers @{ Authorization = "Bearer $Token" } -UseBasicParsing -TimeoutSec 3
+    return ((ConvertFrom-Json $response.Content).ready -eq $true)
+  } catch { return $false }
+}
+
+# Returns $true if a process is listening. Uses Get-NetTCPConnection when
+# available: it avoids spawning netstat on every poll and, unlike
+# `netstat | Select-String`, cannot be defeated by PowerShell collapsing a
+# single match into a scalar instead of an array.
+function Test-PortListening {
+  param([int]$Port)
+  $connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+  if ($null -ne $connection) { return $true }
+  if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) { return $false }
+  # Windows without the NetTCPIP module: fall back to netstat, matched as text.
+  return [bool]((netstat -ano | Select-String -SimpleMatch ":$Port ") |
+                Where-Object { $_.Line -match 'LISTENING' })
+}
+
 Write-Host '[1/4] stopping old services ...'
 function Stop-LocalListener([int]$Port, [string[]]$AllowedNames) {
   $pids = (netstat -ano | Select-String 'LISTENING' | Select-String (':' + $Port + ' ')) | ForEach-Object {
@@ -36,18 +74,41 @@ Write-Host '[3/4] starting harness + worker ...'
 Start-Process -FilePath $Pythonw -ArgumentList (Join-Path $AgentRoot 'launch.py') -WorkingDirectory $AgentRoot -WindowStyle Hidden
 
 Write-Host '[4/4] waiting for readiness ...'
-$ok = $false
-for ($i = 0; $i -lt 30; $i++) {
-  Start-Sleep -Seconds 1
-  $rt = (netstat -ano | Select-String 'LISTENING' | Select-String ':8766 ')
-  $wk = (netstat -ano | Select-String 'LISTENING' | Select-String ':8767 ')
-  if ($rt -and $wk) { $ok = $true; break }
+$token = Get-ControlToken
+if (-not $token) { Write-Host ("   warn: missing " + $TokenFile + ' - falling back to port checks') }
+
+$deadline = (Get-Date).AddSeconds(60)
+$ready = $false
+$portState = @{ 8766 = $false; 8767 = $false; 3080 = $false }
+while ((Get-Date) -lt $deadline) {
+  foreach ($port in 8766, 8767, 3080) { $portState[$port] = Test-PortListening $port }
+  if ($token) {
+    if (Test-ServiceReady $token) { $ready = $true; break }
+  } elseif ($portState[3080] -and $portState[8766] -and $portState[8767]) {
+    $ready = $true; break
+  }
+  Start-Sleep -Milliseconds 800
 }
-if (-not $ok) {
-  Write-Host 'Startup may be incomplete; check harness.log and .runtime-data/shared-service.log'
-} else {
-  Write-Host 'Services are ready.'
-  $tokenLine = Get-Content (Join-Path $AgentRoot 'harness.log') -Tail 40 | Select-String 'dsh web:' | Select-Object -Last 1
-  Write-Host ('Web: ' + $tokenLine.Line)
-  Write-Host 'Ports: runtime=8766  harness=3080  worker=8767'
+
+if (-not $ready) {
+  $missing = @(8766, 8767, 3080 | Where-Object { -not $portState[$_] })
+  if ($missing.Count) {
+    Write-Host ('Startup failed: nothing listening on ' + ($missing -join ', ') +
+                '. runtime=8766 harness=3080 worker=8767') -ForegroundColor Red
+  } elseif ($token) {
+    Write-Host 'Startup failed: ports 8766/3080/8767 are listening but the harness health check never reported ready.' -ForegroundColor Red
+    Write-Host '  The likely cause is a stale supervisor hosting port 8766 from a desktop that cannot see user windows.' -ForegroundColor Red
+  } else {
+    Write-Host 'Startup failed: the harness health check never reported ready.' -ForegroundColor Red
+  }
+  Write-Host 'Check harness.log and .runtime-data\shared-service.log, then rerun this script.' -ForegroundColor Yellow
+  exit 1
 }
+
+Write-Host 'Services are ready.'
+# The log line already reads `dsh web: http://...`, so strip the prefix instead
+# of printing it twice.
+$tokenLine = Get-Content (Join-Path $AgentRoot 'harness.log') -Tail 60 | Select-String 'dsh web:' | Select-Object -Last 1
+if ($tokenLine) { Write-Host ('Web: ' + ($tokenLine.Line -replace '^\s*dsh web:\s*', '').Trim()) }
+elseif ($token) { Write-Host ('Web: http://127.0.0.1:3080/?token=' + $token) }
+Write-Host 'Ports: runtime=8766  harness=3080  worker=8767'
