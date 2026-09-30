@@ -118,7 +118,9 @@ export function renderContextPrompt({contextPack, evidenceCatalog = [], rule = {
   const memories = contextPack.contact?.memories ?? [];
   if (memories.length) {
     lines.push('[CONTACT MEMORY]');
-    memories.forEach(item => lines.push('- [' + item.kind + '] ' + item.content));
+    lines.push('记忆中的日期可能是相对旧对话而言；记录时间不是事件发生时间，不据此推算“明天”的日期。');
+    memories.forEach(item => lines.push('- [' + item.kind + '] ' + item.content
+      + (item.recordedAt ? '（记录于 ' + messageStamp(item.recordedAt, 0) + '）' : '（原始时间未知）')));
   }
 
   lines.push('[VERIFIED KNOWLEDGE WITH EVIDENCE IDS]');
@@ -152,14 +154,14 @@ export function renderContextPrompt({contextPack, evidenceCatalog = [], rule = {
     for (const m of recent) {
       const stamp = messageStamp(m.at, conv.at);
       lines.push(stamp ? `${stamp} ${m.role === 'contact' ? '对方' : '我方'}：${m.text}`
-        : `${m.role === 'contact' ? '对方' : '我方'}：${m.text}`);
+        : `[消息时间未知] ${m.role === 'contact' ? '对方' : '我方'}：${m.text}`);
     }
   } else {
     lines.push('（空）');
   }
   if (conv.currentQuestion) lines.push(`当前问题：${conv.currentQuestion}`);
   const deliveries = conv.recentDeliveries ?? [];
-  if (deliveries.length) lines.push('最近发送回执：' + deliveries.map(d => `${d.state}${d.text ? '（' + d.text + '）' : ''}`).join('；'));
+  if (deliveries.length) lines.push('最近处理结果（needs_user=未尝试发送，转用户处理；不是发送故障）：' + deliveries.map(d => `${d.state}${d.text ? '（' + d.text + '）' : ''}`).join('；'));
 
   lines.push('[APPROVED EXAMPLES]');
   const examples = contextPack.examples ?? [];

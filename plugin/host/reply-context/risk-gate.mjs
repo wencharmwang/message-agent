@@ -52,7 +52,7 @@ const INTENT_PATTERNS = [
   ['sensitive', /身份证|银行卡号|密码|验证码|住址|病历/],
   ['quote', /报价|多少钱|价格|单价|预算/],
   ['discount', /折扣|优惠|便宜|砍价|打折/],
-  ['schedule', /什么时候|几号|几点|约|预约|安排时间|明天|下周/],
+  ['schedule', /预约|约定|安排时间|什么时候.{0,8}(见面|到达|交付|发货|出发)|几[号点].{0,8}(见|到|出发|交付)|约.{0,4}(见面|吃饭|时间)/],
   ['commitment', /保证|承诺|一定|肯定|包/],
   ['after_sale', /售后|保修|退换|发票|安装|维修/],
   ['product_usage', /怎么用|如何使用|说明书|操作|设置|教程/],
@@ -80,7 +80,11 @@ export function detectRiskTags(text) {
   if (/[¥￥]\s*\d|元|块|报价|价格|单价|金额|折扣|优惠/.test(value)) tags.add('price');
   if (/折扣|优惠|便宜|打折|砍价/.test(value)) tags.add('discount');
   if (/保证|承诺|一定|肯定|今天.{0,6}发|马上.{0,4}到账|绝对/.test(value)) tags.add('commitment');
-  if (/今天|明天|周[一二三四五六日天]|几号|几点|下个?周|月|年/.test(value)) tags.add('time');
+  // A calendar reference is not a promise: birthdays, weather and greetings
+  // must not require evidence merely because they contain 今天/月/年.
+  if (/预约|约定|安排时间|定在.{0,8}(今天|明天|周|点|号)/.test(value)
+      || /(?:今天|明天|后天|下周|周[一二三四五六日天]|\d{1,2}[月号点]).{0,8}(?:我会|我来|我去|给你|帮你|陪你|接你|送你|发货|交付|到货|到账|完成)/.test(value)
+      || /(?:我会|我来|我去|我答应|我保证|保证|承诺).{0,8}(?:今天|明天|后天|下周|周[一二三四五六日天]|\d{1,2}[月号点])/.test(value)) tags.add('time');
   if (/退款|退货|退钱|赔付/.test(value)) tags.add('refund');
   if (/合同|协议|签约/.test(value)) tags.add('contract');
   if (/付款|支付|转账|账户|到账|收款|汇款/.test(value)) tags.add('account');
@@ -142,7 +146,8 @@ export function evaluateGate({decision, run, policy = DEFAULT_DECISION_POLICY, a
     return needsUser('LIVE_DATA_EXPIRED', '这条回复用到的实时数据已经过期，需要你确认', toNeedsUser(decision));
   }
 
-  const tags = [...new Set([...(decision.risk_tags ?? []), ...(run.detectedRiskTags ?? [])])];
+  const tags = [...new Set([...(decision.risk_tags ?? []), ...(run.detectedRiskTags ?? []),
+    ...detectRiskTags(decision.text ?? '')])];
   const grade = maxRiskGrade(tags);
   const hasEvidence = declaredEvidence.length > 0;
   const intent = decision.intent ?? run.detectedIntent ?? classifyIntent(run.currentQuestion ?? '');

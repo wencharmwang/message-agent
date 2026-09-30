@@ -707,6 +707,7 @@ class Worker:
             'content': event.get('text') or '',
             'sender': event.get('sender'),
             'type': 'text' if local_type == 1 else (event.get('type') or 'unknown'),
+            'at': int(event.get('create_time') or event.get('at') or 0),
         }
 
     def _ingest(self, event):

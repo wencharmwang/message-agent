@@ -602,7 +602,7 @@ export function apply(ctx) {
         // webhook kept it out of DSH's durable lastPromptAt projection, so a
         // visibly updated conversation remained buried at its creation time.
         const message = createUserMessage({source:{kind:'user'},
-          content:[{type:'text',text:modelContext(replyStyleEnabled(rule)+'\n'+REPLY_POLICY_FIXED+'\n'+renderContextPrompt({contextPack:contextRun.contextPack,evidenceCatalog:contextRun.evidenceCatalog,rule}))}]});
+          content:[{type:'text',text:modelContext(REPLY_POLICY_FIXED+'\n'+renderContextPrompt({contextPack:contextRun.contextPack,evidenceCatalog:contextRun.evidenceCatalog,rule:{...rule,prompt:replyStyleEnabled(rule)}}))}]});
         const start = handle.agent.session.events.length;
         handle.agent.followup(message);
         await Promise.race([handle.agent.whenIdle(),new Promise((_,reject)=>{timer=setTimeout(()=>{handle.agent.cancel({kind:'user'});reject(new Error('Task timed out'));},config.response_timeout_seconds*1000);})]);

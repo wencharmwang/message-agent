@@ -109,7 +109,7 @@ export function createContextBuilder({db, workspaceId = 'local', crm = null, res
     //     当成事实喂回去比不喂更糟（聊天稳不稳，很大程度取决于"喂进去的是不是真的"）。
     try {
       contact.memories = memory.list(workspaceId, {conversationKey, status: 'confirmed'})
-        .slice(0, 15).map(item => ({kind: item.kind, content: item.content}));
+        .slice(0, 15).map(item => ({kind: item.kind, content: item.content, recordedAt: item.createdAt}));
     } catch {
       contact.memories = [];
     }
@@ -130,8 +130,10 @@ export function createContextBuilder({db, workspaceId = 'local', crm = null, res
     // 6. Static knowledge (published + valid only).
     //    hits 只用于「这次有没有可引用的依据」；knowledgeForModel 才是喂给模型的知识段。
     //    条目总量在预算内时全量给——这个量级下关键词检索只会丢信息；超预算才退回 top-N。
-    const knowledgeHits = retrieveKnowledge(knowledge, workspaceId, currentQuestion, {limit: 8});
-    const knowledgeForModel = widenKnowledge(knowledge, workspaceId, knowledgeHits);
+    // Social turns do not need the workspace's product manuals or sales playbooks.
+    const needsKnowledge = !policy.autoIntents.includes(detectedIntent);
+    const knowledgeHits = needsKnowledge ? retrieveKnowledge(knowledge, workspaceId, currentQuestion, {limit: 8}) : [];
+    const knowledgeForModel = needsKnowledge ? widenKnowledge(knowledge, workspaceId, knowledgeHits) : [];
 
     // 7. Live resolvers (spec §5.4) — only when a trigger fires, scoped to server identity.
     const liveFacts = [];

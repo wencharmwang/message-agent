@@ -4,7 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createReplyContextSystem, renderContextPrompt } from './reply-context/index.mjs';
-import { evaluateGate } from './reply-context/risk-gate.mjs';
+import { evaluateGate, detectRiskTags, classifyIntent } from './reply-context/risk-gate.mjs';
 import { createCrm } from './crm.mjs';
 
 // Development fixtures only: no real WeChat data, no real contact names.
@@ -123,6 +123,38 @@ test('live data: a resolver contributes facts and evidence with a validity windo
 });
 
 // ---- Risk gate (spec §17.3) ------------------------------------------------
+
+test('birthday greeting passes the full context and gate without unrelated knowledge', async () => {
+  const sys = makeSystem();
+  const kb = sys.knowledge.create('local', {kind: 'product_usage', title: '消息系统', content: '今天介绍客户消息索引'});
+  sys.knowledge.publish('local', kb.id);
+  const run = await sys.build(buildArgs({contextData: {messages: [
+    {direction: 'incoming', content: '今天我生日', at: 1790462800}
+  ]}}));
+  assert.equal(run.detectedIntent, 'social');
+  assert.deepEqual(run.detectedRiskTags, []);
+  assert.deepEqual(run.contextPack.knowledge, []);
+  assert.equal(evaluateGate({decision: {action: 'reply', text: '生日快乐呀，今天想怎么过？',
+    intent: 'social', evidence_ids: [], risk_tags: []}, run}).outcome, 'pass');
+  const prompt = renderContextPrompt({contextPack: run.contextPack});
+  assert.match(prompt, /09-27/);
+  assert.doesNotMatch(prompt, /今天介绍客户消息索引/);
+});
+
+test('calendar words alone are not scheduling promises', () => {
+  for (const text of ['今天我生日', '明天是我生日', '今天天气不错', '新年快乐', '月亮好圆']) {
+    assert.equal(classifyIntent(text), 'social', text);
+    assert.ok(!detectRiskTags(text).includes('time'), text);
+  }
+});
+
+test('a birthday reply still cannot invent a concrete arrangement or payment', () => {
+  for (const text of ['我明天去接你', '明天我来陪你过生日', '我给你转账500元']) {
+    const out = evaluateGate({decision: {action: 'reply', text, intent: 'social', risk_tags: []},
+      run: {currentQuestion: '今天我生日', detectedRiskTags: [], evidenceCatalog: []}});
+    assert.equal(out.outcome, 'needs_user', text);
+  }
+});
 
 test('gate: a reply citing an unknown evidence id is rejected', () => {
   const out = evaluateGate({decision: {action: 'reply', text: '你好', evidence_ids: ['ev_nope']}, run: {evidenceCatalog: []}});

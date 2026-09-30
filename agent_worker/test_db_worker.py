@@ -60,6 +60,13 @@ class FakeWatcher:
 
 
 class WorkerDbWatchTests(unittest.TestCase):
+    def test_canonical_preserves_event_time_not_sort_sequence(self):
+        event = _event('person', 'incoming', '今天我生日', sort_seq=1790462800123)
+        event['create_time'] = 1790462800
+        self.assertEqual(Worker._canonical(event)['at'], 1790462800)
+        event.pop('create_time')
+        self.assertEqual(Worker._canonical(event)['at'], 0)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         db = Path(self.tmp.name) / "reply.db"
