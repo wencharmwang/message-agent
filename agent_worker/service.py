@@ -141,6 +141,60 @@ def without_ui_noise(messages):
     return [m for m in messages if not TIMESTAMP_NOISE.fullmatch(m['content'].strip())]
 
 
+# 真 XML 元素的起点。`<3 爱你` 这种聊天里的表情不算。
+_MARKUP_RE = re.compile(r'^<[?!/]?[A-Za-z_][\w.:-]*[\s/>]')
+
+
+def looks_like_markup(text):
+    """正文是不是一段 XML/blob 卡片，而不是人话。
+
+    图片/视频/位置这些消息的 ``message_content`` 是一整段**可打印 XML**
+    （``<?xml version="1.0"?><msg><img hdlength="…"/></msg>``）。它 UTF-8 解码必然成功，
+    所以"解出来非空就当正文"的判断会把整段卡片交给界面和模型 —— 界面显示一堆 XML，
+    模型只能从 ``hdlength`` 反推"这是张照片"，还白白吃掉上下文预算。
+    """
+    return bool(_MARKUP_RE.match((text or '').lstrip()[:200]))
+
+
+def looks_like_noise(text):
+    """是不是二进制残渣，而不是人话。
+
+    有些 ``message_content`` 解出来是一串控制字符 —— ``b"\\x00\\x01\\x02\\x03"`` 恰好是
+    合法 UTF-8，所以"解码成功"并不代表可读。判定门槛与 wechat-db-lab 的
+    ``_looks_like_text`` 保持一致：可打印占比 < 0.7，或控制/未分配类占比 > 0.1。
+    """
+    if not text:
+        return False
+    printable = 0
+    bad = 0
+    for char in text:
+        if char in '\n\r\t':
+            printable += 1
+        elif unicodedata.category(char) in ('Cc', 'Co', 'Cs', 'Cn'):
+            bad += 1
+        else:
+            printable += 1
+    return printable / len(text) < 0.7 or bad / len(text) > 0.1
+
+
+def display_body(text, type_name=None, local_type=None):
+    """界面与模型看到的正文。
+
+    文本原样返回。非文本消息的正文要么是 XML 卡片、要么是二进制残渣，两者都不是给人看的，
+    一律退回 ``[类型]`` 占位 —— 绝不把原始 XML 当正文。类型名认不出时用 ``类型<local_type>``
+    （与 wechat-db-lab 的 ``type_name`` 一致）。
+    """
+    body = text or ''
+    name = (type_name or '').strip()
+    if not name or name in ('text', '文本'):
+        return body
+    if body and not looks_like_markup(body) and not looks_like_noise(body):
+        return body
+    if name == 'unknown' and local_type is not None:
+        name = '类型%s' % local_type
+    return '[' + name + ']'
+
+
 def canonical_messages(messages):
     result = []
     for m in messages:
@@ -427,8 +481,10 @@ class Worker:
         return ''
 
     # 非文本消息的占位说明。local_type 见微信 4.x：1 文本 / 3 图片 / 34 语音 /
-    # 43 视频 / 47 表情 / 49 链接·文件·引用 / 10000 系统提示。
-    _TYPE_LABELS = {3: '图片', 34: '语音', 43: '视频', 47: '表情', 49: '链接或文件', 10000: '系统消息'}
+    # 43 视频 / 47 表情 / 48 位置 / 49 链接·文件·引用 / 50 通话 / 10000 系统提示。
+    _TYPE_LABELS = {3: '图片', 34: '语音', 43: '视频', 47: '表情', 48: '位置',
+                    49: '链接或文件', 50: '通话', 10000: '系统消息', 11000: '表情',
+                    8594229559345: '红包'}
 
     def _message_row(self, row, sender_index, self_names):
         """一行消息记录 -> canonical 消息。row 顺序：
@@ -439,7 +495,6 @@ class Worker:
         mine = bool(sender_user) and sender_user in self_names
         local_type = row[1]
         text = self._decode_message(row[5])
-        label = self._TYPE_LABELS.get(local_type)
         kind = 'text' if local_type == 1 else str(local_type)
         # 语音：能转成文字就把文字当正文（整理、会话详情、首页都用得上），
         # 转不出来仍旧退回 [语音] 占位。有缓存，同一条只转一次。
@@ -453,8 +508,10 @@ class Worker:
                 # 还没转过：**不等**，标一下让界面显示"转写中"，同时排进后台队列。
                 pending_voice = True
                 self._queue_voice(row[0])
-        if not text and label:
-            text = '[' + label + ']'
+        if kind != 'text':
+            # 图片/视频/文件的正文是一整段 XML 卡片或二进制残渣，别当正文用。旧逻辑漏在这：
+            # 那段 XML 是合法可打印 UTF-8，所以"解出来非空就当正文"永远成立。
+            text = display_body(text, self._TYPE_LABELS.get(local_type) or ('类型' + kind))
         return {
             'direction': 'outgoing' if mine else 'incoming',
             'content': text,
@@ -702,11 +759,13 @@ class Worker:
     @staticmethod
     def _canonical(event):
         local_type = event.get('local_type')
+        kind = 'text' if local_type == 1 else (event.get('type') or 'unknown')
         return {
             'direction': event.get('direction'),
-            'content': event.get('text') or '',
+            # 非文本事件的 text 是 XML 卡片时换成 [类型] 占位（见 display_body）。
+            'content': display_body(event.get('text'), kind, local_type),
             'sender': event.get('sender'),
-            'type': 'text' if local_type == 1 else (event.get('type') or 'unknown'),
+            'type': kind,
             'at': int(event.get('create_time') or event.get('at') or 0),
         }
 

@@ -9,9 +9,14 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
-from agent_worker.service import Worker
+from agent_worker.service import Worker, display_body, looks_like_markup, looks_like_noise
+
+
+IMAGE_XML = '<?xml version="1.0"?><msg><img hdlength="274437" length="0" md5=""/></msg>'
+VIDEO_XML = '<?xml version="1.0"?><msg><videomsg length="666709927" playlength="1667"/></msg>'
 
 
 def _event(username, direction, text, local_type=1, sort_seq=1000):
@@ -67,6 +72,55 @@ class WorkerDbWatchTests(unittest.TestCase):
         event.pop('create_time')
         self.assertEqual(Worker._canonical(event)['at'], 0)
 
+    def test_canonical_media_event_becomes_placeholder_not_xml(self):
+        """线上事故：图片/视频事件的 text 是一整段可打印 XML，旧逻辑原样当正文送出去，
+        界面显示一堆 XML、模型只能从 hdlength 反推"这是照片"。必须是 [类型]。"""
+        image = _event('person', 'outgoing', IMAGE_XML, local_type=3)
+        image['type'] = '图片'
+        got = Worker._canonical(image)
+        self.assertEqual(got['content'], '[图片]')
+        self.assertEqual(got['type'], '图片')
+
+        video = _event('person', 'outgoing', VIDEO_XML, local_type=43)
+        video['type'] = '视频'
+        self.assertEqual(Worker._canonical(video)['content'], '[视频]')
+
+        # 类型名认不出时用 local_type 兜底，别漏出 XML，也别丢成空串
+        odd = _event('person', 'outgoing', IMAGE_XML, local_type=4242)
+        odd['type'] = 'unknown'
+        self.assertEqual(Worker._canonical(odd)['content'], '[类型4242]')
+
+    def test_canonical_text_event_keeps_markup_like_body(self):
+        """local_type 1 的正文一个字节都不许动 —— 包括真的以 < 开头的那种。"""
+        for body in ('<?xml version="1.0"?> 是我手打的', '<msg>手打的</msg>', '<3 爱你'):
+            self.assertEqual(Worker._canonical(_event('person', 'incoming', body))['content'], body)
+
+    def test_display_body_and_markup_detection(self):
+        self.assertTrue(looks_like_markup(IMAGE_XML))
+        self.assertTrue(looks_like_markup('  \n' + VIDEO_XML))
+        self.assertFalse(looks_like_markup('[图片]'))
+        self.assertFalse(looks_like_markup(''))
+        self.assertFalse(looks_like_markup(None))
+        # 聊天里的 "<3" 不是 XML 起点
+        self.assertFalse(looks_like_markup('<3 爱你'))
+        self.assertFalse(looks_like_markup('3<5 怎么办'))
+
+        self.assertEqual(display_body(IMAGE_XML, '图片'), '[图片]')
+        self.assertEqual(display_body('[图片]', '图片'), '[图片]')
+        self.assertEqual(display_body('在吗', 'text'), '在吗')
+        self.assertEqual(display_body('在吗', '文本'), '在吗')
+        self.assertEqual(display_body(IMAGE_XML, None), IMAGE_XML)  # 不知道类型就不动
+
+    def test_display_body_treats_binary_residue_as_media_too(self):
+        """``b"\\x00\\x01\\x02\\x03"`` 恰好是合法 UTF-8 —— "解码成功"不代表可读。"""
+        residue = (b"\x00\x01\x02\x03" * 40).decode("utf-8")
+        self.assertTrue(looks_like_noise(residue))
+        self.assertFalse(looks_like_markup(residue))
+        self.assertEqual(display_body(residue, '图片'), '[图片]')
+        # 正常中文/英文/emoji 不是噪声
+        for body in ('在吗', 'ok', '👨‍👩‍👧', '[图片]', '3<5 怎么办'):
+            self.assertFalse(looks_like_noise(body), body)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         db = Path(self.tmp.name) / "reply.db"
@@ -108,6 +162,53 @@ class WorkerDbWatchTests(unittest.TestCase):
 
         should, _ = self.worker._ingest(_event("wxid_a", "incoming", "[图片]", local_type=3))
         self.assertFalse(should)
+
+    def _row(self, local_type, content, local_id=7, sender=2, at=1790762400):
+        return (local_id, local_type, at, sender, at, content)
+
+    def test_message_row_media_is_placeholder_not_xml(self):
+        """DB 路径（首页/整理/会话详情/说话方式分析都走它）同样不能把 XML 当正文。"""
+        got = self.worker._message_row(self._row(3, IMAGE_XML), {2: "wxid_me"}, {"wxid_me"})
+        self.assertEqual(got["content"], "[图片]")
+        self.assertEqual(got["type"], "3")
+        self.assertEqual(got["direction"], "outgoing")
+
+        got = self.worker._message_row(self._row(43, VIDEO_XML, sender=9), {9: "wxid_peer"}, {"wxid_me"})
+        self.assertEqual(got["content"], "[视频]")
+        self.assertEqual(got["direction"], "incoming")
+
+        # 解不出来的二进制也照样给占位符（旧行为，别改坏）
+        got = self.worker._message_row(self._row(3, b"\x00\x01\x02\x03" * 40), {2: "wxid_me"}, {"wxid_me"})
+        self.assertEqual(got["content"], "[图片]")
+
+    def test_message_row_unknown_media_type_still_gets_a_label(self):
+        got = self.worker._message_row(self._row(4242, IMAGE_XML), {2: "wxid_me"}, {"wxid_me"})
+        self.assertEqual(got["content"], "[类型4242]")
+        self.assertEqual(got["type"], "4242")
+
+    def test_message_row_text_is_untouched_even_when_it_looks_like_markup(self):
+        body = '<?xml version="1.0"?> 是我手打的'
+        got = self.worker._message_row(self._row(1, body.encode("utf-8")), {2: "wxid_me"}, {"wxid_me"})
+        self.assertEqual(got["content"], body)
+        self.assertEqual(got["type"], "text")
+        # 空的文本消息保持空串（不要变成 [类型1]）
+        got = self.worker._message_row(self._row(1, b""), {2: "wxid_me"}, {"wxid_me"})
+        self.assertEqual(got["content"], "")
+
+    def test_message_row_voice_transcript_survives_the_placeholder_rule(self):
+        """语音转成文字后 type 变 text —— 这时候必须留住文字，不能被占位符盖掉。"""
+        with mock.patch("agent_worker.service.voice.cached_only", return_value="晚上一起吃饭吗"):
+            got = self.worker._message_row(self._row(34, b"\xff\xfe" * 20), {2: "wxid_me"}, {"wxid_me"})
+        self.assertEqual(got["content"], "晚上一起吃饭吗")
+        self.assertEqual(got["type"], "text")
+
+    def test_message_row_voice_without_transcript_falls_back_to_placeholder(self):
+        with mock.patch("agent_worker.service.voice.cached_only", return_value=None), \
+                mock.patch.object(self.worker, "_queue_voice"):
+            got = self.worker._message_row(self._row(34, IMAGE_XML), {2: "wxid_me"}, {"wxid_me"})
+        self.assertEqual(got["content"], "[语音]")
+        self.assertEqual(got["type"], "34")
+        self.assertTrue(got["pending_voice"])
 
     def test_incoming_text_enqueues_for_matching_rule(self):
         self._add_rule("wxid_a")
