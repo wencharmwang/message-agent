@@ -143,6 +143,8 @@ def without_ui_noise(messages):
 
 # 真 XML 元素的起点。`<3 爱你` 这种聊天里的表情不算。
 _MARKUP_RE = re.compile(r'^<[?!/]?[A-Za-z_][\w.:-]*[\s/>]')
+# 群消息的正形是「发送者:」+ 换行 + XML，markup 不在行首。前缀是一段不含换行和冒号的短 token。
+_PREFIXED_MARKUP_RE = re.compile(r'^[^\n<:]{1,90}:[ \t\n]*<[?!/]?[A-Za-z_][\w.:-]*[\s/>]')
 
 
 def looks_like_markup(text):
@@ -152,8 +154,11 @@ def looks_like_markup(text):
     （``<?xml version="1.0"?><msg><img hdlength="…"/></msg>``）。它 UTF-8 解码必然成功，
     所以"解出来非空就当正文"的判断会把整段卡片交给界面和模型 —— 界面显示一堆 XML，
     模型只能从 ``hdlength`` 反推"这是张照片"，还白白吃掉上下文预算。
+
+    也要认「发送者:\\n<XML>」这种带前缀的形态 —— 群里每条消息都长这样，只看行首会全漏。
     """
-    return bool(_MARKUP_RE.match((text or '').lstrip()[:200]))
+    head = (text or '').lstrip()[:400]
+    return bool(_MARKUP_RE.match(head) or _PREFIXED_MARKUP_RE.match(head))
 
 
 def looks_like_noise(text):
@@ -177,22 +182,69 @@ def looks_like_noise(text):
     return printable / len(text) < 0.7 or bad / len(text) > 0.1
 
 
-def display_body(text, type_name=None, local_type=None):
+def display_body(text, label):
     """界面与模型看到的正文。
 
-    文本原样返回。非文本消息的正文要么是 XML 卡片、要么是二进制残渣，两者都不是给人看的，
-    一律退回 ``[类型]`` 占位 —— 绝不把原始 XML 当正文。类型名认不出时用 ``类型<local_type>``
-    （与 wechat-db-lab 的 ``type_name`` 一致）。
+    文本原样返回（``label`` 为 ``None``/``'text'``）。非文本消息的正文要么是 XML 卡片、
+    要么是二进制残渣，两者都不是给人看的，一律退回 ``[label]`` —— 绝不把原始 XML 当正文。
     """
     body = text or ''
-    name = (type_name or '').strip()
-    if not name or name in ('text', '文本'):
+    if not label or label in ('text', '文本'):
         return body
     if body and not looks_like_markup(body) and not looks_like_noise(body):
         return body
-    if name == 'unknown' and local_type is not None:
-        name = '类型%s' % local_type
-    return '[' + name + ']'
+    return '[' + label + ']'
+
+
+# 微信 4.x local_type -> 给界面/模型看的类型名。
+# 49 是"app 消息"，真正的子类型编码在**高 32 位**：local_type = (子类型 << 32) | 49。
+# 实测群里 21474836529 / 201863462961 / 244813135921 / 270582939697 解压后的 XML 里
+# <type> 正好是 5 / 47 / 57 / 63 —— 只看整数值会全部掉进"认不出"。
+MESSAGE_TYPE_LABELS = {
+    3: '图片', 34: '语音', 43: '视频', 47: '表情', 48: '位置', 49: '链接或文件',
+    50: '通话', 10000: '系统消息', 11000: '表情', 8594229559345: '红包',
+}
+
+# 认不出类型时的中性标签。**不写类型号**：``类型244813135921`` 这种东西不该出现在界面上
+# （真要看数字还有 ``type`` 字段）。想查具体类型就在日志/DB 里看 local_type。
+UNKNOWN_MESSAGE_LABEL = '其他消息'
+
+
+def message_type_label(local_type):
+    """``local_type`` -> 给界面/模型看的类型名；文本消息返回 ``None``。
+
+    先查原值，再查低 32 位（app 消息的复合类型），都不认识就给中性的「其他消息」。
+    """
+    try:
+        value = int(local_type)
+    except (TypeError, ValueError):
+        return None
+    if value == 1:
+        return None
+    return (MESSAGE_TYPE_LABELS.get(value)
+            or MESSAGE_TYPE_LABELS.get(value & 0xFFFFFFFF)
+            or UNKNOWN_MESSAGE_LABEL)
+
+
+def split_sender_prefix(text, username):
+    """切掉群消息正文前面的「发送者: 」前缀。
+
+    微信在群消息的 ``message_content`` 里把发送者名字也写在正文开头
+    （``wxid_xxx:\\n不是``）。发送者已经由 ``sender`` 单独给了，留在正文里只会让同一句话
+    既当发送者又出现在内容里 —— 界面上就成了 ``wxid_xxx:不是``。
+
+    只在**前缀正好等于发送者自己的 username** 时才切，所以"注意：\\n…"这类正常正文
+    不会被吃掉。不匹配时原样返回。
+    """
+    if not text or not username or not text.startswith(username):
+        return text
+    rest = text[len(username):]
+    if not rest.startswith(':'):
+        return text
+    body = rest[1:]
+    if body.startswith('\n'):
+        return body[1:]
+    return body.lstrip(' \t')
 
 
 def canonical_messages(messages):
@@ -480,15 +532,13 @@ class Worker:
                 continue
         return ''
 
-    # 非文本消息的占位说明。local_type 见微信 4.x：1 文本 / 3 图片 / 34 语音 /
-    # 43 视频 / 47 表情 / 48 位置 / 49 链接·文件·引用 / 50 通话 / 10000 系统提示。
-    _TYPE_LABELS = {3: '图片', 34: '语音', 43: '视频', 47: '表情', 48: '位置',
-                    49: '链接或文件', 50: '通话', 10000: '系统消息', 11000: '表情',
-                    8594229559345: '红包'}
-
-    def _message_row(self, row, sender_index, self_names):
+    def _message_row(self, row, sender_index, self_names, display=None):
         """一行消息记录 -> canonical 消息。row 顺序：
         local_id, local_type, sort_seq, real_sender_id, create_time, message_content
+
+        ``display`` 是 username -> 显示名（备注 > 昵称 > username）的映射。群消息的
+        ``real_sender_id`` 只解得出 wxid，界面上就是一串 ``wxid_75kre793tp3l22``，
+        所以这里换成显示名。
         """
         sender_id = row[3]
         sender_user = sender_index.get(int(sender_id), '') if sender_id is not None else ''
@@ -508,14 +558,18 @@ class Worker:
                 # 还没转过：**不等**，标一下让界面显示"转写中"，同时排进后台队列。
                 pending_voice = True
                 self._queue_voice(row[0])
+        # 群消息正文自己带着「发送者: 」前缀 —— 切掉。发送者单独给，同一句话不该既当
+        # 发送者又出现在正文里（界面上就是 ``wxid_75kre793tp3l22:不是``）。
+        text = split_sender_prefix(text, sender_user)
         if kind != 'text':
             # 图片/视频/文件的正文是一整段 XML 卡片或二进制残渣，别当正文用。旧逻辑漏在这：
             # 那段 XML 是合法可打印 UTF-8，所以"解出来非空就当正文"永远成立。
-            text = display_body(text, self._TYPE_LABELS.get(local_type) or ('类型' + kind))
+            text = display_body(text, message_type_label(local_type))
         return {
             'direction': 'outgoing' if mine else 'incoming',
             'content': text,
-            'sender': sender_user or '',
+            # 认不出显示名时退回 username 兜底（比空着强，但正常情况下 contact 表都有）。
+            'sender': (display or {}).get(sender_user) or sender_user or '',
             'type': kind,
             'at': row[4] or 0,
             'sort_seq': row[2] or 0,
@@ -567,7 +621,8 @@ class Worker:
             return empty
         index = self._sender_index(plain)
         self_names = self._account_names(plain)
-        display = self._display_map(plain).get(username, username)
+        display_map = self._display_map(plain)
+        display = display_map.get(username, username)
         table = 'Msg_' + hashlib.md5(username.encode('utf-8')).hexdigest()
         messages = []
         for db_file in self._msg_shards(plain):
@@ -578,7 +633,7 @@ class Worker:
                         f'SELECT local_id, local_type, sort_seq, real_sender_id, create_time, message_content '
                         f'FROM "{table}" ORDER BY sort_seq DESC LIMIT ?', (limit,)).fetchall()
                     for row in rows:
-                        messages.append(self._message_row(row, index, self_names))
+                        messages.append(self._message_row(row, index, self_names, display_map))
                 finally:
                     conn.close()
             except Exception:
@@ -654,7 +709,7 @@ class Worker:
                     except Exception:
                         continue
                     for row in rows2:
-                        collected[username].append(self._message_row(row, index, names))
+                        collected[username].append(self._message_row(row, index, names, display))
             finally:
                 conn.close()
 
@@ -763,7 +818,7 @@ class Worker:
         return {
             'direction': event.get('direction'),
             # 非文本事件的 text 是 XML 卡片时换成 [类型] 占位（见 display_body）。
-            'content': display_body(event.get('text'), kind, local_type),
+            'content': display_body(event.get('text'), message_type_label(local_type)),
             'sender': event.get('sender'),
             'type': kind,
             'at': int(event.get('create_time') or event.get('at') or 0),

@@ -12,7 +12,8 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from agent_worker.service import Worker, display_body, looks_like_markup, looks_like_noise
+from agent_worker.service import (Worker, display_body, looks_like_markup, looks_like_noise,
+                                 message_type_label, split_sender_prefix)
 
 
 IMAGE_XML = '<?xml version="1.0"?><msg><img hdlength="274437" length="0" md5=""/></msg>'
@@ -85,10 +86,10 @@ class WorkerDbWatchTests(unittest.TestCase):
         video['type'] = '视频'
         self.assertEqual(Worker._canonical(video)['content'], '[视频]')
 
-        # 类型名认不出时用 local_type 兜底，别漏出 XML，也别丢成空串
+        # 类型名认不出时给中性的「其他消息」，别漏出 XML，也别把类型号丢给用户
         odd = _event('person', 'outgoing', IMAGE_XML, local_type=4242)
         odd['type'] = 'unknown'
-        self.assertEqual(Worker._canonical(odd)['content'], '[类型4242]')
+        self.assertEqual(Worker._canonical(odd)['content'], '[其他消息]')
 
     def test_canonical_text_event_keeps_markup_like_body(self):
         """local_type 1 的正文一个字节都不许动 —— 包括真的以 < 开头的那种。"""
@@ -104,6 +105,11 @@ class WorkerDbWatchTests(unittest.TestCase):
         # 聊天里的 "<3" 不是 XML 起点
         self.assertFalse(looks_like_markup('<3 爱你'))
         self.assertFalse(looks_like_markup('3<5 怎么办'))
+        # 群消息的正形是「发送者:\n<XML>」—— markup 不在行首，只看行首会全漏
+        self.assertTrue(looks_like_markup('wxid_peer:\n' + IMAGE_XML))
+        self.assertTrue(looks_like_markup('25984985098572964@openim:\n<msg><appmsg/></msg>'))
+        self.assertFalse(looks_like_markup('注意:\n明天要开会'))
+        self.assertEqual(display_body('wxid_peer:\n' + IMAGE_XML, '图片'), '[图片]')
 
         self.assertEqual(display_body(IMAGE_XML, '图片'), '[图片]')
         self.assertEqual(display_body('[图片]', '图片'), '[图片]')
@@ -183,8 +189,67 @@ class WorkerDbWatchTests(unittest.TestCase):
 
     def test_message_row_unknown_media_type_still_gets_a_label(self):
         got = self.worker._message_row(self._row(4242, IMAGE_XML), {2: "wxid_me"}, {"wxid_me"})
-        self.assertEqual(got["content"], "[类型4242]")
+        # 中性标签，**不带类型号** —— 界面上不该出现 类型4242
+        self.assertEqual(got["content"], "[其他消息]")
         self.assertEqual(got["type"], "4242")
+
+    def test_message_type_label(self):
+        self.assertIsNone(message_type_label(1))                      # 文本没有标签
+        self.assertEqual(message_type_label(3), "图片")
+        self.assertEqual(message_type_label("34"), "语音")
+        self.assertEqual(message_type_label(47), "表情")
+        # app 消息：子类型在高 32 位，认低 32 位（49）
+        self.assertEqual(message_type_label(21474836529), "链接或文件")
+        self.assertEqual(message_type_label(244813135921), "链接或文件")
+        # 认不出就给中性的，绝不吐类型号
+        self.assertEqual(message_type_label(4242), "其他消息")
+        self.assertIsNone(message_type_label(None))
+        self.assertIsNone(message_type_label("不是数字"))
+
+    def test_message_row_app_message_subtype_is_labelled_not_numbered(self):
+        """local_type = (子类型 << 32) | 49 —— 实测群里那四个值都该给「链接或文件」，
+        而不是界面上那串 ``类型244813135921``。"""
+        for value in (21474836529, 201863462961, 244813135921, 270582939697):
+            got = self.worker._message_row(self._row(value, IMAGE_XML), {2: "wxid_peer"}, {"wxid_me"}, {})
+            self.assertEqual(got["content"], "[链接或文件]", value)
+            self.assertEqual(got["type"], str(value))
+
+    def test_message_row_uses_the_display_name_not_the_wxid(self):
+        """群消息的 real_sender_id 只解得出 wxid；界面上不能是一串 wxid。"""
+        got = self.worker._message_row(
+            self._row(1, "wxid_75kre793tp3l22:\n不是".encode("utf-8"), sender=27),
+            {27: "wxid_75kre793tp3l22"}, {"wxid_me"},
+            {"wxid_75kre793tp3l22": "Ray Tang"})
+        self.assertEqual(got["content"], "不是", "正文里的发送者前缀要切掉")
+        self.assertEqual(got["sender"], "Ray Tang")
+        self.assertEqual(got["direction"], "incoming")
+
+        # 卡片类消息的前缀是「名字: 」+ 空格 + XML
+        card = self.worker._message_row(
+            self._row(244813135921, "Hchunjun: <?xml version=\"1.0\"?><msg/>".encode("utf-8"), sender=26),
+            {26: "Hchunjun"}, {"wxid_me"}, {"Hchunjun": "H 老师"})
+        self.assertEqual(card["content"], "[链接或文件]")
+        self.assertEqual(card["sender"], "H 老师")
+
+    def test_message_row_falls_back_to_username_when_no_display_name(self):
+        got = self.worker._message_row(self._row(1, "在吗".encode("utf-8"), sender=9),
+                                       {9: "wxid_unknown"}, set(), {})
+        self.assertEqual(got["sender"], "wxid_unknown")
+
+    def test_message_row_keeps_text_that_merely_starts_with_a_word_and_colon(self):
+        """前缀只在等于发送者本人 username 时才切，"注意:\\n…"这种正常正文不许动。"""
+        body = "注意:\n明天要开会"
+        got = self.worker._message_row(self._row(1, body.encode("utf-8"), sender=9),
+                                       {9: "wxid_a"}, {"wxid_me"}, {})
+        self.assertEqual(got["content"], body)
+
+    def test_split_sender_prefix(self):
+        self.assertEqual(split_sender_prefix("wxid_a:\n不是", "wxid_a"), "不是")
+        self.assertEqual(split_sender_prefix('wxid_a: <msg/>', "wxid_a"), "<msg/>")
+        self.assertEqual(split_sender_prefix("注意:\n明天要开会", "wxid_a"), "注意:\n明天要开会")
+        self.assertEqual(split_sender_prefix("在吗", "wxid_a"), "在吗")
+        self.assertEqual(split_sender_prefix("", "wxid_a"), "")
+        self.assertEqual(split_sender_prefix("wxid_a:\n不是", ""), "wxid_a:\n不是")
 
     def test_message_row_text_is_untouched_even_when_it_looks_like_markup(self):
         body = '<?xml version="1.0"?> 是我手打的'
