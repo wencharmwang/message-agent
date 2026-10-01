@@ -149,6 +149,18 @@ test('消息时间精确到分钟，跨天有日期分隔', () => {
   assert.match(source, /h\(MessageDay,\{message,previous:messages\[index-1\]\}\)/);
 });
 
+test('群聊里标出发送者，单聊不重复标', () => {
+  const bubble = source.slice(source.indexOf('function MessageBubble('), source.indexOf('function ConversationTodos('));
+  // 正文开头原本那串「wxid_xxx:」前缀已经被切掉了（又丑又不该给用户看），
+  // 不在气泡上补回显示名，群里一整屏就看不出哪句是谁说的。
+  assert.match(bubble, /const who=group&&!mine&&message\.sender/);
+  assert.match(bubble, /\},who\):null/, '显示名挂在正文上方');
+  // 单聊靠左右对齐就够了；自己的消息靠右，也不用标自己名字。
+  assert.match(bubble, /group&&!mine&&message\.sender/, '自己的消息不标名字');
+  // 会话页知道自己是不是群，把 kind 传下去
+  assert.match(source, /h\(MessageBubble,\{message,group:kind==='group'\}\)/);
+});
+
 test('未完成的待办可以双击改文案、改到期时间', () => {
   const row = source.slice(source.indexOf('function TodoRow('), source.indexOf('function TodayPage('));
   // 双击标题进入编辑；做完的不开放（已经是记录，改它没意义）。

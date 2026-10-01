@@ -2031,7 +2031,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
             detail.loading?'正在读取…':'这段时间没有文字消息（可能都是图片、语音这类内容）。'),
           messages.map((message,index)=>h(React.Fragment,{key:String(message.sort_seq||index)},
             h(MessageDay,{message,previous:messages[index-1]}),
-            h(MessageBubble,{message})))),
+            h(MessageBubble,{message,group:kind==='group'})))),
         data&&h(ConversationTodos,{key:data.conversationKey,conversationKey:data.conversationKey,
           todos:data.todos,onChanged:detail.refresh})));
     return h('div',{style:{position:'relative',display:'flex',flexDirection:'column',height:'100%',width:'100%',minWidth:0}},
@@ -2061,13 +2061,18 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
   }
 
   /** 一条聊天气泡。自己的靠右、对方的靠左 —— 用对齐方向区分，不靠颜色单独承载语义。 */
-  function MessageBubble({message}){
+  function MessageBubble({message,group}){
     const mine=message.direction==='outgoing';
+    // 群聊里必须写明是谁说的：正文开头原本带着「wxid_xxx:」前缀（又丑又不该给用户看），
+    // 切掉之后如果不补回来，一整屏就完全看不出哪句是谁说的。单聊靠左右对齐就够了，
+    // 自己的消息也靠右对齐，都不用重复标名字。
+    const who=group&&!mine&&message.sender?message.sender:'';
     return h('div',{style:{display:'flex',justifyContent:mine?'flex-end':'flex-start',marginBottom:8}},
       h('div',{style:{maxWidth:'78%',minWidth:0,padding:'9px 12px',borderRadius:'var(--lg-r-lg)',
         fontSize:14,lineHeight:1.7,whiteSpace:'pre-wrap',wordBreak:'break-word',
         border:'1px solid '+(mine?'transparent':'var(--lg-card-line)'),
         backgroundColor:mine?'var(--ma-primary-soft)':FIELD_BG,color:C.text}},
+        who?h('span',{style:{display:'block',fontSize:12,color:C.text2,marginBottom:3,fontWeight:600}},who):null,
         message.content,
         // 语音还没转出来时**照样先把消息显示出来**（内容是 [语音]），只挂一句"转写中"——
         // 转写在后台排队做，页面不等它。等它写完，下次刷新这条就变成文字了。
