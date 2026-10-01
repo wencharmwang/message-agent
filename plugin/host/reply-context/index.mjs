@@ -153,8 +153,9 @@ export function renderContextPrompt({contextPack, evidenceCatalog = [], rule = {
     // 每条都带时间：模型必须能一眼看出"这句是几天前说的"。
     for (const m of recent) {
       const stamp = messageStamp(m.at, conv.at);
-      lines.push(stamp ? `${stamp} ${m.role === 'contact' ? '对方' : '我方'}：${m.text}`
-        : `[消息时间未知] ${m.role === 'contact' ? '对方' : '我方'}：${m.text}`);
+      // 群聊里带上是谁说的：不写名字，一整屏不同人的话就分不清该回谁。自己的消息是"我方"。
+      const who = m.role === 'contact' ? (m.speaker ? `对方（${m.speaker}）` : '对方') : '我方';
+      lines.push(stamp ? `${stamp} ${who}：${m.text}` : `[消息时间未知] ${who}：${m.text}`);
     }
   } else {
     lines.push('（空）');

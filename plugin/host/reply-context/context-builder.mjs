@@ -168,12 +168,18 @@ export function createContextBuilder({db, workspaceId = 'local', crm = null, res
     // 2. Current conversation snapshot (spec §5.5). The real observed messages win over the
     //    persistent Session's model memory; recent deliveries carry the send receipts.
     const messages = Array.isArray(contextData?.messages) ? contextData.messages : [];
+    // 群聊里「对方」是谁必须写出来：一整屏都是不同人的话，不写名字模型只能瞎猜该回谁。
+    // 单聊不给这个字段（写不写都不影响判断），这样既有的上下文哈希保持不变。
+    const isGroup = rule?.kind === 'group';
     const recent = messages.slice(-RECENT_MESSAGE_LIMIT).map(m => ({
       role: m.direction === 'incoming' ? 'contact' : 'sent',
       // 图片/视频/文件给占位符，不给 XML 卡片 —— 见 messageText。
       text: messageText(m),
       // 时间跟着消息一起给模型 —— 否则"什么时候说的"全靠猜（实测把几天前的话当成现在）。
-      at: Number(m.at) || 0
+      at: Number(m.at) || 0,
+      // 只有群聊**对方**的消息才写发送者：单聊写不写都不影响判断，自己的消息"我方"
+      // 已经说清了。这样既有的上下文哈希（去重/缓存都靠它）也保持不变。
+      speaker: isGroup && m.direction === 'incoming' ? String(m.sender ?? '').trim() : undefined
     }));
     const lastIncoming = [...messages].reverse().find(m => m.direction === 'incoming');
     // 最后一条是图片时，currentQuestion 是 "[图片]" 而不是一段 XML —— 它也参与意图判定。
