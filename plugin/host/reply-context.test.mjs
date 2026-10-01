@@ -4,6 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createReplyContextSystem, renderContextPrompt } from './reply-context/index.mjs';
+import { messageText } from './reply-context/context-builder.mjs';
 import { evaluateGate, detectRiskTags, classifyIntent } from './reply-context/risk-gate.mjs';
 import { createCrm } from './crm.mjs';
 
@@ -44,6 +45,115 @@ test('context: the real message snapshot is preserved even when the session is r
   assert.deepEqual(roles, ['contact', 'sent', 'contact']);
   assert.equal(run.contextPack.conversation.currentQuestion, '在吗');
   assert.equal(run.contextPack.conversation.recent.length, 3);
+});
+
+// ---- 非文本消息只给占位符（spec §5.5）----------------------------------------
+//
+// 线上真实事故：对方连发三条「为什么不回复」，而模型其实每轮都写了像样的回复 —— 只是
+// 发送被遮挡闸拦下。翻上下文时才发现，图片/视频消息的正文是一整段 XML，被原样喂给了模型。
+
+const IMAGE_XML = '<?xml version="1.0"?><msg><img hdlength="274437" length="0" '
+  + 'cdnthumbwidth="0" md5=""/><commenturl/></msg>';
+const VIDEO_XML = '<?xml version="1.0"?><msg><videomsg length="666709927" playlength="1667" '
+  + 'cameratype="2" cdnthumburl="" rawmd5=""/></msg>';
+const LINK_XML = '<?xml version="1.0"?><msg><appmsg><title>十一出行计划</title>'
+  + '<url>https://example.invalid/plan</url></appmsg></msg>';
+const FILE_XML = '<?xml version="1.0"?><msg><appmsg><title>报价单.pdf</title>'
+  + '<fileext>pdf</fileext><totallen>20480</totallen></appmsg></msg>';
+
+test('media: 图片/视频/语音按 type 换成占位符，三套词汇表都认', () => {
+  const cases = [
+    // watcher 事件用的中文类型名（自动回复走这条）
+    [{content: IMAGE_XML, type: '图片'}, '[图片]'],
+    [{content: VIDEO_XML, type: '视频'}, '[视频]'],
+    [{content: '<?xml version="1.0"?><msg><voicemsg length="3"/></msg>', type: '语音'}, '[语音]'],
+    [{content: '<?xml version="1.0"?><msg><emoji/></msg>', type: '动画表情'}, '[表情]'],
+    [{content: '<?xml version="1.0"?><msg><location/></msg>', type: '位置'}, '[位置]'],
+    [{content: '<?xml version="1.0"?><msg><voip/></msg>', type: '音视频通话'}, '[通话]'],
+    [{content: '<?xml version="1.0"?><msg><sysmsg/></msg>', type: '系统消息'}, '[系统消息]'],
+    // DB 行用的 local_type 数字字符串
+    [{content: IMAGE_XML, type: '3'}, '[图片]'],
+    [{content: VIDEO_XML, type: '43'}, '[视频]'],
+    // runtime 的 MessageType 枚举
+    [{content: IMAGE_XML, type: 'image'}, '[图片]'],
+    [{content: VIDEO_XML, type: 'video'}, '[视频]'],
+    // 正文本来就已是占位符 / 为空，别搞成 "[图片] [图片]"
+    [{content: '[图片]', type: '图片'}, '[图片]'],
+    [{content: '', type: '图片'}, '[图片]']
+  ];
+  for (const [message, expected] of cases) {
+    assert.equal(messageText(message), expected, JSON.stringify(message.type));
+  }
+});
+
+test('media: 文本正文一律原样，认不出的类型不误伤', () => {
+  assert.equal(messageText({content: '在吗', type: 'text'}), '在吗');
+  assert.equal(messageText({content: '在吗', type: '文本'}), '在吗');
+  // 有些路径不带 type
+  assert.equal(messageText({content: '在吗'}), '在吗');
+  assert.equal(messageText({content: '在吗', type: ''}), '在吗');
+  // 认不出的类型宁可放行，也不要把可能是真话的正文吃掉
+  assert.equal(messageText({content: '不认识的正文', type: '类型99999'}), '不认识的正文');
+  assert.equal(messageText({content: undefined, type: 'text'}), '');
+});
+
+test('media: 语音已转成文字时不会被占位符盖掉', () => {
+  // service.py 转写成功会把 type 改成 text、content 换成文字，这一条必须留住。
+  assert.equal(messageText({content: '晚上一起吃饭吗', type: 'text'}), '晚上一起吃饭吗');
+});
+
+test('cards: 链接/文件分辨得出来，标题带得走', () => {
+  assert.equal(messageText({content: LINK_XML, type: '文件/链接/卡片'}), '[链接] 十一出行计划');
+  assert.equal(messageText({content: FILE_XML, type: '文件/链接/卡片'}), '[文件] 报价单.pdf');
+  assert.equal(messageText({content: FILE_XML, type: '49'}), '[文件] 报价单.pdf');
+  // 认不出是链接还是文件：笼统标签，不猜
+  assert.equal(messageText({content: '<?xml version="1.0"?><msg><appmsg/></msg>', type: '文件/链接/卡片'}),
+    '[文件/链接]');
+  // 卡片正文已经是可读文本（decode 出来的标题/文件名）就不动它
+  assert.equal(messageText({content: '十一出行计划.pdf', type: '文件/链接/卡片'}), '十一出行计划.pdf');
+});
+
+test('media: 原始 XML 一个字节都不进 prompt，currentQuestion 也不是 XML', async () => {
+  const sys = makeSystem();
+  const messages = [
+    {direction: 'outgoing', content: IMAGE_XML, sender: null, type: '图片', at: 1790762400},
+    {direction: 'outgoing', content: VIDEO_XML, sender: null, type: '视频', at: 1790770680},
+    {direction: 'incoming', content: '发的什么东西', sender: null, type: 'text', at: 1790763963},
+    {direction: 'incoming', content: '为什么不回复', sender: null, type: 'text', at: 1790764239}
+  ];
+  const run = await sys.build(buildArgs({contextData: {messages}}));
+  assert.deepEqual(run.contextPack.conversation.recent.map(m => m.text),
+    ['[图片]', '[视频]', '发的什么东西', '为什么不回复']);
+  assert.equal(run.contextPack.conversation.currentQuestion, '为什么不回复');
+
+  const prompt = renderContextPrompt({contextPack: run.contextPack});
+  assert.doesNotMatch(prompt, /hdlength|videomsg|<\?xml|appmsg/, 'XML 不该出现在 prompt 里');
+  assert.match(prompt, /\[图片\]/);
+  assert.match(prompt, /\[视频\]/);
+});
+
+test('media: 最后一条是图片时 currentQuestion 是占位符，不是 XML', async () => {
+  const sys = makeSystem();
+  const run = await sys.build(buildArgs({contextData: {messages: [
+    {direction: 'incoming', content: '在吗', sender: null, type: 'text'},
+    {direction: 'incoming', content: IMAGE_XML, sender: null, type: '图片'}
+  ]}}));
+  assert.equal(run.contextPack.conversation.currentQuestion, '[图片]');
+  const prompt = renderContextPrompt({contextPack: run.contextPack});
+  assert.doesNotMatch(prompt, /hdlength|<\?xml/);
+});
+
+test('media: 占位符省下的预算让更多真实消息进得来', async () => {
+  const sys = makeSystem();
+  const messages = [
+    ...Array.from({length: 6}, () => ({direction: 'outgoing', content: IMAGE_XML, type: '图片'})),
+    ...Array.from({length: 6}, (_, i) => ({direction: 'incoming', content: '第' + (i + 1) + '句', type: 'text'}))
+  ];
+  const run = await sys.build(buildArgs({contextData: {messages}}));
+  // 12 条全在（RECENT_MESSAGE_LIMIT 内），且每条都短到不会把预算吃空
+  assert.equal(run.contextPack.conversation.recent.length, 12);
+  assert.deepEqual(run.contextPack.conversation.recent.slice(0, 6).map(m => m.text),
+    Array(6).fill('[图片]'));
 });
 
 test('context: identical input produces an identical context hash', async () => {

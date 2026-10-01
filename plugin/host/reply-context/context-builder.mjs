@@ -18,6 +18,69 @@ import { classifyIntent, detectRiskTags, DEFAULT_DECISION_POLICY } from './risk-
 
 const RECENT_MESSAGE_LIMIT = 12;
 
+// 非文本消息的正文是一整段可打印 XML 卡片（图片 / 视频 / 文件）。直接喂给模型没有意义：
+// 它只能从 hdlength、videomsg 这类字段反推"这是照片"，还白白吃掉 context 预算
+// （实测一条图片 ≈ 400 字符，一次快照能占掉 2 KB 以上）。所以按消息 type 换成占位符。
+//
+// type 的词汇表有三套，这里都认：
+//   - watcher 事件（自动回复走这条）：中文名 图片 / 视频 / 语音 / …
+//   - DB 行（首页、整理、会话详情）：local_type 的数字字符串 '3' / '43' / '49'
+//   - runtime 的 MessageType 枚举：image / video / file / audio / link / …
+// 认不出的类型原样放行 —— 宁可给一段怪文本，也不要把可能是真话的正文吃掉。
+const TEXT_TYPES = new Set(['', 'text', '文本']);
+
+const MEDIA_PLACEHOLDERS = new Map(Object.entries({
+  '图片': '[图片]', '3': '[图片]', image: '[图片]',
+  '视频': '[视频]', '43': '[视频]', video: '[视频]',
+  '语音': '[语音]', '34': '[语音]', audio: '[语音]',
+  '动画表情': '[表情]', '表情': '[表情]', '47': '[表情]', '11000': '[表情]',
+  '位置': '[位置]', '48': '[位置]', location: '[位置]',
+  '音视频通话': '[通话]', '50': '[通话]',
+  '系统消息': '[系统消息]', '10000': '[系统消息]', system: '[系统消息]',
+  '红包': '[红包]', '8594229559345': '[红包]'
+}));
+
+// 49 是把「文件 / 链接 / 卡片」混在一起的一类，所以要再从 XML 里认一下具体是哪种。
+const CARD_TYPES = new Set(['文件/链接/卡片', '链接或文件', '49', 'file', 'link']);
+
+/** 正文是不是一段 XML/blob，而不是人话。 */
+function looksLikeMarkup(text) {
+  const head = text.trimStart().slice(0, 200);
+  return head.startsWith('<') && /<\w+[\s/>]/.test(head);
+}
+
+/** 卡片是链接还是文件。认不出就退回笼统的「文件/链接」，不猜。 */
+function cardLabel(raw) {
+  if (/<url>/i.test(raw)) return '[链接]';
+  if (/<fileext>/i.test(raw) || /<totallen>/i.test(raw)) return '[文件]';
+  return '[文件/链接]';
+}
+
+/** 卡片标题：有标题比光一个占位符有用得多 —— 模型能说"看到你发的《XX》了"。 */
+function cardTitle(raw) {
+  const match = /<title>\s*(?:<!\[CDATA\[)?([\s\S]{1,80}?)(?:\]\]>)?\s*<\/title>/i.exec(raw);
+  if (!match) return '';
+  const title = match[1].trim();
+  return looksLikeMarkup(title) ? '' : title;
+}
+
+/**
+ * 一条消息给模型看的正文。文本原样；非文本按 type 换成占位符，不把 XML 卡片当正文。
+ * 导出是为了能单独测这条约定。
+ */
+export function messageText(message) {
+  const raw = typeof message?.content === 'string' ? message.content : '';
+  const type = typeof message?.type === 'string' ? message.type.trim() : '';
+  if (TEXT_TYPES.has(type)) return raw;
+  if (CARD_TYPES.has(type)) {
+    // 卡片正文有时已经是可读文本（标题、文件名、URL），那就留着。
+    if (raw && !looksLikeMarkup(raw)) return raw;
+    const title = cardTitle(raw);
+    return title ? cardLabel(raw) + ' ' + title : cardLabel(raw);
+  }
+  return MEDIA_PLACEHOLDERS.get(type) ?? raw;
+}
+
 function stableStringify(value) {
   const seen = new Set();
   const walk = v => {
@@ -93,12 +156,14 @@ export function createContextBuilder({db, workspaceId = 'local', crm = null, res
     const messages = Array.isArray(contextData?.messages) ? contextData.messages : [];
     const recent = messages.slice(-RECENT_MESSAGE_LIMIT).map(m => ({
       role: m.direction === 'incoming' ? 'contact' : 'sent',
-      text: typeof m.content === 'string' ? m.content : '',
+      // 图片/视频/文件给占位符，不给 XML 卡片 —— 见 messageText。
+      text: messageText(m),
       // 时间跟着消息一起给模型 —— 否则"什么时候说的"全靠猜（实测把几天前的话当成现在）。
       at: Number(m.at) || 0
     }));
     const lastIncoming = [...messages].reverse().find(m => m.direction === 'incoming');
-    const currentQuestion = lastIncoming && typeof lastIncoming.content === 'string' ? lastIncoming.content : '';
+    // 最后一条是图片时，currentQuestion 是 "[图片]" 而不是一段 XML —— 它也参与意图判定。
+    const currentQuestion = messageText(lastIncoming);
     const deliveries = (recentDeliveries ?? []).slice(0, 3).map(d => ({state: d.state ?? 'unknown', text: d.text ?? ''}));
 
     // 3. CRM projection + open loops (spec §5.3).
