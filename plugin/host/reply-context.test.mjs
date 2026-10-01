@@ -102,6 +102,20 @@ test('media: 语音已转成文字时不会被占位符盖掉', () => {
   assert.equal(messageText({content: '晚上一起吃饭吗', type: 'text'}), '晚上一起吃饭吗');
 });
 
+test('media: app 消息的复合 local_type 按低 32 位兜底', () => {
+  // local_type = (子类型 << 32) | 49；实测群里那四个值解压后 XML 的 <type> 是 5/47/57/63。
+  // 低 32 位是 49，属卡片类，所以给 [文件/链接] 而不是把 XML 原样漏出去。
+  for (const value of ['21474836529', '201863462961', '244813135921', '270582939697']) {
+    assert.equal(messageText({content: IMAGE_XML, type: value}), '[文件/链接]', value);
+  }
+  // 低 32 位是普通媒体类型时也认
+  assert.equal(messageText({content: IMAGE_XML, type: String((7 * 4294967296) + 3)}), '[图片]');
+  // 真正的简单类型字符串原本就认
+  assert.equal(messageText({content: VIDEO_XML, type: '43'}), '[视频]');
+  // 不是数字的怪类型仍然原样放行
+  assert.equal(messageText({content: '真话', type: '类型99999'}), '真话');
+});
+
 test('cards: 链接/文件分辨得出来，标题带得走', () => {
   assert.equal(messageText({content: LINK_XML, type: '文件/链接/卡片'}), '[链接] 十一出行计划');
   assert.equal(messageText({content: FILE_XML, type: '文件/链接/卡片'}), '[文件] 报价单.pdf');

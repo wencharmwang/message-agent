@@ -78,7 +78,21 @@ export function messageText(message) {
     const title = cardTitle(raw);
     return title ? cardLabel(raw) + ' ' + title : cardLabel(raw);
   }
-  return MEDIA_PLACEHOLDERS.get(type) ?? raw;
+  return MEDIA_PLACEHOLDERS.get(type) ?? mediaLabelByBase(type) ?? raw;
+}
+
+/**
+ * app 消息的 local_type 是复合的：``(子类型 << 32) | 49``。中文名和枚举名都查不到时，
+ * 再按低 32 位查一次，别让 ``244813135921`` 这种数字直接漏给模型。
+ */
+function mediaLabelByBase(type) {
+  if (!/^\d+$/.test(type)) return null;
+  const value = Number(type);
+  const base = value % 4294967296;
+  if (base === value) return null;
+  const key = String(base);
+  if (CARD_TYPES.has(key)) return '[文件/链接]';
+  return MEDIA_PLACEHOLDERS.get(key) ?? null;
 }
 
 function stableStringify(value) {
