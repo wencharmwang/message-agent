@@ -539,7 +539,7 @@ class Worker:
         local_id, local_type, sort_seq, real_sender_id, create_time, message_content
 
         ``display`` 是 username -> 显示名（备注 > 昵称 > username）的映射。群消息的
-        ``real_sender_id`` 只解得出 wxid，界面上就是一串 ``wxid_75kre793tp3l22``，
+        ``real_sender_id`` 只解得出 wxid，界面上就是一串 ``wxid_peer0001``，
         所以这里换成显示名。
         """
         sender_id = row[3]
@@ -565,7 +565,7 @@ class Worker:
                 pending_voice = True
                 self._queue_voice(row[0])
         # 群消息正文自己带着「发送者: 」前缀 —— 切掉。发送者单独给，同一句话不该既当
-        # 发送者又出现在正文里（界面上就是 ``wxid_75kre793tp3l22:不是``）。
+        # 发送者又出现在正文里（界面上就是 ``wxid_peer0001:不是``）。
         text = split_sender_prefix(text, sender_user)
         if kind != 'text':
             # 图片/视频/文件的正文是一整段 XML 卡片或二进制残渣，别当正文用。旧逻辑漏在这：

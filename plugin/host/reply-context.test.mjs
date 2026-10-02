@@ -414,14 +414,14 @@ test('memory: CRM projection carries stage, next step, note and open to-dos', as
 test('group: 群聊快照带上是谁说的，单聊不带（既有哈希不变）', async () => {
   const sys = makeSystem();
   const messages = [
-    {direction: 'incoming', content: '为什么不回复', sender: 'Ray Tang', type: 'text', at: 1790764239},
-    {direction: 'outgoing', content: '在的', sender: '小苦瓜゛', type: 'text', at: 1790764300}
+    {direction: 'incoming', content: '为什么不回复', sender: '同事甲', type: 'text', at: 1790764239},
+    {direction: 'outgoing', content: '在的', sender: '我自己', type: 'text', at: 1790764300}
   ];
 
   const direct = await sys.build(buildArgs({contextData: {messages}}));
   const directPrompt = renderContextPrompt({contextPack: direct.contextPack});
   assert.match(directPrompt, /对方：为什么不回复/);
-  assert.doesNotMatch(directPrompt, /Ray Tang/, '单聊不用写名字');
+  assert.doesNotMatch(directPrompt, /同事甲/, '单聊不用写名字');
   // 单聊不给 speaker 字段，既有的上下文哈希（去重/缓存都靠它）保持不变
   assert.equal(direct.contextPack.conversation.recent[0].speaker, undefined);
 
@@ -430,7 +430,7 @@ test('group: 群聊快照带上是谁说的，单聊不带（既有哈希不变�
     contextData: {messages}
   }));
   const groupPrompt = renderContextPrompt({contextPack: group.contextPack});
-  assert.match(groupPrompt, /对方（Ray Tang）：为什么不回复/);
+  assert.match(groupPrompt, /对方（同事甲）：为什么不回复/);
   assert.match(groupPrompt, /我方：在的/, '自己的消息不用挂名字');
   assert.notEqual(group.contextHash, direct.contextHash);
 });

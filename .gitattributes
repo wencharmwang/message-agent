@@ -1,0 +1,22 @@
+# 跨平台换行：仓库里统一按内容判定并**存 LF**，检出时再按平台转。
+# 不写这份的话，同一份代码在 Windows（工作区 CRLF）和 macOS 之间来回克隆会产生
+# 整仓库级别的假 diff —— 换机器第一件事就会撞上。
+* text=auto
+
+# Windows 脚本保持 CRLF：PowerShell 对 LF 的 .ps1 容忍度并不一致。
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 真二进制，别做任何行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.dylib binary
+*.so binary
+*.zip binary
+*.db binary

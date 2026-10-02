@@ -108,7 +108,7 @@ class WorkerDbWatchTests(unittest.TestCase):
         self.assertFalse(looks_like_markup('3<5 怎么办'))
         # 群消息的正形是「发送者:\n<XML>」—— markup 不在行首，只看行首会全漏
         self.assertTrue(looks_like_markup('wxid_peer:\n' + IMAGE_XML))
-        self.assertTrue(looks_like_markup('25984985098572964@openim:\n<msg><appmsg/></msg>'))
+        self.assertTrue(looks_like_markup('12345678901234@openim:\n<msg><appmsg/></msg>'))
         self.assertFalse(looks_like_markup('注意:\n明天要开会'))
         self.assertEqual(display_body('wxid_peer:\n' + IMAGE_XML, '图片'), '[图片]')
 
@@ -218,19 +218,19 @@ class WorkerDbWatchTests(unittest.TestCase):
     def test_message_row_uses_the_display_name_not_the_wxid(self):
         """群消息的 real_sender_id 只解得出 wxid；界面上不能是一串 wxid。"""
         got = self.worker._message_row(
-            self._row(1, "wxid_75kre793tp3l22:\n不是".encode("utf-8"), sender=27),
-            {27: "wxid_75kre793tp3l22"}, {"wxid_me"},
-            {"wxid_75kre793tp3l22": "Ray Tang"})
+            self._row(1, "wxid_peer0001:\n不是".encode("utf-8"), sender=27),
+            {27: "wxid_peer0001"}, {"wxid_me"},
+            {"wxid_peer0001": "同事甲"})
         self.assertEqual(got["content"], "不是", "正文里的发送者前缀要切掉")
-        self.assertEqual(got["sender"], "Ray Tang")
+        self.assertEqual(got["sender"], "同事甲")
         self.assertEqual(got["direction"], "incoming")
 
         # 卡片类消息的前缀是「名字: 」+ 空格 + XML
         card = self.worker._message_row(
-            self._row(244813135921, "Hchunjun: <?xml version=\"1.0\"?><msg/>".encode("utf-8"), sender=26),
-            {26: "Hchunjun"}, {"wxid_me"}, {"Hchunjun": "H 老师"})
+            self._row(244813135921, "member_two: <?xml version=\"1.0\"?><msg/>".encode("utf-8"), sender=26),
+            {26: "member_two"}, {"wxid_me"}, {"member_two": "同事乙"})
         self.assertEqual(card["content"], "[链接或文件]")
-        self.assertEqual(card["sender"], "H 老师")
+        self.assertEqual(card["sender"], "同事乙")
 
     def test_message_row_falls_back_to_username_when_no_display_name(self):
         got = self.worker._message_row(self._row(1, "在吗".encode("utf-8"), sender=9),
