@@ -1,8 +1,15 @@
-"""Start the shared local MCP host once, without opening a console window."""
+"""Start the shared local MCP host once, without opening a console window.
+
+**平台说明**：Windows 侧用 Job Object 保证"停掉计划任务就连带停掉 host 与 OCR 后代进程"。
+其它平台没有 Job Object（macOS 的对应物是进程组 / launchd），这里整体降级为空操作，
+让上层不用分平台写两套。
+
+（原来顶部有一句 `import msvcrt`，而且根本没用上 —— 但 `launch.py` 是无条件 import
+本模块的，于是那一句会让整个启动路径在 macOS 上**连 import 都过不去**。）
+"""
 import json
 import ctypes
 from ctypes import wintypes
-import msvcrt
 import os
 from pathlib import Path
 import subprocess
@@ -10,6 +17,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+IS_WINDOWS = os.name == 'nt'
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / '.runtime-data'
@@ -34,6 +43,13 @@ class ExtendedLimitInformation(ctypes.Structure):
                 ('PeakProcessMemoryUsed',ctypes.c_size_t),('PeakJobMemoryUsed',ctypes.c_size_t)]
 
 def create_supervisor_job():
+    """建一个"句柄一关就带走整棵子进程树"的 Job Object。
+
+    非 Windows 返回 ``None`` —— 上层用 ``SUPERVISOR_JOB is None`` 判断即可，
+    不用自己分平台。``ctypes.WinDLL`` 在 macOS 上根本不存在，所以这里必须先挡一道。
+    """
+    if not IS_WINDOWS:
+        return None
     kernel=ctypes.WinDLL('kernel32',use_last_error=True)
     kernel.CreateJobObjectW.argtypes=[ctypes.c_void_p,wintypes.LPCWSTR]
     kernel.CreateJobObjectW.restype=wintypes.HANDLE
@@ -46,7 +62,7 @@ def create_supervisor_job():
     return handle
 
 def supervise_child(process):
-    if SUPERVISOR_JOB is None:
+    if not IS_WINDOWS or SUPERVISOR_JOB is None:
         return
     kernel=ctypes.WinDLL('kernel32',use_last_error=True)
     kernel.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]

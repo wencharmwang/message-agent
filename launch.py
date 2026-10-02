@@ -11,6 +11,10 @@ from agent_worker.decision import read_dotenv
 
 ROOT = Path(__file__).resolve().parent
 
+# 非 Windows 上没有这个常量：直接写 `subprocess.CREATE_NO_WINDOW` 会在 macOS 上报
+# AttributeError，而这是启动路径上第一行 Popen —— 等于一开就死。
+NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+
 # 宿主（产品）侧的约定，和 wechat-db-lab 的 vault.memory_scan_allowed() 对应。
 NO_SCAN_ENV = 'WECHAT_DB_LAB_NO_SCAN'
 # "用户已经授权扫一次"的标记文件：由 packaging/读取微信密钥.ps1 在一次授权动作里写入，
@@ -88,7 +92,7 @@ def main():
     log = open(log_path, 'a', encoding='utf-8')
     command = [config['node_executable'],'--import',(ROOT/'node-bootstrap.mjs').as_uri(),'--import','tsx/esm',str(Path(config['harness_root'])/'apps/cli/src/bin.ts'),
                '--profile','web','--patch',str(ROOT/'web.patch.yml'),'--port',str(config['harness_port']),'--no-open']
-    host = subprocess.Popen(command,cwd=config['harness_root'],env=env,stdout=log,stderr=log,creationflags=subprocess.CREATE_NO_WINDOW)
+    host = subprocess.Popen(command,cwd=config['harness_root'],env=env,stdout=log,stderr=log,creationflags=NO_WINDOW)
     # The TCP listener opens before the message plugin finishes loading. Do not
     # start the worker until its private job route is actually ready.
     health_token = Path(config['control_token_file']).read_text().strip()
@@ -138,7 +142,7 @@ def main():
         except OSError:
             pass
     worker = subprocess.Popen([sys.executable,'-m','agent_worker','--config',str(config_path)],cwd=ROOT,
-                              env=worker_env, stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW)
+                              env=worker_env, stdout=log, stderr=log, creationflags=NO_WINDOW)
     try:
         while host.poll() is None and worker.poll() is None:
             time.sleep(1)
