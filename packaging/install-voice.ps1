@@ -67,8 +67,11 @@ Say '  pip 就绪' 'Green'
 
 # ---- 2) 装 faster-whisper 到独立目录 --------------------------------------
 Say '--- 安装识别引擎（faster-whisper）---' 'DarkGray'
+# **必须钉版本**：faster-whisper 1.2.1 调的是 av.open(..., metadata_errors="ignore")，
+# 而 av 19 把这个参数去掉了 —— 裸装最新版会得到一个"模型能载入、一读音频就 TypeError"
+# 的环境（2026-10-02 实测：每条语音都转不出来，界面只显示"正在转文字"，看起来像服务没启动）。
 & $python -m pip install --disable-pip-version-check --no-warn-script-location `
-  --target $libDir faster-whisper *>> (Join-Path $voiceDir 'install.log')
+  --target $libDir "faster-whisper==1.2.1" "av<19" *>> (Join-Path $voiceDir 'install.log')
 if ($LASTEXITCODE -ne 0) { Say '  安装失败（看 voice\install.log）。' 'Red'; exit 1 }
 Say '  识别引擎装好了' 'Green'
 

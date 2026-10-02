@@ -354,6 +354,8 @@ class Worker:
         self._voice_failed = set()
         self._voice_daemon = None
         self._voice_stop = threading.Event()
+        # 转写能力状态（开关 + 识别装没装）的短缓存：见 _voice_ready。
+        self._voice_ready_cache = None
         self._voice_thread = threading.Thread(target=self._voice_worker, daemon=True,
                                               name='voice-transcribe')
         self._voice_thread.start()
@@ -554,8 +556,12 @@ class Worker:
             if spoken:
                 text = spoken
                 kind = 'text'
-            else:
+            elif self._voice_ready() and self._voice_key(row[0]) not in self._voice_failed:
                 # 还没转过：**不等**，标一下让界面显示"转写中"，同时排进后台队列。
+                #
+                # 这个条件不能省：识别没装、开关没开、或这条已经转失败过，界面就不该再说
+                # "正在这台电脑上转成文字…" —— 那是**永远**不会发生的，用户会以为服务没启动
+                # （实测就是这么以为的）。这种情况老老实实显示 [语音]。
                 pending_voice = True
                 self._queue_voice(row[0])
         # 群消息正文自己带着「发送者: 」前缀 —— 切掉。发送者单独给，同一句话不该既当
@@ -936,15 +942,43 @@ class Worker:
             return ''
         return self.voice_text(event.get('local_id'))
 
+    @staticmethod
+    def _voice_key(local_id):
+        """消息号 -> 转写缓存的键；不是数字就返回 None。"""
+        try:
+            return int(local_id)
+        except (TypeError, ValueError):
+            return None
+
+    def _voice_ready(self):
+        """这台电脑现在能不能转语音（开关开着 **且** 识别真的装好了）。
+
+        ``pending_voice`` 必须挂这个判断 —— 否则识别坏了也一直显示"正在转写"，
+        看起来就像服务没启动。结果按要求缓存 5 秒：一条会话要过几百条消息，
+        不该每条都去 stat 一遍那几个路径。
+        """
+        now = time.time()
+        if self._voice_ready_cache is not None and now - self._voice_ready_cache[0] < 5:
+            return self._voice_ready_cache[1]
+        ready = False
+        try:
+            prefs = voice.load_prefs(self._data_dir())
+            app_root = self.config.get('app_root') or Path(__file__).resolve().parent.parent
+            ready = (prefs.get('enabled') is True
+                     and voice.available(self._data_dir(), app_root)['transcriber'])
+        except Exception:
+            ready = False
+        self._voice_ready_cache = (now, ready)
+        return ready
+
     def _queue_voice(self, local_id):
         """把一条待转写的语音排进后台队列。
 
         去重 + 上限：一次读十几条语音、或者用户反复刷新，都不该堆成一座山；
         失败过的也不再排（省得一直重试烧 CPU）。
         """
-        try:
-            key = int(local_id)
-        except (TypeError, ValueError):
+        key = self._voice_key(local_id)
+        if key is None:
             return
         if key in self._voice_pending or key in self._voice_failed:
             return

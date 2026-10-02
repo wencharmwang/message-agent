@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from unittest import mock
@@ -268,8 +269,10 @@ class WorkerDbWatchTests(unittest.TestCase):
         self.assertEqual(got["type"], "text")
 
     def test_message_row_voice_without_transcript_falls_back_to_placeholder(self):
-        with mock.patch("agent_worker.service.voice.cached_only", return_value=None), \
-                mock.patch.object(self.worker, "_queue_voice"):
+        # 能不能转由 _voice_ready 决定（有单独用例钉住）；这里只验占位符与排队标记。
+        self.worker._voice_ready = lambda: True
+        self.worker._queue_voice = lambda local_id: None
+        with mock.patch("agent_worker.service.voice.cached_only", return_value=None):
             got = self.worker._message_row(self._row(34, IMAGE_XML), {2: "wxid_me"}, {"wxid_me"})
         self.assertEqual(got["content"], "[语音]")
         self.assertEqual(got["type"], "34")
@@ -379,6 +382,10 @@ class VoiceWiringTests(WorkerDbWatchTests):
         from agent_worker import service
         self.assertTrue(hasattr(service, 'voice'), 'service.py 少了 `from . import voice`')
 
+    def _voice_row(self, local_id):
+        """一条语音消息行（local_type 34）。用 900+ 的号避开真实缓存。"""
+        return self._row(34, b"\xff\xfe" * 20, local_id=local_id)
+
     def test_worker_reports_why_a_transcript_failed(self):
         from agent_worker import voice as voice_module
         # 开关打开，但把"读偏好"弄坏：必须留下原因，而不是静默返回空
@@ -401,6 +408,110 @@ class VoiceWiringTests(WorkerDbWatchTests):
         finally:
             voice_module.voice_python = original
 
+
+    def test_pending_flag_is_honest_when_transcription_cannot_happen(self):
+        """识别没装、开关没开 —— 界面就不该再说"正在转写"。
+
+        真实反馈："一直显示正在转文字，是不是服务没有启动？" 其实转写环境早就坏了，
+        而卡片上那句"正在这台电脑上转成文字…"是**永远**不会兑现的。
+        """
+        queued = []
+        self.worker._queue_voice = queued.append
+        self.worker._voice_ready = lambda: False
+        got = self.worker._message_row(self._voice_row(900), {2: "wxid_me"}, {"wxid_me"}, {})
+        self.assertFalse(got["pending_voice"])
+        self.assertEqual(got["content"], "[语音]")
+        self.assertEqual(queued, [], "不可能转的时候不该排队")
+
+    def test_pending_flag_clears_after_a_failed_attempt(self):
+        queued = []
+        self.worker._queue_voice = queued.append
+        self.worker._voice_ready = lambda: True
+        self.worker._voice_failed.add(901)
+        got = self.worker._message_row(self._voice_row(901), {2: "wxid_me"}, {"wxid_me"}, {})
+        self.assertFalse(got["pending_voice"], "失败过的别一直挂着'正在转写'")
+        self.assertEqual(queued, [])
+
+    def test_pending_flag_is_true_and_queued_when_it_can_really_run(self):
+        queued = []
+        self.worker._queue_voice = queued.append
+        self.worker._voice_ready = lambda: True
+        got = self.worker._message_row(self._voice_row(902), {2: "wxid_me"}, {"wxid_me"}, {})
+        self.assertTrue(got["pending_voice"])
+        self.assertEqual(queued, [902])
+
+    def test_model_cache_is_recognised(self):
+        """模型已在本地就离线跑 —— 否则 huggingface_hub 会先联网解析仓库（代理下 502），
+        "模型早下好了"却每条语音都转不出来。"""
+        from agent_worker import voice as voice_module
+        with tempfile.TemporaryDirectory() as tmp:
+            snap = (Path(tmp) / "hub" / "models--Systran--faster-whisper-small"
+                    / "snapshots" / "rev1")
+            snap.mkdir(parents=True)
+            (snap / "model.bin").write_bytes(b"x")
+            original = os.environ.get("HF_HOME")
+            os.environ["HF_HOME"] = tmp
+            try:
+                self.assertTrue(voice_module.model_cached("small"))
+                self.assertFalse(voice_module.model_cached("large-v3"))
+            finally:
+                if original is None:
+                    os.environ.pop("HF_HOME", None)
+                else:
+                    os.environ["HF_HOME"] = original
+
+    def test_available_rejects_a_venv_missing_pyvenv_cfg(self):
+        """``Scripts/python.exe`` 还在、但 ``pyvenv.cfg`` 被删掉的 venv **不能用**。
+
+        设置页原来只看文件在不在，坏了也显示"已装"（2026-10-02 实测），
+        得和 worker 的 ``voice._runtime_usable`` 对齐。
+        """
+        from agent_worker import voice as voice_module
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            venv = data / "voice" / "venv"
+            (venv / "Scripts").mkdir(parents=True)
+            (venv / "Scripts" / "python.exe").write_bytes(b"")
+            (venv / "Lib" / "site-packages" / "faster_whisper").mkdir(parents=True)
+            self.assertIsNotNone(voice_module.voice_python(data))
+            self.assertFalse(voice_module.available(data, tmp)["transcriber"],
+                             "少了 pyvenv.cfg 的解释器起不来，不能算装好了")
+            (venv / "pyvenv.cfg").write_text("home = x", encoding="utf-8")
+            self.assertTrue(voice_module.available(data, tmp)["transcriber"])
+
+    def test_new_wechat_silk_header_is_accepted(self):
+        """微信 4.x 新录的语音头字节是 ``\\x03``，老的是 ``\\x02``，后面 9 字节一样。
+
+        原样把 ``\\x03`` 喂给解码器会**静默产出 0 字节 PCM**（退出码还是 0），所以必须
+        自己先把首字节改回 ``\\x02``。修之前这些语音永远转不出文字，而且没有任何报错。
+        """
+        from agent_worker import voice as voice_module
+        body = b'#!SILK_V3' + b'\x00' * 40
+        self.assertEqual(voice_module.normalize_silk(b'\x02' + body), b'\x02' + body)
+        self.assertEqual(voice_module.normalize_silk(b'\x03' + body), b'\x02' + body)
+        for bad in (b'RIFF' + body, b'', b'\x02'):
+            with self.assertRaises(voice_module.VoiceError):
+                voice_module.normalize_silk(bad)
+
+    def test_cached_transcript_does_not_swallow_the_reason(self):
+        """转写失败必须把原因抛出去 —— 调用方要写进 last_voice_error。
+
+        原来这里是 `except Exception: return ''`，于是"不是 SILK 格式"这类真原因被吃掉，
+        用户只看到语音永远不出文字，只能猜"是不是服务没启动"。
+        """
+        from agent_worker import voice as voice_module
+        with tempfile.TemporaryDirectory() as tmp:
+            def boom():
+                raise voice_module.VoiceError('解码器不给力')
+            with self.assertRaises(voice_module.VoiceError):
+                voice_module.cached_transcript(tmp, 12345, boom)
+            # 缓存命中的时候照旧直接返回，不跑 producer
+            cache = Path(tmp) / 'voice' / 'cache'
+            cache.mkdir(parents=True)
+            (cache / '12345.txt').write_text('已经转过', encoding='utf-8')
+            self.assertEqual(
+                voice_module.cached_transcript(tmp, 12345, lambda: self.fail('不该重跑')),
+                '已经转过')
 
     def test_reading_messages_never_waits_for_transcription(self):
         """读消息**绝不能**在请求里转写。

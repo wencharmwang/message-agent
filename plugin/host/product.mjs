@@ -1016,15 +1016,22 @@ export function createProductApi({config, token, runtime: runtimeInjected, conve
     const hasFile = relative => roots.some(root => existsSync(join(root, relative)));
     const decoder = hasFile(join('components', 'silk', 'silk-decoder-x64.exe'))
       || hasFile(join('packaging', 'components', 'silk', 'silk-decoder-x64.exe'));
-    const transcriber = existsSync(join(dataDir, 'voice', 'lib'))
-      || existsSync(join(dataDir, 'voice', 'venv', 'Scripts', 'python.exe'));
+    // 「装没装」不能只看目录在不在：实测 venv 少了 pyvenv.cfg（被临时目录清理删掉）之后，
+    // Scripts/python.exe 还在、界面照旧显示"已装"，而每条语音都转不出来 —— 用户看到的是
+    // "一直正在转文字"，完全没线索。所以要和 worker 侧的 voice._runtime_usable 对齐：
+    // venv 布局连 pyvenv.cfg 和 faster_whisper 一起确认。
+    const voiceDir = join(dataDir, 'voice');
+    const venvRoot = join(voiceDir, 'venv');
+    const transcriber = (existsSync(join(venvRoot, 'pyvenv.cfg'))
+        && existsSync(join(venvRoot, 'Lib', 'site-packages', 'faster_whisper')))
+      || existsSync(join(voiceDir, 'lib', 'faster_whisper'));
     const prefs = voicePrefs();
     return {
       ...prefs, decoder, transcriber,
       // 开了开关但没装 = 不会生效，界面要直说，别让用户以为开了就行
       active: prefs.enabled && decoder && transcriber,
       hint: !transcriber
-        ? '还没有装识别环境。右键运行安装目录里的 install-voice.ps1（约 470 MB，只下一次）。'
+        ? '还没有装识别环境（或者装坏了）。右键运行安装目录里的 install-voice.ps1 可以装/重装（约 470 MB，只下一次）。'
         : (!decoder ? '缺少语音解码组件，重新装一次消息助手可以补上。' : '')
     };
   };

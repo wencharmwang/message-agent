@@ -56,14 +56,31 @@ def decoder_path(app_root: str | Path) -> Path | None:
     return None
 
 
+SILK_HEADER = b'#!SILK_V3'
+
+
+def normalize_silk(blob: bytes) -> bytes:
+    """把语音字节流统一成解码器认的 ``\\x02#!SILK_V3``；不是 SILK 就抛 VoiceError。
+
+    微信 4.x 新录的语音**头一个字节是 ``\\x03``**，老的是 ``\\x02``，后面 9 字节完全一样
+    （``#!SILK_V3``）。解码器只认 ``\\x02``，而且原样喂 ``\\x03`` 时它**退出码 0、产出
+    0 字节 PCM** —— 不报错、也不知道为什么没声音（2026-10-02 实测：改回首字节就解出
+    13.24 秒正常 PCM）。所以这一步必须自己做，不能指望解码器报错。
+    """
+    if not blob:
+        raise VoiceError('这段语音是空的')
+    if blob[1:10] != SILK_HEADER:
+        # 真的不是 SILK（老版本微信可能是 AMR/其他），交给调用方按"读不到"处理
+        raise VoiceError('这段语音不是 SILK 格式')
+    return b'\x02' + blob[1:]
+
+
 def silk_to_wav(blob: bytes, out_path: str | Path, app_root: str | Path, timeout: int = 30) -> Path:
     """SILK 字节流 -> WAV 文件。失败抛 VoiceError（调用方据此退回到"读不到内容"的说明）。"""
     exe = decoder_path(app_root)
     if exe is None:
         raise VoiceError('找不到语音解码组件')
-    if not blob or not blob.startswith(b'\x02#!SILK_V3'):
-        # 不是 SILK_V3 流（老版本微信可能是 AMR/其他），交给调用方按"读不到"处理
-        raise VoiceError('这段语音不是 SILK 格式')
+    blob = normalize_silk(blob)
 
     work = Path(tempfile.mkdtemp(prefix='ma-voice-'))
     silk = work / 'in.silk'
@@ -123,6 +140,11 @@ def transcribe(wav_path: str | Path, python_exe: str, model: str = DEFAULT_MODEL
     # （同一个坑在 watcher_source.py 里踩过一次，注释还在那儿。）
     env['PYTHONUTF8'] = '1'
     env['PYTHONIOENCODING'] = 'utf-8'
+    if model_cached(model):
+        # 模型已经在本地了就直接离线跑。实测踩过：huggingface_hub 会**先联网解析仓库**，
+        # 而这台机器走代理时那一步会 502 —— "模型早下好了"却每条语音都转不出来。
+        # 设置页本来就写着"在这台电脑上转，不联网"，本来也不该联网。
+        env['HF_HUB_OFFLINE'] = '1'
     if lib_dir:
         # 依赖装在独立目录里（自带 Python 是 embeddable 版，没有 site-packages），
         # 靠 PYTHONPATH 让它能被 import。
@@ -155,13 +177,51 @@ def voice_python(data_dir: str | Path) -> Path | None:
     return None
 
 
+def _hf_hub_dir() -> Path:
+    """huggingface_hub 的本地缓存根 —— 模型就放在它下面。"""
+    home = os.environ.get('HF_HOME')
+    return (Path(home) / 'hub') if home else (Path.home() / '.cache' / 'huggingface' / 'hub')
+
+
+def model_cached(model: str) -> bool:
+    """这个模型本地是不是已经下好了。"""
+    name = model if '/' in model else 'Systran/faster-whisper-' + model
+    snapshots = _hf_hub_dir() / ('models--' + name.replace('/', '--')) / 'snapshots'
+    if not snapshots.is_dir():
+        return False
+    try:
+        return any((item / 'model.bin').exists() for item in snapshots.iterdir())
+    except OSError:
+        return False
+
+
+def _runtime_usable(runtime) -> bool:
+    """识别环境是不是真能用。
+
+    光看"目录在不在"不够：实测 venv 的被临时目录清理删掉 ``pyvenv.cfg`` 之后，
+    ``Scripts/python.exe`` 还在、设置页照旧显示"已装"，而**每条语音都转不出来**，
+    用户看到的就是"一直正在转文字"，毫无线索。所以这里查得实一点。
+    """
+    python_exe, lib_dir = runtime
+    root = Path(python_exe).parent.parent
+    packages = Path(lib_dir) if lib_dir else root / 'Lib' / 'site-packages'
+    try:
+        if lib_dir is None and not (root / 'pyvenv.cfg').exists():
+            return False          # venv 少了 pyvenv.cfg，解释器根本起不来
+        return (packages / 'faster_whisper').is_dir()
+    except OSError:
+        return False
+
+
 def available(data_dir: str | Path, app_root: str | Path) -> dict:
-    """给界面/设置用的状态：解码器在不在、识别装没装。"""
+    """给界面/设置用的状态：解码器在不在、识别装没装、模型在不在本地。"""
+    runtime = voice_python(data_dir)
     return {
         'decoder': decoder_path(app_root) is not None,
-        'transcriber': voice_python(data_dir) is not None,
-        'lib': str(Path(data_dir) / 'voice' / 'lib'),
+        'transcriber': runtime is not None and _runtime_usable(runtime),
         'model': DEFAULT_MODEL,
+        'model_cached': model_cached(DEFAULT_MODEL),
+        'lib': str(Path(data_dir) / 'voice' / 'lib'),
     }
 
 
@@ -214,13 +274,15 @@ def cached_transcript(data_dir: str | Path, key: str, producer) -> str:
     target = cache / (str(key) + '.txt')
     try:
         if target.exists():
-            return io.open(target, encoding='utf-8').read().strip()
+            # 用 with：`io.open(...).read()` 会把句柄留到 GC，Windows 上会锁住文件。
+            with io.open(target, encoding='utf-8') as handle:
+                return handle.read().strip()
     except OSError:
         pass
-    try:
-        text = (producer() or '').strip()
-    except Exception:
-        return ''
+    # 失败**不吞**：调用方（voice_text）会记进 last_voice_error，界面和模型才拿得到
+    # "为什么没转出来"。原来这里是 `except Exception: return ''` —— "这段语音不是 SILK
+    # 格式"这类真原因被吃掉，用户只看到语音永远不出文字（2026-10-02 实测踩到）。
+    text = (producer() or '').strip()
     if text:
         try:
             cache.mkdir(parents=True, exist_ok=True)
@@ -254,6 +316,9 @@ class Daemon:
         env['PYTHONUTF8'] = '1'
         env['PYTHONIOENCODING'] = 'utf-8'
         env['MA_VOICE_MODEL'] = self.model
+        if model_cached(self.model):
+            # 同 transcribe：模型在本地就离线跑，别先去联网解析仓库（代理下会 502）。
+            env['HF_HUB_OFFLINE'] = '1'
         if self.lib_dir:
             env['PYTHONPATH'] = self.lib_dir + os.pathsep + env.get('PYTHONPATH', '')
         return env
@@ -343,7 +408,9 @@ def cached_only(data_dir: str | Path, key) -> str:
     target = Path(data_dir) / 'voice' / 'cache' / (str(key) + '.txt')
     try:
         if target.exists():
-            return io.open(target, encoding='utf-8').read().strip()
+            # 用 with：`io.open(...).read()` 会把句柄留到 GC，Windows 上会锁住文件。
+            with io.open(target, encoding='utf-8') as handle:
+                return handle.read().strip()
     except OSError:
         pass
     return ''
