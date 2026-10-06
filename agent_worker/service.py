@@ -342,7 +342,7 @@ HISTORY_LIMIT = 60  # 每个会话在内存里保留的上下文条数
 
 
 class Worker:
-    def __init__(self, config, mcp=None, harness=None):
+    def __init__(self, config, mcp=None, harness=None, harness_factory=None):
         self.config = config
         self.store = Store(config['database'])
         self.mcp = mcp or Mcp(config['runtime_settings_file'], config['worker_token_file'])
@@ -360,7 +360,15 @@ class Worker:
                                               name='voice-transcribe')
         self._voice_thread.start()
         self.harness = harness or Harness(config)
+        # 生成线程用哪个客户端：默认**每个线程新建一个**（见 _generation_loop 的说明）。
+        # 单测注入一个工厂，好把"真的并发了几个"观察出来。
+        self._harness_factory = harness_factory or (lambda: harness or Harness(config))
         self.stop = threading.Event()
+        # 生成线程池：模型调用可以并发（不同会话互不影响），发送仍然串行。
+        # 线程**不在这里启动** —— 单测与 smoke 直接调 tick()/process() 要的是确定性行为，
+        # 后台线程会去抢 job。只有 run() 才启动真实并发。
+        self._generation_threads = []
+        self._generation_stop = threading.Event()
         self.last_error = ''
         self.started_at = time.time()
         self.watcher = None          # WatcherSource，懒加载
@@ -807,6 +815,8 @@ class Worker:
             return self.watcher
 
     def close(self):
+        # 生成线程先收掉：run() 正常退出时已经停过，这里是兜底（幂等）。
+        self._stop_generation_pool()
         # 别把常驻的识别进程留成孤儿：Worker 退出时一起收掉。
         try:
             self.close_voice()
@@ -1080,35 +1090,52 @@ class Worker:
         current = self.store.rule(rule['id'])
         return current['enabled'] and current['revision'] == rule['revision'] and current['status'] != 'blocked'
 
-    def process(self, job):
+    # ---- 生成阶段（可并发）----
+
+    def generate(self, job, harness=None):
+        """生成阶段：queued → generating → ready。
+
+        **这一段可以并发。** 模型调用是整条链路里最慢的一步（几秒到几十秒），而它原来和发送
+        挤在同一个串行循环里 —— 一个会话慢就把所有会话一起拖住，排队久了还会过期。
+        发送仍然串行（只有一个微信窗口），见 submit。
+
+        返回 True 表示这个 job 这轮被处理了（含判失败）；
+        返回 False 表示什么都没做（被限速、或已被别的线程抢走）—— 调用方据此决定要不要歇一下。
+        """
         rule = self.store.rule(job['rule_id'])
         if not self.check_rule(rule) or rule['revision'] != job['rule_revision']:
             self.store.finish(job, 'cancelled', 'Rule disabled or changed')
-            return
+            return True
         if job['expires_at'] <= time.time():
             self.store.finish(job, 'expired', 'Reply task expired')
-            return
+            return True
         if time.time() - rule['last_sent'] < self.config['min_reply_interval_seconds']:
-            return
-        if not self.store.transition(job['id'], 'queued', 'generating'):
-            return
+            # 限速：**留在队列里**下一轮再试，不丢弃（跟原来一样）。
+            return False
+        # 并发取下：池里的线程已用 claim_next() 原子取走（state 已是 generating）；
+        # 单测/smoke 走 process() 时还是 queued，这里替它们完成占用。
+        # 两种入口共用同一段生成逻辑，避免把校验写两遍。
+        if job.get('state') != 'generating':
+            if not self.store.transition(job['id'], 'queued', 'generating'):
+                return False
         # 这句会直接显示在界面上，所以只说「消息助手」—— 用户不需要知道底层是谁在跑。
         self.store.status(rule['id'], rule['revision'], 'generating', '消息助手正在处理新消息')
+        client = harness or self.harness
         try:
             try:
-                decision = self.harness.run(rule, job)
+                decision = client.run(rule, job)
             finally:
-                self.harness.close()
+                client.close()
             if not self.check_rule(rule):
                 self.store.finish(job, 'cancelled', 'Rule changed during generation')
-                return
+                return True
             if decision['action'] != 'reply':
                 reason = decision.get('reason', '')
                 self.store.transition(job['id'], 'generating', 'generating', decision=json.dumps(decision, ensure_ascii=False))
                 self.store.finish(job, decision['action'], reason)
                 self.store.status(rule['id'], rule['revision'], 'listening',
                                   ('本条需人工处理：' + (reason or '请查看任务')) if decision['action'] == 'needs_user' else '')
-                return
+                return True
             # pre-send 复查：生成期间该会话是否又来了更新的 incoming。
             # DB 方案下 sort_seq 是毫秒时间戳、全局单调，比较它即可判断"又有新消息"，
             # 不需要像 OCR 那样重新打开会话读气泡。依赖事件流的实时性：watcher 子进程
@@ -1122,13 +1149,42 @@ class Worker:
             if trigger_int and self._history_seq.get(job['conversation'], 0) > trigger_int:
                 self.store.finish(job, 'superseded', 'Conversation changed while Agent was responding')
                 self.store.status(rule['id'], rule['revision'], 'listening', '生成期间会话又有变化，等待下一条新消息')
-                return
+                return True
             if not self.store.transition(job['id'], 'generating', 'ready', text=decision['text'], decision=json.dumps(decision, ensure_ascii=False)):
-                return
-            if not self.store.claim_send(job):
-                self.store.finish(job, 'cancelled', 'Rule changed or task expired before submission')
-                return
-            self.store.status(rule['id'], rule['revision'], 'sending', '正在后台发送并验证')
+                return False
+            return True
+        except Exception as error:
+            # 生成阶段出错 → failed（还没到发送，用户不必怀疑"是不是发出去了"）。
+            detail = safe_error(error)
+            current = self.store.job(job['id'])
+            if current['state'] not in ('cancelled', 'sent', 'ready'):
+                self.store.finish(job, 'failed', detail)
+                self.store.status(rule['id'], rule['revision'], 'listening',
+                                  '本条处理失败：' + detail + '；已继续监听新消息')
+            return True
+
+    # ---- 发送阶段（必须串行）----
+
+    def submit(self, job):
+        """发送阶段：ready → sending → sent。
+
+        **必须串行**：只有一个微信窗口、一个输入框 —— 这是物理约束，所有界面自动化产品都一样。
+        所以这里不加锁也不并发：它只由主循环单线程调用，天然互斥。
+        代价是吞吐上限 = 1 / (发送耗时)，所以要让模型那一段尽量不占用这里（见 generate）。
+        """
+        rule = self.store.rule(job['rule_id'])
+        if not self.check_rule(rule) or rule['revision'] != job['rule_revision']:
+            self.store.finish(job, 'cancelled', 'Rule disabled or changed')
+            return
+        if job['expires_at'] <= time.time():
+            self.store.finish(job, 'expired', 'Reply task expired')
+            return
+        if not self.store.claim_send(job):
+            self.store.finish(job, 'cancelled', 'Rule changed or task expired before submission')
+            return
+        text = job['text'] or ''
+        self.store.status(rule['id'], rule['revision'], 'sending', '正在后台发送并验证')
+        try:
             # 发送定位用 display（rule.title = remark/nick_name），不是 username：
             # runtime 对非 wechat: 前缀的 id 走"可见列表行点击 + 全局搜索兜底"，
             # 而微信里显示的是备注，不是 wxid。
@@ -1140,7 +1196,7 @@ class Worker:
                 pass
             try:
                 outcome = self.mcp.call('send_message', {'provider': job['provider'],
-                         'conversation_id': rule['title'], 'text': decision['text'],
+                         'conversation_id': rule['title'], 'text': text,
                          'request_id': job['request_id'], 'origin': 'agent_proposed'})
             except Exception:
                 try:
@@ -1155,7 +1211,7 @@ class Worker:
                                   '上一条回复没有确认发出；不会自动重发，已继续监听新消息')
                 return
             self.store.finish(job, 'sent', 'UI submission verified; recipient delivery not verified')
-            own = {'direction': 'outgoing', 'content': unicodedata.normalize('NFC', decision['text']).strip(), 'sender': None, 'type': 'text'}
+            own = {'direction': 'outgoing', 'content': unicodedata.normalize('NFC', text).strip(), 'sender': None, 'type': 'text'}
             history = self._history.setdefault(job['conversation'], [])
             history.append(own)
             if len(history) > HISTORY_LIMIT:
@@ -1166,22 +1222,83 @@ class Worker:
             # 最近处理记录里，那里才是"留存、有事可查"的地方。
             self.store.status(rule['id'], rule['revision'], 'listening', '')
         except Exception as error:
-            self.harness.close()
-            current = self.store.job(job['id'])
-            if current['state'] not in ('cancelled', 'sent'):
-                detail = safe_error(error)
-                if current['state'] in ('generating', 'queued'):
-                    self.store.finish(job, 'failed', detail)
-                    self.store.status(rule['id'], rule['revision'], 'listening',
-                                      '本条处理失败：' + detail + '；已继续监听新消息')
-                else:
-                    self.store.finish(job, 'uncertain', detail)
-                    self.store.status(rule['id'], rule['revision'], 'listening',
-                                      '上一条回复的结果无法确认；不会自动重发，已继续监听新消息')
+            # 发送阶段出错 = 无法确认到底发出去没有 → uncertain，**绝不重发**（重发就是发两条）。
+            # 这与生成阶段的 failed 是两种语义，所以两个阶段的异常必须分开处理。
+            self.store.finish(job, 'uncertain', safe_error(error))
+            self.store.status(rule['id'], rule['revision'], 'listening',
+                              '上一条回复的结果无法确认；不会自动重发，已继续监听新消息')
+
+    def process(self, job):
+        """一次跑完生成 + 发送。
+
+        生产路径**不走这里** —— 它用并发的 generate + 串行的 submit。
+        保留它是为了单测与 smoke：那些地方需要"一步到底、可预期"的确定性行为。
+        """
+        if not self.generate(job):
+            return
+        current = self.store.job(job['id'])
+        if current['state'] == 'ready':
+            self.submit(current)
 
     def auto_reply_paused(self):
         """用户在网页上暂停了自动回复时返回 True。"""
         return self.store.setting('auto_reply_paused', '0') == '1'
+
+    # ---- 生成线程池：把最慢的那一步（模型调用）从串行循环里拿出去 ----
+
+    @property
+    def generation_workers(self):
+        """生成并发度。1 = 退回串行（行为与改造前一致）；默认 3，上限 8。"""
+        try:
+            value = int(self.config.get('generation_workers', 3))
+        except (TypeError, ValueError):
+            value = 3
+        return max(1, min(8, value))
+
+    def _start_generation_pool(self):
+        """启动生成线程。
+
+        为什么每个线程自己一个 Harness 客户端：`Harness.run()` 会写 `self.last_session_id`，
+        共用实例就是共享可变状态；而它本身很轻（config + 一个 opener），没必要冒这个险。
+        """
+        for slot in range(self.generation_workers):
+            thread = threading.Thread(target=self._generation_loop, args=(slot,), daemon=True,
+                                      name='reply-generate-%d' % slot)
+            thread.start()
+            self._generation_threads.append(thread)
+
+    def _generation_loop(self, slot):
+        client = self._harness_factory()
+        try:
+            while not self._generation_stop.is_set() and not self.stop.is_set():
+                # **取任务也要在 try 里**：claim_next 会写库，写失败一样会把线程带走
+                # （实测踩到：异常从 claim_next 抛出，线程静默死亡、并发度悄悄降级）。
+                job = None
+                try:
+                    job = self.store.claim_next(self.config['min_reply_interval_seconds'])
+                    if job is None:
+                        # 没活干：队列空，或还在限速窗口里 —— 两种都只需等一会。
+                        self.stop.wait(0.5)
+                        continue
+                    self.generate(job, client)
+                except Exception as error:
+                    # **线程绝不能被一个异常带走**：它一死，并发度就悄悄降级，而且没人知道。
+                    self.last_error = safe_error(error)
+                    if job is not None:
+                        try:
+                            if self.store.job(job['id'])['state'] == 'generating':
+                                self.store.finish(job, 'failed', self.last_error)
+                        except Exception:
+                            pass
+                    self.stop.wait(0.2)     # 出错了也别空转
+        finally:
+            client.close()
+
+    def _stop_generation_pool(self):
+        self._generation_stop.set()
+        for thread in self._generation_threads:
+            thread.join(timeout=5)
+        self._generation_threads = []
 
     def tick(self):
         # 暂停时完全跳过事件处理与 job 生成：既不读新消息、也不生成/发送回复。
@@ -1197,13 +1314,23 @@ class Worker:
             if self.stop.is_set():
                 return
             self._handle_event(event, rules_by_username)
-        for job in self.store.pending():
+        # 生成：有生成线程池时交给它们并发跑；没有（单测/smoke 直接调 tick）就退回内联，
+        # 保持"一步到底"的确定性行为。
+        if not self._generation_threads:
+            for job in self.store.pending():
+                if self.stop.is_set():
+                    return
+                self.process(job)
+        # 发送：**必须串行**，只由这里这一个线程取走（原因见 submit 的说明）。
+        # 用 sendable()（state='ready'）而不是 pending()：生成已经完成的才轮到发。
+        for job in self.store.sendable():
             if self.stop.is_set():
                 return
-            self.process(job)
+            self.submit(job)
 
     def run(self):
         try:
+            self._start_generation_pool()
             while not self.stop.is_set():
                 try:
                     self.tick()
@@ -1212,6 +1339,7 @@ class Worker:
                     self.last_error = safe_error(error)
                 self.stop.wait(self.config['poll_interval_seconds'])
         finally:
+            self._stop_generation_pool()
             self.harness.close()
             self.close()
 

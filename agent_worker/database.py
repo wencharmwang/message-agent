@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import json
 from pathlib import Path
 import sqlite3
+import threading
 import time
 import uuid
 
@@ -38,6 +39,8 @@ class Store:
     def __init__(self, path):
         self.path = str(path)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
+        # 写操作串行化用的进程内锁，见 writing()。
+        self._write_lock = threading.RLock()
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version not in range(SCHEMA_VERSION + 1):
@@ -45,17 +48,39 @@ class Store:
             if version == 1:
                 db.execute('ALTER TABLE reply_rules ADD COLUMN archived INTEGER NOT NULL DEFAULT 0')
             db.executescript(SCHEMA)
+            # 用回滚日志模式，**不用 WAL**：实测在 Windows + 临时目录下，WAL 需要 mmap -shm 文件，
+            # 并发时会冒 "attempt to write a readonly database"，而我们的写本来就靠进程内的
+            # 写锁串行化了（见 writing()），根本不需要 WAL 的多写者能力。写都很短，读被短暂
+            # 挡一下可以接受，换来的是"绝不莫名写失败"。
+            db.execute('PRAGMA journal_mode=DELETE')
 
     @contextmanager
     def connect(self):
         db = sqlite3.connect(self.path, timeout=5)
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA foreign_keys=ON')
+        # 生成线程与主循环会并发写同一份库。默认的 rollback journal 模式下，写者需要创建
+        # -journal 文件，并发时会直接报 "attempt to write a readonly database"（实测踩到）。
+        # WAL 让"一写多读"并行、写者之间用 busy_timeout 排队等锁；synchronous=NORMAL 是 WAL 的常规搭配。
+        db.execute('PRAGMA busy_timeout=5000')
         try:
             with db:
                 yield db
         finally:
             db.close()
+
+    @contextmanager
+    def writing(self):
+        """写操作的唯一入口：**进程内串行**。
+
+        SQLite 不是多写者数据库。生成线程、主循环、HTTP 界面线程都会写同一份库，
+        并发写实测会冒 "attempt to write a readonly database"（换 WAL、加 busy_timeout 都挡不住）。
+        而本进程是这份库唯一的写者，所以用一把进程内的锁把所有写串起来最干净 ——
+        每次写都很短，排队的成本远低于出错的代价。读仍然走 connect()（WAL 下一写多读并行）。
+        """
+        with self._write_lock:
+            with self.connect() as db:
+                yield db
 
     def rules(self):
         with self.connect() as db:
@@ -79,7 +104,7 @@ class Store:
             raise ValueError('回复说明太长了，请精简到 4000 字以内')
         if len(title) > 200 or len(conversation) > 300:
             raise ValueError('会话名称过长，无法建立规则')
-        with self.connect() as db:
+        with self.writing() as db:
             existing = db.execute('SELECT id,archived FROM reply_rules WHERE provider=? AND conversation=?',
                                   (provider, conversation)).fetchone()
             if existing and not existing['archived']:
@@ -101,7 +126,7 @@ class Store:
         return rule_id
 
     def enable(self, rule_id, enabled):
-        with self.connect() as db:
+        with self.writing() as db:
             db.execute("UPDATE reply_rules SET enabled=?,revision=revision+1,status=?,detail='',baseline=NULL,candidate=NULL WHERE id=?",
                        (int(enabled), 'starting' if enabled else 'paused', rule_id))
             db.execute("UPDATE reply_jobs SET state='cancelled',detail='Rule changed',finished_at=? WHERE rule_id=? AND state IN ('queued','generating','ready')",
@@ -117,7 +142,7 @@ class Store:
         """
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4000:
             raise ValueError('Invalid reply instructions')
-        with self.connect() as db:
+        with self.writing() as db:
             row = db.execute('SELECT enabled FROM reply_rules WHERE id=?', (rule_id,)).fetchone()
             if row is None:
                 raise ValueError('没有这条规则')
@@ -130,7 +155,7 @@ class Store:
 
     def archive(self, rule_id):
         """Remove a rule from the product UI without erasing its delivery audit."""
-        with self.connect() as db:
+        with self.writing() as db:
             rule = db.execute('SELECT * FROM reply_rules WHERE id=? AND archived=0', (rule_id,)).fetchone()
             if rule is None:
                 raise ValueError('Rule not found')
@@ -147,7 +172,7 @@ class Store:
         read would never match again. Rebinding keeps its history and job audit, and the
         baseline is cleared so the next scan establishes a fresh one.
         """
-        with self.connect() as db:
+        with self.writing() as db:
             taken = db.execute('SELECT id FROM reply_rules WHERE provider=? AND conversation=?',
                                (rule['provider'], conversation)).fetchone()
             if taken is not None and taken['id'] != rule['id']:
@@ -160,7 +185,7 @@ class Store:
     def activity(self, rule, fingerprint, settle):
         """Return initialize/changed only after a visible-list signal is stable."""
         now = time.time()
-        with self.connect() as db:
+        with self.writing() as db:
             row = db.execute('SELECT * FROM reply_activity WHERE rule_id=?', (rule['id'],)).fetchone()
             if row is None:
                 # Startup establishes only the visible-list baseline. Opening a
@@ -181,12 +206,12 @@ class Store:
             return 'initialize' if row['baseline'] is None else 'changed'
 
     def commit_activity(self, rule, fingerprint):
-        with self.connect() as db:
+        with self.writing() as db:
             db.execute('UPDATE reply_activity SET baseline=?,candidate=NULL,candidate_since=NULL WHERE rule_id=? AND candidate=?',
                        (fingerprint, rule['id'], fingerprint))
 
     def status(self, rule_id, revision, status, detail=''):
-        with self.connect() as db:
+        with self.writing() as db:
             db.execute('UPDATE reply_rules SET status=?,detail=? WHERE id=? AND revision=? AND enabled=1',
                        (status, detail[:500], rule_id, revision))
 
@@ -194,7 +219,7 @@ class Store:
         """Return a confirmed changed snapshot; first observation is only the baseline."""
         encoded = json.dumps(messages, ensure_ascii=False, sort_keys=True)
         now = time.time()
-        with self.connect() as db:
+        with self.writing() as db:
             current = db.execute('SELECT * FROM reply_rules WHERE id=?', (rule['id'],)).fetchone()
             if not current['enabled'] or current['revision'] != rule['revision']:
                 return None
@@ -217,7 +242,7 @@ class Store:
         # re-reading the list instead of opening the chat again (see Worker.process).
         context = json.dumps({'messages': messages, 'incoming': incoming, 'fingerprint': fingerprint},
                              ensure_ascii=False)
-        with self.connect() as db:
+        with self.writing() as db:
             db.execute('BEGIN IMMEDIATE')
             r = db.execute('SELECT * FROM reply_rules WHERE id=?', (rule['id'],)).fetchone()
             if not r['enabled'] or r['revision'] != rule['revision'] or r['status'] == 'blocked':
@@ -238,32 +263,72 @@ class Store:
         with self.connect() as db:
             return [dict(r) for r in db.execute("SELECT * FROM reply_jobs WHERE state='queued' ORDER BY created_at")]
 
-    def transition(self, job_id, previous, state, text=None, decision=None, detail=''):
+    def claim_next(self, min_interval):
+        """**原子地取走**一个可生成的 job（FIFO 由 created_at 保证）。
+
+        为什么必须"取"而不是"读 + 抢"：多个生成线程会同时读到同一个 next，只有一个抢得到，
+        其余白跑一轮还得去睡 —— 那样并发度就废了（实测 max_active 恒为 1，等于没并发）。
+        这里在**同一把写锁内**完成"选出并标记"，取走即占用，不存在惊群。
+
+        限速与过期直接写进查询条件：不满足的 job 根本不会被取走，也就不需要"取走再退回"。
+        """
+        now = time.time()
+        with self.writing() as db:
+            row = db.execute(
+                "SELECT j.* FROM reply_jobs j JOIN reply_rules r ON r.id = j.rule_id "
+                "WHERE j.state='queued' AND j.expires_at > ? AND r.enabled = 1 "
+                "  AND (? - r.last_sent) >= ? "
+                "ORDER BY j.created_at LIMIT 1",
+                (now, now, min_interval)).fetchone()
+            if row is None:
+                return None
+            db.execute("UPDATE reply_jobs SET state='generating' WHERE id=? AND state='queued'", (row['id'],))
+            claimed = dict(row)
+            claimed['state'] = 'generating'
+            return claimed
+
+    def sendable(self):
+        """生成已完成、等待发送的 job（FIFO）。
+
+        发送**必须串行**（只有一个微信窗口、一个输入框），所以这一步不并发：
+        由主循环按顺序取走，见 Worker.submit。
+        """
         with self.connect() as db:
+            return [dict(r) for r in db.execute("SELECT * FROM reply_jobs WHERE state='ready' ORDER BY created_at")]
+
+    def inflight(self):
+        """在途各状态的数量，用于诊断与测试断言。"""
+        with self.connect() as db:
+            rows = db.execute("SELECT state,count(*) c FROM reply_jobs "
+                              "WHERE state IN ('queued','generating','ready','sending') GROUP BY state")
+            return {row['state']: row['c'] for row in rows}
+
+    def transition(self, job_id, previous, state, text=None, decision=None, detail=''):
+        with self.writing() as db:
             cursor = db.execute('UPDATE reply_jobs SET state=?,text=COALESCE(?,text),decision=COALESCE(?,decision),detail=? WHERE id=? AND state=?',
                                 (state, text, decision, detail[:500], job_id, previous))
             return cursor.rowcount == 1
 
     def claim_send(self, job):
-        with self.connect() as db:
+        with self.writing() as db:
             cursor = db.execute("""UPDATE reply_jobs SET state='sending' WHERE id=? AND state='ready' AND expires_at>?
                 AND EXISTS(SELECT 1 FROM reply_rules r WHERE r.id=reply_jobs.rule_id AND r.enabled=1
                   AND r.revision=reply_jobs.rule_revision AND r.status != 'blocked')""", (job['id'], time.time()))
             return cursor.rowcount == 1
 
     def finish(self, job, state, detail=''):
-        with self.connect() as db:
+        with self.writing() as db:
             db.execute('UPDATE reply_jobs SET state=?,detail=?,finished_at=? WHERE id=?', (state, detail[:500], time.time(), job['id']))
             if state == 'sent':
                 db.execute('UPDATE reply_rules SET last_sent=? WHERE id=?', (time.time(), job['rule_id']))
 
     def replace_baseline(self, rule, messages):
-        with self.connect() as db:
+        with self.writing() as db:
             db.execute('UPDATE reply_rules SET baseline=?,candidate=NULL WHERE id=? AND revision=?',
                        (json.dumps(messages, ensure_ascii=False, sort_keys=True), rule['id'], rule['revision']))
 
     def recover(self):
-        with self.connect() as db:
+        with self.writing() as db:
             rows = db.execute("SELECT * FROM reply_jobs WHERE state IN ('generating','ready','sending')").fetchall()
             for row in rows:
                 if row['state'] == 'sending':
@@ -287,7 +352,7 @@ class Store:
         if not isinstance(key, str) or not 0 < len(key) <= 60:
             raise ValueError('Invalid setting name')
         text = '1' if value in (True, 1, '1', 'true', 'on') else '0' if value in (False, 0, '0', 'false', 'off') else str(value)[:200]
-        with self.connect() as db:
+        with self.writing() as db:
             db.execute('INSERT INTO runtime_settings(key,value,updated_at) VALUES(?,?,?) '
                        'ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at',
                        (key, text, time.time()))

@@ -65,6 +65,10 @@ def load_config(path):
         value = config.get(name)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
             raise ValueError('Invalid ' + name)
+    # 生成并发度：可选键。老配置里没有它 —— 默认 3（1 会退回串行，行为与改造前一致）。
+    workers = config.get('generation_workers', 3)
+    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 8:
+        raise ValueError('Invalid generation_workers')
     if not isinstance(config.get('model'), str) or not config['model']:
         raise ValueError('model is required')
     if config.get('auto_reasoning_effort', 'low') not in ('off', 'low', 'high', 'max'):

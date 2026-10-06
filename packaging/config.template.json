@@ -10,6 +10,7 @@
   "poll_interval_seconds": 5,
   "worker_token_file": "{DATA_DIR}\\worker.token",
   "min_reply_interval_seconds": 10,
+  "generation_workers": 3,
   "node_executable": "{NODE_EXE}",
   "database": "{DATA_DIR}\\reply.db",
   "control_token_file": "{DATA_DIR}\\control.token",
