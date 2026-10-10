@@ -23,7 +23,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const harness = process.env.HARNESS_ROOT ?? 'C:/Users/Wencharm/Documents/projects/deepseek-harness';
+const harness = process.env.HARNESS_ROOT ?? 'C:/Users/<你>/Documents/projects/deepseek-harness';
 const pnpm = join(harness, 'node_modules', '.pnpm');
 
 /** pnpm 的目录名带 peer 后缀（react-dom@18.3.1_react@18.3.1），所以按前缀找。 */
@@ -110,7 +110,7 @@ test('界面组件都能渲染出内容（白屏体检）', {skip: available ? f
     HomeChat: h(C.HomeChat, {narrow: false}),
     HomePage: h(C.HomePage, {store, narrow: false}),
     'HomePage 窄屏': h(C.HomePage, {store, narrow: true}),
-    ConversationView: h(C.ConversationView, {store, username: 'doy1572', title: 'Wencharm', kind: 'direct', narrow: false}),
+    ConversationView: h(C.ConversationView, {store, username: 'wxid_testfriend', title: '测试好友', kind: 'direct', narrow: false}),
     MessageBubble: h(C.MessageBubble, {message: {direction: 'incoming', content: '周五的报价我改好了', at: now - 60}}),
     MessageDay: h(C.MessageDay, {message: {at: now}, previous: {at: now - 86400 * 3}}),
     'TaskModelPicker 空目录': h(C.TaskModelPicker, {title: '自动回复模型', description: 'x',
@@ -161,7 +161,7 @@ test('首页渲染出来的是「消息」三块，不是一个空白壳', {skip
 test('会话页的滚动区是页面的兄弟节点，没有被塞进页头', {skip: available ? false : '找不到宿主的 react，跳过渲染体检'}, () => {
   const {React, ReactDOMServer, C} = ctx;
   const html = ReactDOMServer.renderToStaticMarkup(React.createElement(C.ConversationView,
-    {store, username: 'doy1572', title: 'Wencharm', kind: 'direct', narrow: false}));
+    {store, username: 'wxid_testfriend', title: '测试好友', kind: 'direct', narrow: false}));
   // 回归（真实踩到）：页头那个 div 漏掉一个 ')' 时，滚动容器会被当成页头的**子节点**。
   // 页头是 flex-shrink:0 且高度随内容走，于是整段内容溢出被裁掉 —— 页面看着在，滚不动。
   // 页头的孩子里没有 div，所以"页头开始之后第一个 </div>"必然是页头自己的收尾，

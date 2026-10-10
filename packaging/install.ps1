@@ -223,14 +223,13 @@ if (Test-Path -LiteralPath $pythonExe) {
   if ($refreshPython) { Warn "Python 版本要更新：$installedPython -> $packagedPython" }
 }
 Copy-Component (Join-Path $Source 'runtimes\python') (Join-Path $InstallDir 'runtimes') 'pythonw.exe' 'Python 运行时' -Refresh:$refreshPython | Out-Null
-$dblabSrc = Join-Path $InstallDir 'components\wechat-db-lab\src'
-Copy-Component (Join-Path $Source 'components\wechat-db-lab\src') (Join-Path $InstallDir 'components\wechat-db-lab') 'wechat_db_lab\__init__.py' '取密钥/解密组件' | Out-Null
+# 注：**不再安装取密钥/解密组件**。本项目不接触密钥与解密 —— 解锁由外部完成，
+# 本项目只读一个"已解锁目录"（协议见仓库里的 docs/unlocked-db-protocol.md）。
 # 语音解码器：75 KB 的预编译可执行文件，随包走、零安装。没有它就只能"读不到语音内容"。
 Copy-Component (Join-Path $Source 'components\silk') (Join-Path $InstallDir 'components') 'silk-decoder-x64.exe' '语音解码组件' | Out-Null
 
 # 脚本与说明：**按类型整体复制，不列白名单**。
-# 原来这里和 build-package.ps1 各写一份清单，加 wechat_keys.py 时只改了这里 ——
-# 打包端没带上，装到第 7 步才报"脚本不存在"。清单一定会漂，索性不列。
+# 清单一定会漂，索性不列。
 foreach ($file in (Get-ChildItem -LiteralPath $Source -File |
     Where-Object { $_.Extension -in '.ps1', '.py', '.cmd', '.md', '.json' -and $_.Name -ne 'manifest.json' })) {
   Copy-Item -LiteralPath $file.FullName -Destination $InstallDir -Force
@@ -339,7 +338,6 @@ $values = [ordered]@{
   WORKSPACE       = (Join-Path $DataDir 'workspace')
   NODE_EXE        = $nodeExe
   PYTHON_EXE      = $pythonExe
-  DBLAB_SRC       = $dblabSrc
 }
 $valuesPath = Join-Path $env:TEMP ('ma-config-values-' + [Guid]::NewGuid().ToString('N') + '.json')
 $values | ConvertTo-Json | Set-Content -LiteralPath $valuesPath -Encoding UTF8
@@ -407,37 +405,14 @@ secrets_store.write_secret(r'$modelStore', {'DEEPSEEK_API_KEY': os.environ['MA_K
 }
 
 # --------------------------------------------------------------------------
-Step '保管微信数据库密钥'
+Step '已解锁数据库（需要你自己准备）'
 
-# 密钥原来以明文 JSON 存在 %LOCALAPPDATA%\wechat-db-lab\keys 下（还可能有个 .bak）。
-# 这里把它们收进 Windows 密钥保护（DPAPI）并删掉明文；日常启动只解密到运行时目录，
-# 磁盘上不再有长期存在的明文密钥。
-$credDir = Join-Path $DataDir 'credentials'
-$keyStore = Join-Path $credDir 'wechat-keys.dat'
-$env:MESSAGE_AGENT_CREDENTIALS = $credDir
-$keysScript = Join-Path $InstallDir 'wechat_keys.py'
-$migrateOutput = & $pythonConsole $keysScript 'migrate' 2>&1
-$migrateOutput | ForEach-Object { Say ("    " + $_) 'DarkGray' }
-$hasKeys = Test-Path -LiteralPath $keyStore
-
-if ($hasKeys) {
-  Ok '密钥已加密保存，明文缓存已清理'
-} else {
-  Say '' 
-  Warn '还没有可用的密钥 —— 现在读一次，还是稍后自己读？'
-  Say '    读密钥需要**读一次微信进程内存**（唯一需要你授权的动作），所以不自动做。' 'Yellow'
-  Say '    前提：微信正在运行并已登录。' 'Yellow'
-  $doScan = if ($Silent) { $false } else { Confirm '    现在读取微信密钥吗？（推荐：现在读，装完马上就能用）' $true }
-  if ($doScan) {
-    Say '    正在读取（这一步会读一次微信进程内存）…' 'DarkGray'
-    $scanOutput = & $pythonConsole $keysScript 'scan' 2>&1
-    $scanOutput | ForEach-Object { Say ("    " + $_) 'DarkGray' }
-    if (Test-Path -LiteralPath $keyStore) { Ok '密钥已加密保存' }
-    else { Warn '没有读到密钥。装好后可以右键运行安装目录里的「read-wechat-keys.ps1」再试。' }
-  } else {
-    Warn '先跳过。装好后右键运行安装目录里的「read-wechat-keys.ps1」即可（也只有那一次会读内存）。'
-  }
-}
+# 本项目**不接触密钥与解密**：不读进程内存、不取密钥、不做页解密、不合并 WAL。
+# 它只读一个"已解锁目录" —— 由你自己选择工具完成解锁，产出物要符合
+# docs/unlocked-db-protocol.md（一个 manifest.json + plain/ 下的明文库）。
+Say '    安装完成后，请把 config.json 里的 unlocked_root 指向你的已解锁目录。' 'Yellow'
+Say '    产物协议见安装目录里的 docs/unlocked-db-protocol.md。' 'DarkGray'
+Say '    没有产物时程序能启动，但读不到消息；界面会提示缺什么。' 'DarkGray'
 
 # --------------------------------------------------------------------------
 Step '设置开机启动'

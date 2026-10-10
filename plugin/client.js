@@ -1267,14 +1267,14 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
 
   /** 首屏的一张卡：标题 + 一句说明 + 右上角操作。全页共用，保证节奏一致。 */
   function WeChatInitCard({inline}){
-    const keys=usePoller(true,()=>api('wechat-keys'),20000);
+    const keys=usePoller(true,()=>api('unlocked'),20000);
     const [stage,setStage]=useState('idle');   // idle | confirm | busy
     const [error,setError]=useState(''),[note,setNote]=useState('');
-    const done=!!keys.data?.keys?.configured;
+    const done=!!keys.data?.unlocked?.ok;
     async function run(){
       setStage('busy');setError('');setNote('');
       try{
-        await api('wechat-keys',{action:'scan'});
+        await api('unlocked/check',{});
         setNote('完成');
         await keys.refresh();
       }catch(e){setError(e.message);}
@@ -1286,17 +1286,17 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     if(stage==='confirm'){
       return h('div',null,
         h('p',{style:{...hint,margin:'0 0 12px',color:C.text2}},
-          '这一步会读一次微信的内存来取消息密钥。微信需要在运行并且已经登录。'
-          +'取到的密钥会用 Windows 的密钥保护保存在这台电脑上，以后不会再读内存。'),
+          '助手只读你自己准备好的一份聊天记录数据，不会去动微信、也不碰任何密钥。'
+          +'还没准备的话，见安装目录里的说明文档；准备好之后点「重新检测」。'),
         h('div',{style:{display:'flex',gap:10,flexWrap:'wrap'}},
           h('button',{onClick:run,style:button(true)},'确认'),
           h('button',{onClick:()=>setStage('idle'),style:button(false,false,true)},'取消')));
     }
     return h('div',null,
-      h('p',{style:{...hint,margin:'0 0 12px'}},'点一下完成初始化，之后这一页就会显示聊天。'),
-      inline?h('p',{style:{...hint,margin:'0 0 12px'}},'（如果已经初始化过，确认微信已登录，稍等片刻内容会自动出现。）'):null,
+      h('p',{style:{...hint,margin:'0 0 12px'}},'检测到聊天记录数据后，这一页就会显示内容。'),
+      inline?h('p',{style:{...hint,margin:'0 0 12px'}},'（已经准备过的话，确认配置指向了那份数据，然后点「重新检测」。）'):null,
       h('div',{style:{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}},
-        h('button',{onClick:()=>setStage('confirm'),style:button(true)},'初始化微信数据'),
+        h('button',{onClick:()=>setStage('confirm'),style:button(true)},'重新检测'),
         note&&h('span',{style:hint},note)),
       h(Notice,{error}));
   }
@@ -1418,22 +1418,22 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
    * 状态没回来时整张卡不出现，避免"闪一下又变"。
    */
   function WeChatEmptyCard(){
-    const keys=usePoller(true,()=>api('wechat-keys'),20000);
+    const keys=usePoller(true,()=>api('unlocked'),20000);
     if(!keys.data)return null;
-    if(keys.data.keys?.configured){
+    if(keys.data.unlocked?.ok){
       return h(HomeCard,{title:'还没有读到会话'},
-        h('p',{style:{...hint,margin:0}},'确认微信已登录，稍等片刻这一页会自动出现内容。'));
+        h('p',{style:{...hint,margin:0}},'数据准备好之后，这一页会自动出现内容。'));
     }
     return h(HomeCard,{title:'还没有读到会话'},h(WeChatInitCard,{}));
   }
 
   /** 设置页里的同一件事：初始化完成后整块消失（用户要求：读过就别再显示）。 */
   function WeChatInitSection(){
-    const keys=usePoller(true,()=>api('wechat-keys'),20000);
-    if(!keys.data||keys.data.keys?.configured)return null;
+    const keys=usePoller(true,()=>api('unlocked'),20000);
+    if(!keys.data||keys.data.unlocked?.ok)return null;
     return h('section',{style:card},
-      h('h2',{style:{...h2,margin:'0 0 6px'}},'微信数据'),
-      h('p',{style:{...hint,margin:'0 0 10px'}},'助手要读消息，先初始化一次。'),
+      h('h2',{style:{...h2,margin:'0 0 6px'}},'聊天记录数据'),
+      h('p',{style:{...hint,margin:'0 0 10px'}},'助手要读消息，需要你先准备好一份聊天记录数据。'),
       h(WeChatInitCard,{}));
   }
 

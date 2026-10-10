@@ -5,7 +5,6 @@
     app\                 产品本体（plugin/ agent_worker/ presets/ launch.py …）
     runtimes\node\       自带 Node（用户不需要自己装）
     runtimes\python\     自带 Python（用户不需要自己装）
-    components\wechat-db-lab\src\   取密钥/解密组件
     engine\harness\      消息引擎（默认整包带走；-SkipEngine 可跳过）
     install.ps1 等脚本 + config.template.json + README-install.md
     manifest.json        版本与文件哈希清单
@@ -29,7 +28,6 @@ param(
   [string]$OutDir = '',
   [string]$RepoRoot = '',
   [string]$EngineRoot = '',
-  [string]$DbLabRoot = '',
   [string]$NodeRuntime = '',
   [string]$PythonRuntime = '',
   [string]$NodeVersion = 'v22.23.0',
@@ -52,7 +50,6 @@ if ($LogTo) {
 
 if (-not $OutDir)     { $OutDir = Join-Path $PSScriptRoot 'out' }
 if (-not $RepoRoot)   { $RepoRoot = Split-Path $PSScriptRoot -Parent }
-if (-not $DbLabRoot)  { $DbLabRoot = Join-Path (Split-Path $RepoRoot -Parent) 'wechat-db-lab' }
 if (-not $EngineRoot) { $EngineRoot = Join-Path (Split-Path $RepoRoot -Parent) 'deepseek-harness' }
 
 $ErrorActionPreference = 'Stop'
@@ -163,12 +160,9 @@ if ($hasSqlite -notmatch 'yes') { throw 'python 运行时缺少 sqlite3，不能
 Say '    sqlite3 可用' 'Green'
 
 # -- 3. 取密钥/解密组件 ------------------------------------------------------
-Step '复制取密钥/解密组件'
-$dblabOut = Join-Path $package 'components\wechat-db-lab'
-New-Item -ItemType Directory -Force -Path $dblabOut | Out-Null
-Copy-Item -LiteralPath (Join-Path $DbLabRoot 'src') -Destination $dblabOut -Recurse -Force
-Get-ChildItem -LiteralPath $dblabOut -Recurse -Directory -Filter '__pycache__' | Remove-Item -Recurse -Force
-Say '    components\wechat-db-lab\src' 'Green'
+# 注：**不再打包取密钥/解密组件**。本项目不接触密钥与解密 —— 解锁由外部完成，
+# 产物是一个符合 docs/unlocked-db-protocol.md 的"已解锁目录"。因此安装包不再携带
+# 任何解密代码（这一条是"隔离"能否成立的硬要求：包里有，就等于你仍在分发手段）。
 
 # -- 4. 引擎 ----------------------------------------------------------------
 Step '引擎'
@@ -223,9 +217,8 @@ if ($SkipEngine) {
 
 # -- 5. 脚本与说明 ----------------------------------------------------------
 Step '复制安装脚本与说明'
-# **按类型整体复制，不列白名单**。之前是手写清单，结果 install.ps1 里加了
-# wechat_keys.py / read-wechat-keys.ps1，这里忘加 —— 装完第 7 步报"脚本不存在"。
-# 这类清单漂移只能靠"不列清单"根治。
+# **按类型整体复制，不列白名单**。之前是手写清单，结果 install.ps1 里加了脚本、
+# 这里忘加 —— 装完第 7 步报"脚本不存在"。这类清单漂移只能靠"不列清单"根治。
 $copied = 0
 foreach ($file in (Get-ChildItem -LiteralPath $PSScriptRoot -File |
     Where-Object { $_.Extension -in '.ps1', '.py', '.cmd', '.md', '.json' -and $_.Name -ne 'build-package.ps1' })) {
@@ -233,7 +226,6 @@ foreach ($file in (Get-ChildItem -LiteralPath $PSScriptRoot -File |
   $copied++
 }
 if (-not (Test-Path -LiteralPath (Join-Path $package 'install.ps1'))) { throw '安装脚本没有复制进包，中止。' }
-if (-not (Test-Path -LiteralPath (Join-Path $package 'wechat_keys.py'))) { throw 'wechat_keys.py 没有复制进包，中止。' }
 # PowerShell 5.1 读取 .ps1 时，没有 BOM 就按 ANSI(GBK) 解释 —— 脚本里的中文会变成乱码，
 # 而且常常直接**语法错误**（引号被吃掉、字符串缺终止符），报错信息还完全看不懂。
 # 这里统一补 BOM，避免"用别的编辑器改一下就装不了"。
@@ -247,7 +239,7 @@ Say ("    脚本与说明 {0} 个（已统一 UTF-8 BOM）" -f $copied) 'Green'
 Step '生成 manifest.json'
 $version = '0.1.0'
 # git 的 stderr 在 PowerShell 里会被当成错误记录，$ErrorActionPreference='Stop' 下会直接
-# 中断脚本（实测：wechat-db-lab 仓库报 dubious ownership，打包就停在最后一步）。
+# 中断脚本（实测：仓库报 dubious ownership，打包就停在最后一步）。
 # 版本号是"尽力而为"的信息，取不到就写 unknown，不该让打包失败。
 function Git-Rev([string]$Path) {
   $previous = $ErrorActionPreference
@@ -259,7 +251,6 @@ function Git-Rev([string]$Path) {
   return 'unknown'
 }
 $repoHead = Git-Rev $RepoRoot
-$dbLabHead = Git-Rev $DbLabRoot
 $files = @()
 if (-not $SkipHashes) {
   # 引擎是单个归档，所以这里**不做例外**都要算哈希 —— 最大的那块恰恰最需要可校验。
@@ -282,7 +273,6 @@ $manifest = [ordered]@{
   platform = 'windows-x64'
   components = [ordered]@{
     app = [ordered]@{ repo = 'message-agent'; revision = "$repoHead" }
-    'wechat-db-lab' = [ordered]@{ repo = 'wechat-db-lab'; revision = "$dbLabHead" }
     engine = [ordered]@{ mode = $(if ($SkipEngine) { 'external' } else { 'bundled' }); path = $EngineRoot }
     node = [ordered]@{ version = (& (Join-Path $nodeOut 'node.exe') '-v') }
     python = [ordered]@{ version = (& (Join-Path $pythonOut 'python.exe') -c "import sys;print(sys.version.split()[0])") }

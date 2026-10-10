@@ -29,7 +29,7 @@
 | --- | --- | --- | --- |
 | 产品本体 | `message-agent/`（`plugin/`、`agent_worker/`、`launch.py`、`presets/`、`web.patch.yml`） | Python 3.13（worker）、Node（harness） | worker 与产品代码可整体打包，但要清掉绝对路径 |
 | 引擎（DSH） | `deepseek-harness/`（pnpm monorepo，**源码**） | `node` + `tsx/esm`、`node_modules` | ⚠️ 现状用 `apps/cli/src/bin.ts` **直接跑 TS 源码**；发布必须换成已构建产物 |
-| Node 运行时 | `C:\Users\Wencharm\.cache\codex-runtimes\codex-primary-runtime\...\node.exe` | — | ⚠️ 这是**别的工具的运行时而临时借用**，不能作为交付依赖 |
+| Node 运行时 | `C:\Users\<你>\.cache\codex-runtimes\codex-primary-runtime\...\node.exe` | — | ⚠️ 这是**别的工具的运行时而临时借用**，不能作为交付依赖 |
 | 消息运行时 | `messaging-runtime/`（.NET 8，8766 端口） | .NET 运行时、自家 python（OCR） | 需按 `tools/package.ps1` 产出并验证 self-contained |
 | 取密钥/解密 | `wechat-db-lab/`（Python 包：`keyextract`/`winmem`/`vault`/`snapshot`/`watcher`） | Python + `ctypes`（实测 `win32crypt` 缺失，DPAPI 要走 ctypes） | 以 pip 包形式内置，或 vendored 到 `app/` |
 | 数据（产品） | `data/`：`reply.db`、`crm.db`、`inbox.db`、`reply-context.db`、`*.json` | — | 迁移到 `%LOCALAPPDATA%` |
@@ -52,7 +52,7 @@
 ### 1.3 现有安装表面
 
 `install.ps1` 是**开发机部署脚本**（把 `plugin/`、`agent_worker/` 等拷到固定绝对路径
-`C:\Users\Wencharm\Documents\projects\message-agent`，并从 `messaging-runtime/runtime/python/pythonw.exe`
+`C:\Users\<你>\Documents\projects\message-agent`，并从 `messaging-runtime/runtime/python/pythonw.exe`
 取解释器，然后注册计划任务 `Messaging Agent`）。它**不能直接给用户用**，但里面的三件事是对的，
 应原样吸收进新安装器：
 

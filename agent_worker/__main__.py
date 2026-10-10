@@ -12,13 +12,12 @@ import uuid
 from .service import Worker, RuntimeToolError, is_system_entry, error_trace, names_match, name_key, strip_ocr_noise
 from .harness import Harness
 from .send_outcome import normalize_send_outcome
-from . import wechat_keys
 from . import secrets_store
 from . import model_providers
 
 
 def credentials_dir(worker) -> Path:
-    """密钥的落脚点（数据目录下的 credentials）。"""
+    """凭据的落脚点（数据目录下的 credentials）。只用于模型密钥，不存微信密钥。"""
     config = worker.config
     data_dir = Path(config['control_token_file']).parent
     return Path(config.get('credentials_dir') or (data_dir / 'credentials'))
@@ -30,28 +29,33 @@ def settings_path(worker) -> Path:
     return Path(home or '.harness') / 'settings.yaml'
 
 
-# 同一时刻只允许一次"读取微信密钥"（会读进程内存）。连点两下只能跑一次。
-scan_guard = threading.Lock()
+def unlocked_status(worker) -> dict:
+    """报告"已解锁目录"的状态。**只读、只校验，不做任何解锁动作。**
 
-
-def keys_context(worker):
-    """把 Worker 的配置翻成密钥模块需要的路径。
-
-    credentials_dir 是密钥的落脚点（DPAPI 存储）。老配置里没有这个键时，
-    退回到"数据目录下的 credentials"，与安装器生成的布局一致。
+    本项目不接触密钥与页解密（见 docs/unlocked-db-protocol.md）—— 这个接口只回答
+    "产物在哪、是不是可用、有多旧"，好让界面告诉用户该做什么。
     """
-    config = worker.config
-    data_dir = Path(config['control_token_file']).parent
-    credentials = credentials_dir(worker)
-    src = config.get('watcher_src')
-    workspace = config.get('watcher_workspace')
-    run_dir = config.get('run_dir')
-    return wechat_keys.Context(
-        credentials_dir=credentials,
-        db_lab_src=Path(src) if isinstance(src, str) and src else None,
-        workspace=Path(workspace) if isinstance(workspace, str) and workspace else None,
-        run_dir=Path(run_dir) if isinstance(run_dir, str) and run_dir else (data_dir / 'run'),
-    )
+    try:
+        from .unlocked_source import UnlockedSource, UnlockedRootError
+    except Exception as error:                      # pragma: no cover - 只在包损坏时
+        return {'ok': False, 'configured': False, 'message': f'读取组件不可用：{error}'}
+    root = worker.config.get('unlocked_root')
+    source = UnlockedSource(root)
+    try:
+        manifest = source.validate()
+    except UnlockedRootError as error:
+        return {'ok': False, 'configured': bool(root), 'root': str(root or ''),
+                'message': str(error)}
+    databases = manifest.get('databases') or []
+    return {
+        'ok': True,
+        'configured': True,
+        'root': str(root),
+        'account': manifest.get('account') or '',
+        'createdAt': manifest.get('created_at') or '',
+        'databaseCount': len(databases),
+        'message': f'产物可用：{len(databases)} 个库，解锁于 {manifest.get("created_at") or "未知时间"}',
+    }
 
 
 def load_config(path):
@@ -166,10 +170,9 @@ def handler(worker, token):
                 except Exception as error:
                     self.response(503, {'error': '无法读取会话列表，请检查微信和 Runtime',
                                         'dev': dev_block(error, 'worker:conversations')})
-            elif self.path == '/api/wechat-keys':
-                # 只读状态：有没有可用密钥、上次什么时候读的、明文残留清没清。
-                # 永不返回密钥内容。
-                self.response(200, {'keys': wechat_keys.status(keys_context(worker))})
+            elif self.path == '/api/unlocked':
+                # 只读状态：产物在哪、可不可用、有多旧。**永不返回密钥内容**（本项目根本不碰密钥）。
+                self.response(200, {'unlocked': unlocked_status(worker)})
             elif self.path == '/api/model-providers':
                 # 可选的模型供应商目录 + 哪些已经配过。只读，不含任何密钥。
                 self.response(200, {'providers': model_providers.describe(),
@@ -195,21 +198,10 @@ def handler(worker, token):
                 if not 0 < length <= 20000:
                     raise ValueError('Invalid request size')
                 data = json.loads(self.rfile.read(length))
-                if self.path == '/api/wechat-keys/scan':
-                    # **用户点过授权**才会走到这里。这是整套流程里唯一会去读微信进程内存的
-                    # 入口：日常启动只看 DPAPI 里存好的密钥（launch.py 那条路）。
-                    # 加锁：连点两下不该同时跑两次内存扫描。
-                    if not scan_guard.acquire(blocking=False):
-                        self.response(409, {'error': '正在读取中，请稍等'})
-                    else:
-                        try:
-                            result = wechat_keys.scan(keys_context(worker), force=bool(data.get('force')))
-                            self.response(200 if result.get('ok') else 503, result)
-                        except Exception as error:
-                            self.response(500, {'error': '读取密钥失败',
-                                                'dev': dev_block(error, 'worker:wechat-keys/scan')})
-                        finally:
-                            scan_guard.release()
+                if self.path == '/api/unlocked/check':
+                    # 重新校验一次产物（用户刚解锁完、或改了 unlocked_root 之后点一下）。
+                    # **它只读、只校验** —— 不解锁、不读进程内存。解锁是外部工具的事。
+                    self.response(200, {'unlocked': unlocked_status(worker)})
                 elif self.path == '/api/model-provider':
                     # 用户从下拉里选一家供应商、贴上 key（用户要求：不能只支持一家，
                     # 要给选择的机会）。这里做两件事：把 provider 写进引擎配置（只增不删），

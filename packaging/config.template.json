@@ -22,6 +22,5 @@
   "agent_workspace": "{WORKSPACE}",
   "auto_reasoning_effort": "low",
   "dev_diagnostics": false,
-  "watcher_python": "{PYTHON_EXE}",
-  "watcher_src": "{DBLAB_SRC}"
+  "unlocked_root": ""
 }

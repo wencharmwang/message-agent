@@ -28,3 +28,12 @@ packaging/out/
 
 # Local client backups
 plugin/backups-*.js
+
+# 本地工作产物与工具中间结果：**绝不能进公开仓库**
+# .work 里含运行目录（其中 .credentials.yaml 是凭据）、视频素材与构建产物；
+# .manus 是工具调用的中间结果；outputs 是宣发素材。
+.manus/
+.work/
+outputs/
+**/.credentials.yaml
+*.credentials.yaml

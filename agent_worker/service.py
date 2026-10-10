@@ -795,20 +795,18 @@ class Worker:
 
     # ---- watcher 子进程 ----
     def _watcher(self):
-        # 自愈 + 线程安全：watcher 子进程崩溃后（进程退出），下次 tick 重新拉起；
-        # 加锁防止 tick 线程与 HTTP 请求线程（db_sessions）并发 spawn 出两个 watcher
-        # （subprocess.Popen 会释放 GIL，不加锁会竞态重复实例化）。
+        # 已有实例就复用；产物被换掉/打不开时下一轮会自然重试（UnlockedSource 里处理）。
+        # 加锁防止 tick 线程与 HTTP 请求线程（db_sessions）并发构造两个实例。
         with self._watcher_lock:
             if self.watcher is not None and not self.watcher.alive():
                 self.watcher.close()
                 self.watcher = None
             if self.watcher is None:
-                from .watcher_source import WatcherSource
-                self.watcher = WatcherSource(
-                    self.config['watcher_python'],
-                    self.config['watcher_src'],
-                    workspace=self.config.get('watcher_workspace'),
-                    account=self.config.get('watcher_account'),
+                # 解锁是**别人的事**：这里只读一个"已解锁目录"，不自解锁、不起子进程、不碰密钥。
+                # 协议见 docs/unlocked-db-protocol.md。
+                from .unlocked_source import UnlockedSource
+                self.watcher = UnlockedSource(
+                    self.config.get('unlocked_root'),
                     interval=self.config.get('watcher_interval_seconds', 3.0),
                     overlap=self.config.get('watcher_overlap_seconds', 10),
                 )

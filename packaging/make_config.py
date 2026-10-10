@@ -18,7 +18,7 @@ import json
 import sys
 
 PLACEHOLDER_KEYS = ('ENGINE_ROOT', 'RUNTIME_DATA', 'DATA_DIR', 'CREDENTIALS_DIR', 'LOGS_DIR',
-                    'HARNESS_HOME', 'WORKSPACE', 'NODE_EXE', 'PYTHON_EXE', 'DBLAB_SRC')
+                    'HARNESS_HOME', 'WORKSPACE', 'NODE_EXE', 'PYTHON_EXE')
 
 
 def substitute(node, values, used):
@@ -73,7 +73,7 @@ def main() -> int:
     # 自检：写出来的东西必须能读回来，且关键字段非空。
     with io.open(out_path, encoding='utf-8') as handle:
         written = json.load(handle)
-    for key in ('harness_root', 'node_executable', 'watcher_python', 'database', 'control_token_file'):
+    for key in ('harness_root', 'node_executable', 'database', 'control_token_file'):
         if not written.get(key):
             print(f'生成的配置里 {key} 是空的。', file=sys.stderr)
             return 1
