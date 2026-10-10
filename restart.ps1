@@ -1,8 +1,17 @@
-# One-click restart of message-agent services.
+﻿# One-click restart of message-agent services.
 # Usage: run in PowerShell  ->  .\restart.ps1
 $ErrorActionPreference = 'SilentlyContinue'
-$RuntimeRoot = 'C:\Users\Wencharm\Documents\projects\messaging-runtime'
-$AgentRoot   = 'C:\Users\Wencharm\Documents\projects\message-agent'
+# 路径全部**推导**，不写死任何人的用户名（这是别人也会用的脚本）。
+#   $AgentRoot   = 本脚本所在目录（仓库根）
+#   $RuntimeRoot = 同级目录 ..\messaging-runtime；放别处就用环境变量覆盖
+$AgentRoot   = $PSScriptRoot
+$RuntimeRoot = $env:MESSAGING_RUNTIME_ROOT
+if (-not $RuntimeRoot) { $RuntimeRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'messaging-runtime' }
+if (-not (Test-Path -LiteralPath (Join-Path $RuntimeRoot 'tools\start_shared_runtime.py'))) {
+  Write-Host ("找不到 messaging-runtime：{0}" -f $RuntimeRoot) -ForegroundColor Red
+  Write-Host '请把两个仓库并排放，或用环境变量 MESSAGING_RUNTIME_ROOT 指向它。' -ForegroundColor Yellow
+  exit 1
+}
 $Pythonw     = Join-Path $RuntimeRoot 'runtime\python\pythonw.exe'
 
 # Readiness is decided by the harness health endpoint, not by netstat.
@@ -64,7 +73,9 @@ Stop-LocalListener 8766 @('dotnet')
 # time the launching shell closes. A stale supervisor is not harmless: it can win the
 # race for 8766 and host from a window station that cannot see user windows, so every
 # read fails with provider_unavailable while it holds the port. Retire them all first.
-& (Join-Path $RuntimeRoot 'runtime\pythonw.exe') (Join-Path $AgentRoot 'reap-supervisors.py')
+# 注：这条调用原来写的是 runtime\pythonw.exe（少了 python\ 那一层）—— 路径不存在，
+# 配合上面的 SilentlyContinue，等于**从来没清过孤儿 supervisor**，正是下面注释警告的那个隐患。
+& (Join-Path $RuntimeRoot 'runtime\python\pythonw.exe') (Join-Path $AgentRoot 'reap-supervisors.py')
 Start-Sleep -Seconds 2
 
 Write-Host '[2/4] starting messaging-runtime ...'

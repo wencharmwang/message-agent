@@ -49,6 +49,14 @@ def main():
     settings = json.loads(Path(config['runtime_settings_file']).read_text(encoding='utf-8-sig'))
     env['MESSAGE_RUNTIME_TOKEN'] = settings['token']
     env['MESSAGE_WORKER_TOKEN'] = Path(config['worker_token_file']).read_text().strip()
+    # **harness 侧也需要这两个** —— 别只给 worker：
+    #   * plugin/index.mjs 启动时就 `readFileSync(process.env.MESSAGE_AGENT_CONFIG)`，
+    #     拿不到就是 `path ... Received undefined`，整个插件树加载失败、harness 起不来；
+    #   * web.patch.yml 里用 `process.env.MESSAGE_AGENT_ROOT + '/presets'` 定位预设。
+    # 之前只有 worker 那侧设了它们，于是"从干净 shell 启动"必然失败，
+    # 而在恰好带着这两个变量的环境里启动又能成功 —— 表现成"有时能起有时起不来"。
+    env['MESSAGE_AGENT_CONFIG'] = str(config_path)
+    env['MESSAGE_AGENT_ROOT'] = str(ROOT)
     env['PATH'] = str(Path(config['node_executable']).parent) + os.pathsep + env.get('PATH', '')
     # 安装在 Program Files 那类只读位置时，日志不能往安装目录写；位置由安装器给。
     log_path = Path(config.get('log_file') or (ROOT / 'harness.log'))
