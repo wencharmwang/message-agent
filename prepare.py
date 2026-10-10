@@ -1,10 +1,30 @@
-"""Generate deployment composition from the installed Harness preset."""
+"""从已安装的 Harness 预设生成本项目的部署配置。
+
+这是**开发/源码检出**用的脚本（打包安装走 packaging/make_config.py）。所以它必须对
+别人的机器也成立：路径全部**推导或可覆盖**，不写死任何人的用户名。
+
+* 本仓库根 = 这个文件所在目录；
+* messaging-runtime 默认取**同级目录** `../messaging-runtime`
+  （两个仓库按 README 的说明并排放时就是这个布局）；
+  放别处就用环境变量 `MESSAGING_RUNTIME_ROOT` 指定。
+
+跑之前请先停掉正在运行的消息助手（它要重写 config.json）。
+"""
 import json
+import os
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-TARGET = Path(r'C:\Users\Wencharm\Documents\projects\message-agent')
-RUNTIME = Path(r'C:\Users\Wencharm\Documents\projects\messaging-runtime')
+RUNTIME = Path(os.environ.get('MESSAGING_RUNTIME_ROOT') or (ROOT.parent / 'messaging-runtime'))
+
+if not (RUNTIME / '.runtime-data/auto-reply/config.json').is_file():
+    sys.exit(
+        '找不到 messaging-runtime 的运行时配置：\n'
+        f'  {RUNTIME / ".runtime-data/auto-reply/config.json"}\n'
+        '请先跑一次 messaging-runtime（让它生成 .runtime-data），'
+        '或用环境变量 MESSAGING_RUNTIME_ROOT 指向那个仓库。'
+    )
 
 AUTO_PRESET = """# Automatic replies use only the decision tool registered by plugin/index.mjs.
 - id: persona
@@ -31,10 +51,25 @@ AUTO_PRESET = """# Automatic replies use only the decision tool registered by pl
 """
 
 config = json.loads((RUNTIME/'.runtime-data/auto-reply/config.json').read_text(encoding='utf-8-sig'))
-config.update(harness_port=3080, agent_workspace=str(TARGET/'workspace'), response_timeout_seconds=180,
-              database=str(TARGET/'data/reply.db'), worker_token_file=str(TARGET/'data/worker.token'),
-              control_token_file=str(TARGET/'data/control.token'), harness_home=str(TARGET/'.harness'),
+config.update(harness_port=3080, agent_workspace=str(ROOT/'workspace'), response_timeout_seconds=180,
+              database=str(ROOT/'data/reply.db'), worker_token_file=str(ROOT/'data/worker.token'),
+              control_token_file=str(ROOT/'data/control.token'), harness_home=str(ROOT/'.harness'),
               max_tokens=4096, auto_reasoning_effort='low')
+
+# 保留已有的 unlocked_root：那是用户自己指到"已解锁目录"的，重跑本脚本不该把它抹掉。
+# （本项目不解锁，产物由用户准备 —— 丢掉这个键就等于让程序突然读不到数据。）
+existing = ROOT/'config.json'
+unlocked_root = ''
+if existing.is_file():
+    try:
+        unlocked_root = json.loads(existing.read_text(encoding='utf-8-sig')).get('unlocked_root') or ''
+    except (OSError, ValueError):
+        unlocked_root = ''
+config['unlocked_root'] = unlocked_root
+if not unlocked_root:
+    print('提示：还没配置 unlocked_root —— 程序能启动，但读不到消息。')
+    print('      准备好数据后把 config.json 里的 unlocked_root 指向那个目录即可。')
+
 (ROOT/'config.json').write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding='utf-8')
 
 # Preserve the reviewed lightweight preset instead of copying the coding preset.
