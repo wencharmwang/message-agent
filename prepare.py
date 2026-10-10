@@ -71,6 +71,7 @@ if not unlocked_root:
     print('      准备好数据后把 config.json 里的 unlocked_root 指向那个目录即可。')
 
 (ROOT/'config.json').write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding='utf-8')
+print('已生成 config.json（unlocked_root 会原样保留）。')
 
 # Preserve the reviewed lightweight preset instead of copying the coding preset.
 interactive = (ROOT/'presets/message-agent/agent.cordis.yml').read_text(encoding='utf-8')
@@ -92,13 +93,34 @@ PRESETS = [
      'selectable: false\n'),
 ]
 
+# ---- 预设与 web.patch.yml：**已存在就不动** ----
+#
+# 为什么默认不覆写：这几份文件在仓库里是**受版本管理的**，而且后来被手工改过 ——
+# 特别是 web.patch.yml 里那 17 条 `disabled: true`（tool-web / tool-bash / tool-fs /
+# tool-subagent …），它们是**故意关掉 Harness 通用工具**的：只保留 messaging-runtime
+# 的 MCP 工具，减少每轮注入的 tool schema（用户明确要求：不必要的工具不注入，省 token）。
+#
+# 而本脚本里的模板是**旧快照**：跑一次就会把 web.patch.yml 从 56 行截断回 18 行
+# —— 等于**静默地**把 bash / PowerShell / 文件系统 / 网页 / 子代理能力还给 agent，
+# 每轮 token 也涨回去。它只表现为一个大 diff，很容易被当成垃圾清掉或误提交。
+#
+# 所以：文件在 → 跳过；确实想重置成模板 → 加 --force（会明确提示后果）。
+force = '--force' in sys.argv
+skipped: list[str] = []
+written: list[str] = []
+
 for name, composition, metadata in PRESETS:
     directory = ROOT/'presets'/name
     directory.mkdir(parents=True, exist_ok=True)
-    (directory/'agent.cordis.yml').write_text(composition, encoding='utf-8')
-    (directory/'preset.yml').write_text(metadata, encoding='utf-8')
+    for filename, content in (('agent.cordis.yml', composition), ('preset.yml', metadata)):
+        target = directory/filename
+        if target.exists() and not force:
+            skipped.append(str(target.relative_to(ROOT)))
+            continue
+        target.write_text(content, encoding='utf-8')
+        written.append(str(target.relative_to(ROOT)))
 
-(ROOT/'web.patch.yml').write_text('''- id: agent-presets
+PATCH = '''- id: agent-presets
   config:
     default: message-agent
     roots:
@@ -116,4 +138,20 @@ for name, composition, metadata in PRESETS:
 - insert:
     - id: messaging-agent-ui
       name: './plugin/index.mjs'
-''', encoding='utf-8')
+'''
+patch_path = ROOT/'web.patch.yml'
+if patch_path.exists() and not force:
+    skipped.append('web.patch.yml')
+else:
+    patch_path.write_text(PATCH, encoding='utf-8')
+    written.append('web.patch.yml')
+    if force:
+        print('⚠️  --force：web.patch.yml 已按**模板**重写。模板是旧快照，')
+        print('    里面没有那 17 条关闭通用工具的规则 —— 如果要保留它们，请从 git 里恢复。')
+
+if skipped:
+    print('以下文件已存在，未改动（要强制按模板重写加 --force）：')
+    for item in skipped:
+        print('   -', item)
+if written:
+    print('已生成：', '、'.join(written))
