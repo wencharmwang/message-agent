@@ -24,7 +24,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# 注意：**错误不能被 -Quiet 静音**。restart.ps1 会用退出码判断"停没停成功"，
+# 用户看到的却是"停止失败"却没有任何原因 —— 第一版就是 Say 把所有输出都吃了，
+# 排查时只能靠猜（实测）。
 function Say($t, $c = 'Gray') { if (-not $Quiet) { Write-Host $t -ForegroundColor $c } }
+function Fail($t) { Write-Host $t -ForegroundColor Red }
 
 # ---- 1. 找到"本产品根目录"（安装版 = 脚本所在目录；源码检出 = 上一层）----
 function Resolve-ProductRoot([string]$start) {
@@ -119,9 +123,12 @@ while ((Get-Date) -lt $deadline) {
 
 Say ''
 if ($busy.Count -gt 0) {
-  Say ("停止失败：端口 {0} 还占着 —— 还有没认出来的实例。" -f ($busy -join '、')) 'Red'
-  Say '请把下面这条的输出发给维护者：' 'Yellow'
-  Say ("  Get-NetTCPConnection -LocalPort {0} -State Listen | Select-Object OwningProcess" -f $busy[0]) 'DarkGray'
+  Fail ("停止失败：端口 {0} 还占着 —— 还有没认出来的实例。" -f ($busy -join '、'))
+  Fail '请把下面这条的输出发给维护者：'
+  Fail ("  Get-NetTCPConnection -LocalPort {0} -State Listen | Select-Object OwningProcess" -f $busy[0])
   exit 1
 }
 Say '消息助手已停止。' 'Green'
+# **成功也要显式给退出码**：不然 $LASTEXITCODE 会留着上一次外部命令的值，
+# restart.ps1 拿它判断成败就会误判成"停止失败"（实测踩到）。
+exit 0

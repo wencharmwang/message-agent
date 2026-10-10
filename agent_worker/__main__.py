@@ -515,17 +515,26 @@ def main():
             harness.close()
         return
     # Hold a process-lifetime lock before recovery; a second launch must not disturb active jobs.
-    lock = open(config['database'] + '.worker.lock', 'a+b')
-    if os.name == 'nt':
-        import msvcrt
-        lock.seek(0)
-        lock.write(b'0')
-        lock.flush()
-        lock.seek(0)
-        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-    else:
-        import fcntl
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    lock_path = config['database'] + '.worker.lock'
+    lock = open(lock_path, 'a+b')
+    try:
+        if os.name == 'nt':
+            import msvcrt
+            lock.seek(0)
+            lock.write(b'0')
+            lock.flush()
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # 裸栈会让用户完全不知道发生了什么（实测：重启后页面空白，日志里只有一个
+        # PermissionError）。这里说清"谁占着、怎么办"。
+        raise SystemExit(
+            '已经有一个消息助手在运行（锁文件被占用）：\n  ' + lock_path + '\n'
+            '先停掉旧实例再启动：见 packaging 目录下的 stop.ps1（加 -DryRun 可先试看）。\n'
+            '如果确认没有实例在跑，删掉上面那个 .worker.lock 再启动。')
     worker = Worker(config)
     token = Path(config['control_token_file']).read_text().strip()
     if len(token) < 32:
