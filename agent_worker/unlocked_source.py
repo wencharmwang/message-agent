@@ -109,7 +109,11 @@ class UnlockedSource:
 
         root = self.unlocked_root
         if not root.is_dir():
-            raise UnlockedRootError(f'已解锁目录不存在：{root}')
+            raise UnlockedRootError(
+                f'已解锁目录不存在：{root}\n'
+                '请把它指向你解出来的那个目录（里面应该有 manifest.json 和 plain/）。'
+                '产物要求见 docs/unlocked-db-protocol.md；'
+                '选择自己准备的客户可以照 docs/self-unlock-prompt.md 里的提示词让 Agent 完成。')
 
         manifest_path = root / 'manifest.json'
         if not manifest_path.is_file():

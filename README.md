@@ -49,9 +49,9 @@ Windows 登录任务 `Messaging Agent` 托管 `launch.py`，共同管理 Harness
 
 ## 读取与验证边界
 
-**读走本地数据库，发走 UI。** 首页、整理、会话正文、说话方式分析全部读 wechat-db-lab 解密出的明文副本（`plain/session/session.db`、`plain/message/message_N.db`，`mode=ro&immutable=1`），一次读库只遍历一遍分片。它不打开微信窗口、不抢前台、不清未读红点，也不受"左侧列表只能看到十来行"的限制。发送仍然走 messaging-runtime 的后台点击（个人微信没有官方 API），所以发送会短暂把微信切到前台。
+**读走本地数据库，发走 UI。** 首页、整理、会话正文、说话方式分析全部读一份**外部准备好的「已解锁数据库目录」**（`plain/session/session.db`、`plain/message/message_N.db`，`mode=ro&immutable=1`），一次读库只遍历一遍分片。**本项目不解锁** —— 它不取密钥、不做页解密、不读进程内存，只按协议读别人产出的明文副本（协议见 [`docs/unlocked-db-protocol.md`](docs/unlocked-db-protocol.md)）。它不打开微信窗口、不抢前台、不清未读红点，也不受"左侧列表只能看到十来行"的限制。发送仍然走 messaging-runtime 的后台点击（个人微信没有官方 API），所以发送会短暂把微信切到前台。
 
-代价是数据源依赖解密缓存：拿不到密钥时整条读取链路为空（此时首页会直说"还没有读到会话"），而不会退化成读错内容。
+代价是数据源依赖那份产物：没配 `unlocked_root`、或产物不合格时，整条读取链路为空（此时首页会直说"还没有读到会话"），而不会退化成读错内容。产物缺什么、为什么不合格，启动时的校验会逐条说清。
 
 验证包括后台微信只读探测、原生 Harness 真实模型任务、模拟消息端到端测试（回复、暂停、去重）、同一会话多轮续聊及重启恢复、联系人隔离，以及上层和 Runtime/WeChat 回归测试。界面另有两层自动化体检：`plugin/client-render.test.mjs` 钉住界面约定（导航结构、"回到对话框"只在开发者模式出现、OCR 版整理页不得复活），`plugin/client-smoke.test.mjs` 用 react-dom/server 把每个页面真的渲染一遍，抓"白屏"这类只有打开页面才会发现的错误。会话复用测试使用模拟消息，不向真实联系人发送测试消息。
 
@@ -59,6 +59,9 @@ Windows 登录任务 `Messaging Agent` 托管 `launch.py`，共同管理 Harness
 
 | 文档 | 讲什么 |
 | --- | --- |
+| [unlocked-db-protocol.md](docs/unlocked-db-protocol.md) | **本项目唯一需要的外部输入**：已解锁目录长什么样（manifest v1 + `plain/`） |
+| [self-unlock-prompt.md](docs/self-unlock-prompt.md) | 自己准备数据：**发给你的 Agent 的提示词**（准备 / 排障两段）+ 自检命令 |
+| [delivery.md](docs/delivery.md) | 两种交付方式（你提供解锁 / 客户自己用 Agent 解锁）、验收标准、平台限制 |
 | [architecture.md](docs/architecture.md) | 分层、数据流、模块边界 |
 | [message-home-design.md](docs/message-home-design.md) | 「消息」首页的产品约定与实现取舍（含逐条钉住的用户要求） |
 | [manual-message-organizer.md](docs/manual-message-organizer.md) | 手动触发的消息整理链路 |
