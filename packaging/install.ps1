@@ -117,8 +117,36 @@ if (-not (Test-Path -LiteralPath (Join-Path $EngineRoot 'apps\cli\src\bin.ts')) 
     -not (Test-Path -LiteralPath (Join-Path $Source 'engine\harness.tar'))) {
   Die "找不到消息引擎（既没有 $EngineRoot，也没有 engine\harness.tar）。发给用户的包必须带引擎；开发者可以用 -EngineRoot 指定引擎目录。"
 }
-if (-not (Test-Path -LiteralPath (Join-Path $RuntimeRoot '.runtime-data\shared-service.json'))) {
-  Warn "没有找到消息服务的数据目录（$RuntimeRoot\.runtime-data）。如果消息服务装在别处，请用 -RuntimeRoot 指定。"
+
+# 消息运行时：**包里带了就直接装** —— 客户只需要拿到这一个包。
+# 它是启动硬前提（app\launch.py 要读它的 .runtime-data\shared-service.json 拿 token，
+# 发送也全靠它），以前要单独装，客户装完这个包照样起不来。
+$bundledRuntime = Join-Path $Source 'components\messaging-runtime'
+if (Test-Path -LiteralPath (Join-Path $bundledRuntime 'artifacts\app\messaging-runtime.dll')) {
+  Step '安装消息运行时'
+  # 只覆盖**程序文件**（artifacts/tools/config/runtime），**绝不动 .runtime-data**
+  # —— 那里是客户的消息库与审批记录，覆盖掉就是数据事故。
+  New-Item -ItemType Directory -Force -Path $RuntimeRoot | Out-Null
+  foreach ($name in 'artifacts','tools','config','runtime') {
+    $from = Join-Path $bundledRuntime $name
+    if (-not (Test-Path -LiteralPath $from)) { continue }
+    # robocopy：node_modules/python 那种深度路径用 Copy-Item 会成片失败（260 字符限制）。
+    & robocopy $from (Join-Path $RuntimeRoot $name) /E /NFL /NDL /NJH /NJS /R:1 /W:1 /XD __pycache__ | Out-Null
+    if ($LASTEXITCODE -ge 8) { Die "复制消息运行时失败（robocopy 退出码 $LASTEXITCODE）：$name" }
+  }
+  Say ("    已装到 $RuntimeRoot") 'Gray'
+  # 让 message-agent 与其它工具都能找到它（install.ps1 自己也读这个键）。
+  New-Item -Path 'HKCU:\Software\MessagingRuntime' -Force | Out-Null
+  Set-ItemProperty -Path 'HKCU:\Software\MessagingRuntime' -Name 'Root' -Value $RuntimeRoot
+  if (Test-Path -LiteralPath (Join-Path $RuntimeRoot 'artifacts\app\coreclr.dll')) {
+    Say '    自带 .NET 运行时（客户机不需要另装 .NET）' 'Gray'
+  } else {
+    Warn '    这份运行时是"依赖框架"的，客户机需要装 .NET 8 才能发消息。'
+    Warn '    要出免装 .NET 的包，重新构建时加：tools\package.ps1 -SelfContained'
+  }
+} elseif (-not (Test-Path -LiteralPath (Join-Path $RuntimeRoot '.runtime-data\shared-service.json'))) {
+  Warn "没有找到消息服务（$RuntimeRoot\.runtime-data），包里也没带。"
+  Warn '装好后程序能启动但发不出消息；补齐办法：用 -RuntimeRoot 指定，或让消息服务单独装好。'
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir, $DataDir | Out-Null

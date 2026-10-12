@@ -28,11 +28,13 @@ param(
   [string]$OutDir = '',
   [string]$RepoRoot = '',
   [string]$EngineRoot = '',
+  [string]$RuntimePackage = '',
   [string]$NodeRuntime = '',
   [string]$PythonRuntime = '',
   [string]$NodeVersion = 'v22.23.0',
   [string]$PythonVersion = '3.13.12',
   [switch]$SkipEngine,
+  [switch]$SkipRuntime,
   [switch]$SkipHashes,
   [switch]$ForceEngine,
   # 注意：**不能**把这个开关叫 -Zip —— PowerShell 的变量名不区分大小写，
@@ -163,6 +165,54 @@ Say '    sqlite3 可用' 'Green'
 # 注：**不再打包取密钥/解密组件**。本项目不接触密钥与解密 —— 解锁由外部完成，
 # 产物是一个符合 docs/unlocked-db-protocol.md 的"已解锁目录"。因此安装包不再携带
 # 任何解密代码（这一条是"隔离"能否成立的硬要求：包里有，就等于你仍在分发手段）。
+
+# -- 3.5 消息运行时（客户拿一个包就够） ---------------------------------------
+# 运行时是**启动硬前提**：launch.py 要读它的 .runtime-data\shared-service.json 拿 token，
+# 发送也全靠它。以前它要单独装，客户拿到本包也起不来 —— 这里直接打进去。
+Step '消息运行时'
+if ($SkipRuntime) {
+  Say '    按要求跳过（客户拿到的包将不含消息运行时，发不出消息）' 'Yellow'
+} elseif (-not $RuntimePackage) {
+  $guess = Join-Path (Split-Path $RepoRoot -Parent) 'messaging-runtime\artifacts\packages'
+  if (Test-Path -LiteralPath $guess) {
+    $RuntimePackage = (Get-ChildItem -LiteralPath $guess -Directory |
+                       Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+  }
+}
+$runtimeOut = Join-Path $package 'components\messaging-runtime'
+if (-not $SkipRuntime) {
+if (-not $RuntimePackage -or -not (Test-Path -LiteralPath (Join-Path $RuntimePackage 'artifacts\app\messaging-runtime.dll'))) {
+  throw @'
+没有可打包的消息运行时。先就地构建它（自包含，客户机不用装 .NET）：
+
+    cd <messaging-runtime>
+    powershell -ExecutionPolicy Bypass -File tools\package.ps1 -SelfContained
+    # 产出：artifacts\packages\messaging-runtime-<时间戳>\
+
+然后把那个目录用 -RuntimePackage <目录> 指定给本脚本。
+（确实不想带运行时、只给自己做实验，可以加 -SkipRuntime。）
+'@
+}
+New-Item -ItemType Directory -Force -Path $runtimeOut | Out-Null
+foreach ($name in 'artifacts','tools','config','runtime') {
+  $from = Join-Path $RuntimePackage $name
+  if (Test-Path -LiteralPath $from) {
+    Copy-Item -LiteralPath $from -Destination (Join-Path $runtimeOut $name) -Recurse -Force
+  }
+}
+foreach ($file in 'README.md') {
+  $from = Join-Path $RuntimePackage $file
+  if (Test-Path -LiteralPath $from) { Copy-Item -LiteralPath $from -Destination $runtimeOut -Force }
+}
+Get-ChildItem -LiteralPath $runtimeOut -Recurse -Force -Directory |
+  Where-Object { $_.Name -eq '__pycache__' } | ForEach-Object {
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+  }
+$rtMB = [math]::Round(((Get-ChildItem -LiteralPath $runtimeOut -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 0)
+$selfContained = Test-Path -LiteralPath (Join-Path $runtimeOut 'artifacts\app\coreclr.dll')
+Say ("    components\messaging-runtime  {0} MB（{1}）" -f $rtMB,
+     $(if ($selfContained) { '自包含，客户机不需要装 .NET' } else { '依赖框架 —— 客户机需要装 .NET 8' })) $(if ($selfContained) { 'Green' } else { 'Yellow' })
+}
 
 # -- 4. 引擎 ----------------------------------------------------------------
 Step '引擎'
