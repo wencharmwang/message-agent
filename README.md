@@ -68,4 +68,3 @@ Windows 登录任务 `Messaging Agent` 托管 `launch.py`，共同管理 Harness
 | [auto-reply-context-system.md](docs/auto-reply-context-system.md) | 自动回复的上下文构成与发送治理 |
 | [knowledge-base.md](docs/knowledge-base.md) | 知识库：分类、风险等级、引用方式 |
 | [message-center-product-design.md](docs/message-center-product-design.md) | 消息中心（历史方案；`plugin/host/message-center.mjs` 仍按其 §2 实现） |
-| [packaging-plan.md](docs/packaging-plan.md) | 打包与交付方案（**待评估**）：一键安装、模型 key、微信密钥保管、明文副本策略 |

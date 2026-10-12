@@ -193,29 +193,38 @@ CRM 归 Message Agent 的业务模块，不放进通用消息 Runtime。第一�
 
 ## 9. 验收与后续入口
 
-引擎内置、公共 Runtime 复用、密钥保管、明文副本策略、模型配置与发布迁移见 [打包与交付方案](packaging-plan.md)。本轮没有运行安装器、重启服务、变更规则或向真实联系人发送消息。
+引擎内置、公共 Runtime 复用、模型配置与发布迁移见 [交付说明](delivery.md)。
+**本项目不解锁**：数据来自外部准备好的「已解锁目录」，见 [产物协议](unlocked-db-protocol.md)。
+本轮没有运行安装器、重启服务、变更规则或向真实联系人发送消息。
 
 
-## 10. 监听本地数据库的具体实现（2026-09-21 核对）
+## 10. 监听本地数据库的具体实现（2026-10-12 核对）
 
 这一节回答"消息到底是怎么被监听到的"，都是照着代码和真实库核对过的。
 
 ### 10.1 链路
 
+**本项目不解锁**：它读一份**外部准备好的**「已解锁目录」（协议见
+[unlocked-db-protocol.md](unlocked-db-protocol.md)）—— 不取密钥、不做页解密、不读进程内存。
+
 ```text
 微信 4.x 原始库（加密）
-  └─ wechat-db-lab 解锁 → vault/<账号>/plain/**（明文副本）
-       ├─ python -m wechat_db_lab.cli watch --interval 3 --overlap 10   ← 子进程，逐行输出 JSON 事件
-       │     └─ WatcherSource（agent_worker/watcher_source.py）解析 stdout → 事件队列
-       │           └─ Worker.tick() → _handle_event → 规则匹配 → 交引擎决策 → 发送
-       └─ 界面用的读取：Worker 直接用 SQL 查明文副本（不经过 watcher）
+  └─ 【外部】解锁 → <unlocked_root>/manifest.json + plain/**（明文库）
+       └─ UnlockedSource（agent_worker/unlocked_source.py）就地轮询这个目录
+            └─ Worker.tick() → _handle_event → 规则匹配 → 交引擎决策 → 发送
+       界面用的读取：Worker 直接用 SQL 查同一个目录（不经过 UnlockedSource）
 ```
 
-* **监听靠子进程**：`WatcherSource` 起一个 `wechat_db_lab.cli watch` 进程，每 3 秒扫一次新消息，
-  按 `sort_seq`（毫秒时间戳、全局单调）去重，逐行打印 JSON 事件（username / direction /
-  text / local_type / sort_seq / create_time）。
-* **Worker 再按自己的 `poll_interval_seconds` 取事件**，所以端到端延迟 ≈ 两个周期（秒级）。
-* `PYTHONUTF8=1` + `encoding="utf-8"`：Windows 下不给这两个，中文正文会读成乱码（注释里记着）。
+* **一轮 poll 就是读一次**：先校验产物 → 打开只读连接 → 按时间窗口（`overlap` 秒重叠）
+  加 `(username, local_id)` 去重捞新消息 → 关连接。
+* **首次 poll 只建基线、不产出事件** —— 否则上线瞬间会把历史消息当新消息全部回一遍。
+* **每轮重开连接**是有意的：外部解锁方会覆盖 `plain/*.db`，Windows 下持着句柄会挡住它写入。
+* **事件字段**（`MessageEvent.as_dict()`）：`username` / `display` / `direction` / `sender` /
+  `text` / `local_type` / `type` / `create_time` / `sort_seq` / `local_id`。
+  **这十个键是 worker 的契约，改名字会直接打断解析。**
+* **产物不合格时只记错误、不抛异常**：`poll()` 返回空列表，把原因放进 `last_error()`，
+  界面据此提示用户缺什么、怎么办 —— 一次坏产物不会打断 tick。
+* 端到端延迟 ≈ 两个周期（worker 的 `poll_interval_seconds`，秒级）。
 
 ### 10.2 界面读消息走的是另一条路（直接 SQL）
 
