@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -14,6 +16,10 @@ from .harness import Harness
 from .send_outcome import normalize_send_outcome
 from . import secrets_store
 from . import model_providers
+
+# 非 Windows 上没有这个常量：直接写 subprocess.CREATE_NO_WINDOW 会在别的平台上报
+# AttributeError（launch.py 里踩过同样的坑，这是同一个写法）。
+NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 
 def credentials_dir(worker) -> Path:
@@ -27,6 +33,118 @@ def settings_path(worker) -> Path:
     """引擎的 settings.yaml —— 供应商就写在这里。"""
     home = worker.config.get('harness_home')
     return Path(home or '.harness') / 'settings.yaml'
+
+
+# ---------------------------------------------------------------------------
+# 识别加速（可选）：查状态 / 现装 / 卸掉
+#
+# 默认交付的包**不带** GPU 那套（CUDA 库 2.2 GB，多数客户用不上）。有 NVIDIA 显卡的
+# 客户可以自己下载安装 —— 依赖全在 PyPI，所以不需要谁托管二进制，也不需要我们出场。
+# 装/卸都由**消息运行时自带的那份工具**执行（见 messaging-runtime/tools/install-gpu.ps1）：
+# 加速库属于运行时的 Python，不该由本进程去改别人的 site-packages。
+# ---------------------------------------------------------------------------
+_GPU_CACHE = {'at': 0.0, 'value': None}
+_GPU_PROCESS = {'proc': None, 'kind': ''}
+
+
+def _runtime_root(worker):
+    """从配置推出消息运行的根目录（配置里存的是它的 .runtime-data\\shared-service.json）。"""
+    settings = worker.config.get('runtime_settings_file')
+    if not settings:
+        return None
+    return Path(settings).parent.parent
+
+
+def _gpu_script(worker) -> Path | None:
+    root = _runtime_root(worker)
+    if root is None:
+        return None
+    script = root / 'tools' / 'install-gpu.ps1'
+    return script if script.is_file() else None
+
+
+def gpu_status(worker) -> dict:
+    """异步的只读状态：有没有 NVIDIA 显卡、加速装没装、当前 provider 是什么。
+
+    provider 那条要起一次自带的 Python（约 1-2 秒），所以结果缓存 20 秒 —— 界面会轮询它。
+    """
+    import time as _time
+    root = _runtime_root(worker)
+    script = _gpu_script(worker)
+    if script is None:
+        return {'ok': False, 'available': False,
+                'message': '找不到消息运行时的加速工具（tools\\install-gpu.ps1）。'
+                           '如果是便携使用，确认运行时与本程序配套安装。'}
+
+    proc = _GPU_PROCESS.get('proc')
+    running = bool(proc and proc.poll() is None)
+    now = _time.time()
+    cached = _GPU_CACHE['value']
+    if cached and now - _GPU_CACHE['at'] < 20 and not running:
+        return cached
+
+    python = root / 'runtime' / 'python' / 'python.exe'
+    providers = ''
+    if python.is_file():
+        try:
+            out = subprocess.run([str(python), '-c',
+                                  'import onnxruntime as o; print(",".join(o.get_available_providers()))'],
+                                 capture_output=True, text=True, timeout=30,
+                                 creationflags=NO_WINDOW)
+            providers = (out.stdout or '').strip().splitlines()[-1] if out.stdout.strip() else ''
+        except Exception as error:                       # pragma: no cover - 环境问题
+            providers = f'({type(error).__name__})'
+
+    nvidia = False
+    try:
+        smi = shutil.which('nvidia-smi')
+        if smi:
+            probe = subprocess.run([smi, '-L'], capture_output=True, text=True, timeout=10,
+                                   creationflags=NO_WINDOW)
+            nvidia = 'GPU' in (probe.stdout or '')
+    except Exception:                                     # pragma: no cover - 环境问题
+        nvidia = False
+
+    value = {
+        'ok': True,
+        'available': True,
+        'nvidia': nvidia,
+        'installed': (root / 'runtime' / 'gpu-libs').is_dir(),
+        'accelerated': 'CUDA' in providers.upper(),
+        'providers': providers,
+        'running': running,
+        'action': _GPU_PROCESS.get('kind', ''),
+        'message': '',
+    }
+    _GPU_CACHE['at'] = now
+    _GPU_CACHE['value'] = value
+    return value
+
+
+def start_gpu_action(worker, action: str) -> dict:
+    """启动一次装/卸。同一时刻只允许一个（互相踩会把 site-packages 弄乱）。"""
+    script = _gpu_script(worker)
+    if script is None:
+        return {'ok': False, 'error': '找不到消息运行时的加速工具。'}
+    proc = _GPU_PROCESS.get('proc')
+    if proc and proc.poll() is None:
+        return {'ok': False, 'error': '正在处理中，请等它结束。'}
+    if action not in ('install', 'remove'):
+        return {'ok': False, 'error': '未知操作。'}
+
+    command = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script)]
+    if action == 'remove':
+        command.append('-Remove')
+    elif not gpu_status(worker).get('nvidia'):
+        # 没检测到 NVIDIA 显卡就别白下 2 GB —— 加 -Force 才会继续。
+        return {'ok': False, 'error': '没有检测到 NVIDIA 显卡（或驱动没装），不下载加速包。'}
+
+    _GPU_PROCESS['proc'] = subprocess.Popen(command, cwd=str(script.parent),
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                            creationflags=NO_WINDOW)
+    _GPU_PROCESS['kind'] = action
+    _GPU_CACHE['value'] = None       # 让下一次状态查询重新去问真状态
+    return {'ok': True, 'action': action}
 
 
 def unlocked_status(worker) -> dict:
@@ -173,6 +291,9 @@ def handler(worker, token):
             elif self.path == '/api/unlocked':
                 # 只读状态：产物在哪、可不可用、有多旧。**永不返回密钥内容**（本项目根本不碰密钥）。
                 self.response(200, {'unlocked': unlocked_status(worker)})
+            elif self.path == '/api/gpu':
+                # 识别加速的只读状态（有没有 NVIDIA 显卡、加没装、当前 provider）。
+                self.response(200, {'gpu': gpu_status(worker)})
             elif self.path == '/api/model-providers':
                 # 可选的模型供应商目录 + 哪些已经配过。只读，不含任何密钥。
                 self.response(200, {'providers': model_providers.describe(),
@@ -202,6 +323,12 @@ def handler(worker, token):
                     # 重新校验一次产物（用户刚解锁完、或改了 unlocked_root 之后点一下）。
                     # **它只读、只校验** —— 不解锁、不读进程内存。解锁是外部工具的事。
                     self.response(200, {'unlocked': unlocked_status(worker)})
+                elif self.path == '/api/gpu/action':
+                    # 装 / 卸识别加速。真正的下载由**消息运行时自带的工具**做（加速库属于它的
+                    # Python），本进程只负责触发与报状态。没检测到 NVIDIA 显卡时不下载（见
+                    # start_gpu_action 里的理由）。
+                    result = start_gpu_action(worker, str(data.get('action') or ''))
+                    self.response(200 if result.get('ok') else 409, result)
                 elif self.path == '/api/model-provider':
                     # 用户从下拉里选一家供应商、贴上 key（用户要求：不能只支持一家，
                     # 要给选择的机会）。这里做两件事：把 provider 写进引擎配置（只增不删），

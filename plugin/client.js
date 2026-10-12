@@ -1427,6 +1427,43 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
     return h(HomeCard,{title:'还没有读到会话'},h(WeChatInitCard,{}));
   }
 
+  /**
+   * 设置页里的「识别速度」。
+   *
+   * 默认交付的安装包不带显卡加速（那套 CUDA 库 2.2 GB，多数电脑用不上），识别走处理器 ——
+   * 功能完全正常，只是慢一些。有独立显卡的客户可以在这里**自己**下载，装完重启即可。
+   * 装/卸都由消息运行时自带的工具执行（加速库属于它的运行环境），这里只显示状态和发起动作。
+   */
+  function GpuSection(){
+    const gpu=usePoller(true,()=>api('gpu'),15000);
+    const [busy,setBusy]=useState(false),[note,setNote]=useState(''),[error,setError]=useState('');
+    const d=gpu.data?.gpu;
+    if(!d||!d.available)return null;          // 读不到就整块不显示，别占版面
+    const on=!!d.accelerated;
+    async function run(action){
+      setBusy(true);setError('');setNote('');
+      try{
+        await api('gpu/action',{action});
+        setNote(action==='install'?'已开始下载，可能要几分钟；装完重启一次消息助手即可。':'正在移除，完成后再重启一次。');
+        await gpu.refresh();
+      }catch(e){setError(e.message);}
+      finally{setBusy(false);}
+    }
+    return h('section',{style:card},
+      h('h2',{style:{...h2,margin:'0 0 6px'}},'识别速度'),
+      h('p',{style:{...hint,margin:'0 0 10px'}},
+        on?'已开启独立显卡加速，识别更快。'
+          :'当前用处理器识别，功能正常但慢一些。这台电脑如果有独立显卡，可以下载加速包让它快起来。'),
+      d.nvidia?null:h('p',{style:{...hint,margin:'0 0 10px'}},'（没有检测到独立显卡，装了也不会更快。）'),
+      h('div',{style:{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}},
+        on?h('button',{disabled:busy||d.running,onClick:()=>run('remove'),style:button(false,false,true)},'移除加速')
+          :h('button',{disabled:busy||d.running||!d.nvidia,onClick:()=>run('install'),style:button(true)},'下载加速包（约 2 GB）'),
+        (busy||d.running)?h('span',{style:hint},'处理中，先别关页面…'):null,
+        note?h('span',{style:hint},note):null,
+        error?h('span',{style:{...hint,color:C.error}},error):null),
+      h('p',{style:{...hint,margin:'10px 0 0'}},'加速包从官方源下载，随时可以移除；不影响聊天记录和发送。'));
+  }
+
   /** 设置页里的同一件事：初始化完成后整块消失（用户要求：读过就别再显示）。 */
   function WeChatInitSection(){
     const keys=usePoller(true,()=>api('unlocked'),20000);
@@ -3365,6 +3402,7 @@ body[data-ds-dark-theme] [data-ma] .lg-switch-knob{background:#e9f0eb}
            h('p',{style:{marginTop:16,color:C.text2,fontSize:14,lineHeight:1.8}},'自动回复规则和发送记录保存在这台电脑上。使用云端模型时，为了生成回复，相关聊天内容会发送给模型服务。')),
         // 初始化完成后这块自己消失（用户要求：已经读过就别再显示，免得反复点触发风险）。
         h(WeChatInitSection,{}),
+        h(GpuSection,{}),
         h(ModelSetupCard,{}),
         modeCard,
         advanced&&h(TaskModelPicker,{title:'自动回复模型',
