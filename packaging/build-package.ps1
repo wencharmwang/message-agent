@@ -101,12 +101,17 @@ foreach ($file in 'launch.py', 'node-bootstrap.mjs', 'web.patch.yml') {
 # 注意：**不要**用 `Get-ChildItem -File -Include '*.pyc'` —— 实测在 PowerShell 5.1 里
 # 这个组合会把目录也返回，后面 Remove-Item 会删错东西（`app` 被清空就是这么来的）。
 # 一律显式列出、按名字判断。
-Get-ChildItem -LiteralPath $appOut -Recurse -Force -Directory |
-  Where-Object { $_.Name -eq '__pycache__' } |
-  Remove-Item -Recurse -Force
-Get-ChildItem -LiteralPath $appOut -Recurse -Force -File |
-  Where-Object { $_.Extension -eq '.pyc' -or $_.Name -like '*.test.mjs' } |
-  Remove-Item -Force
+# 用 foreach 逐个删，**不要**用管道接删除命令：某些环境会把删除命令换成不接受管道输入的
+# 安全包装，管道写法在那里会直接报"无法将输入对象绑定到命令的任何参数"，而且是**静默中止**
+# （日志里什么都没有）—— 实测排查了很久。模块限定名可以绕开那层包装。
+foreach ($dir in @(Get-ChildItem -LiteralPath $appOut -Recurse -Force -Directory |
+                   Where-Object { $_.Name -eq '__pycache__' })) {
+  Microsoft.PowerShell.Management\Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue
+}
+foreach ($file in @(Get-ChildItem -LiteralPath $appOut -Recurse -Force -File |
+                    Where-Object { $_.Extension -eq '.pyc' -or $_.Name -like '*.test.mjs' })) {
+  Microsoft.PowerShell.Management\Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+}
 $appFiles = (Get-ChildItem -LiteralPath $appOut -Recurse -Force -File).Count
 if ($appFiles -lt 10) { throw "产品本体复制后只有 $appFiles 个文件，明显不对，中止打包以免发出空包。" }
 Say ("    app\ -> {0:N0} KB，{1} 个文件" -f ((Get-ChildItem $appOut -Recurse -File | Measure-Object Length -Sum).Sum / 1KB), $appFiles) 'Green'
