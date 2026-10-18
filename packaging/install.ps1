@@ -72,7 +72,14 @@ function Confirm($question, $default = $true) {  if ($Silent) { return $default 
 Step '检查这台电脑'
 
 if (-not [Environment]::Is64BitOperatingSystem) { Die '需要 64 位 Windows。' }
-Ok "系统：Windows $([Environment]::OSVersion.Version.Major)（64 位）"
+# 注意：Win11 的 Version.Major **仍然是 10**（内部版本号 ≥ 22000 才是 Win11）。
+# 只打印 Major 会把 Win11 说成 Win10，客户会怀疑装错版本（实测被问到）。
+$osBuild = [Environment]::OSVersion.Version.Build
+$osName =
+  if ($osBuild -ge 22000) { 'Windows 11' }
+  elseif ($osBuild -ge 10240) { 'Windows 10' }
+  else { "Windows $([Environment]::OSVersion.Version.Major)" }
+Ok "系统：$osName（版本 $osBuild，64 位）"
 
 $wechat = @("$env:USERPROFILE\xwechat_files", "$env:USERPROFILE\Documents\xwechat_files")
 # 客户改过"文件保存位置"的话，默认位置是空的 —— 这里也认微信自己记的那个路径
