@@ -1,4 +1,4 @@
-﻿<#
+﻿﻿<#
   组装可交付的安装包目录（给普通用户的那种）。
 
   产出：<OutDir>\package\
@@ -170,6 +170,18 @@ Say '    sqlite3 可用' 'Green'
 # 注：**不再打包取密钥/解密组件**。本项目不接触密钥与解密 —— 解锁由外部完成，
 # 产物是一个符合 docs/unlocked-db-protocol.md 的"已解锁目录"。因此安装包不再携带
 # 任何解密代码（这一条是"隔离"能否成立的硬要求：包里有，就等于你仍在分发手段）。
+
+# -- 3.4 语音解码组件（发送必需）---------------------------------------------
+# install.ps1 里是硬要求：缺了会 Die，客户装不下去（实测踩到：母包里没有 components\silk）。
+Step '语音解码组件'
+$silkSource = Join-Path $RepoRoot 'packaging\components\silk'
+if (-not (Test-Path -LiteralPath (Join-Path $silkSource 'silk-decoder-x64.exe'))) {
+  throw "缺少语音解码组件：$silkSource\silk-decoder-x64.exe（发送消息必需，install.ps1 会拒绝安装）"
+}
+$silkOut = Join-Path $package 'components\silk'
+New-Item -ItemType Directory -Force -Path $silkOut | Out-Null
+Copy-Item -LiteralPath (Join-Path $silkSource '*') -Destination $silkOut -Force
+Say ("    components\silk  {0} 个文件" -f @(Get-ChildItem -LiteralPath $silkOut -File).Count) 'Green'
 
 # -- 3.5 消息运行时（客户拿一个包就够） ---------------------------------------
 # 运行时是**启动硬前提**：launch.py 要读它的 .runtime-data\shared-service.json 拿 token，
