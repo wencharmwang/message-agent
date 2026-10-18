@@ -70,7 +70,7 @@ def main(argv: list[str]) -> int:
         # ② 再补链接
         print('    正在重建链接…', flush=True)
         failed: list[tuple[str, str]] = []
-        stats = {'硬链接': 0, '符号链接(junction)': 0, '符号链接(复制)': 0, '已存在': 0}
+        stats = {'目录链接→junction': 0, '文件硬链接': 0, '符号链接(junction)': 0, '符号链接(复制)': 0, '已存在': 0}
 
         def _fix_path(name: str, base_dir: str) -> str:
             return name if os.path.isabs(name) else os.path.normpath(os.path.join(base_dir, name))
@@ -83,12 +83,19 @@ def main(argv: list[str]) -> int:
                     stats['已存在'] += 1
                     continue
                 if member.islnk():
-                    target = os.path.join(dest, member.linkname)      # 相对归档根
-                    if not os.path.isfile(target):
-                        failed.append((member.name, f'硬链接目标不存在: {target}'))
+                    # 注意：tar 里的"硬链接"**可能是目录**（pnpm 的 node_modules 里那些
+                    # 包目录就是）。NTFS 不允许给目录建硬链接 —— 必须用 junction。
+                    # 第一次没区分，18,697 个里普遍失败，连带 tsx/package.json 缺失，
+                    # 引擎直接跑不起来（实测：退出码 1，tsx 缺）。
+                    target = os.path.join(dest, member.linkname)
+                    if os.path.isdir(target):
+                        _make_junction(link_path, target)
+                        stats['目录链接→junction'] += 1
+                    elif os.path.isfile(target):
+                        os.link(target, link_path)                # 文件硬链接：不占空间、不需要权限
+                        stats['文件硬链接'] += 1
                     else:
-                        os.link(target, link_path)                    # 硬链接：不需要权限、不占空间
-                        stats['硬链接'] += 1
+                        failed.append((member.name, f'硬链接目标不存在: {target}'))
                 else:
                     target = _fix_path(member.linkname, os.path.dirname(link_path))
                     if os.path.isdir(target):

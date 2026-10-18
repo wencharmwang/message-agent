@@ -325,15 +325,18 @@ if ($EngineRoot -and (Test-Path -LiteralPath (Join-Path $EngineRoot 'apps\cli\sr
     }
     New-Item -ItemType Directory -Force -Path $engineTarget | Out-Null
     Say '    正在解开消息引擎（体积大，请耐心等）…' 'DarkGray'
-    # 引擎里 pnpm 的 node_modules 嵌套很深（实测最长条目 233 字符），加上安装目录前缀
-    # 就超过 Windows 的 260 字符上限。系统自带的 tar.exe 在 \\?\ 长路径上会直接报
-    # "Invalid argument"（客户机 Win10 实测卡在这一步）。
-    # 改用包里的 Python：tarfile 内部走长路径 API —— 实测 340 字符的路径也能建出来。
+    # 引擎里有 18,697 个 pnpm 链接（多半是**目录**链接）+ 300 字符的深路径：
+    #   * 系统 tar.exe 死在长路径（\\?\ 上 Invalid argument）
+    #   * Python tarfile 直接 extractall 死在"链接目录下的文件"（FileNotFoundError）
+    #   * NTFS 不允许目录硬链接 —— 目录必须建 junction
+    # 所以交给 extract_engine.py：先解普通文件，再按类型补链接（目录→junction，
+    # 文件→硬链接/复制）。junction 不需要管理员权限，也不占额外空间。
     $enginePython = Join-Path $Source 'runtimes\python\python.exe'
     if (-not (Test-Path -LiteralPath $enginePython)) { Die "包里缺少 Python 运行时，无法解开引擎：$enginePython" }
-    & $enginePython -c 'import sys,tarfile; tarfile.open(sys.argv[1]).extractall(path=sys.argv[2])' `
-        (Join-Path $Source 'engine\harness.tar') $engineTarget
-    if ($LASTEXITCODE -ne 0) { Die "解包引擎失败（Python tarfile 退出码 $LASTEXITCODE）。" }
+    $extractor = Join-Path $Source 'extract_engine.py'
+    if (-not (Test-Path -LiteralPath $extractor)) { Die "包里缺少 extract_engine.py，无法解开引擎：" }
+    & $enginePython $extractor (Join-Path $Source 'engine\harness.tar') $engineTarget
+    if ($LASTEXITCODE -ne 0) { Die "解包引擎失败（extract_engine.py 退出码 $LASTEXITCODE，具体见上面的清单）。" }
     foreach ($must in 'apps\cli\src\bin.ts', 'node_modules\tsx') {
       if (-not (Test-Path -LiteralPath (Join-Path $engineTarget $must))) { Die "引擎解包后缺少 $must，安装中止。" }
     }
