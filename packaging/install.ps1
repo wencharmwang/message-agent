@@ -74,11 +74,25 @@ Step '检查这台电脑'
 if (-not [Environment]::Is64BitOperatingSystem) { Die '需要 64 位 Windows。' }
 Ok "系统：Windows $([Environment]::OSVersion.Version.Major)（64 位）"
 
-$wechat = @("$env:USERPROFILE\xwechat_files", "$env:USERPROFILE\Documents\xwechat_files") |
-  Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+$wechat = @("$env:USERPROFILE\xwechat_files", "$env:USERPROFILE\Documents\xwechat_files")
+# 客户改过"文件保存位置"的话，默认位置是空的 —— 这里也认微信自己记的那个路径
+# （4.x 记在 HKCU\Software\Tencent\Weixin 的 OldFileSavePath，3.x 在 ...\WeChat 的 FileSavePath）。
+foreach ($key in @('HKCU:\Software\Tencent\Weixin', 'HKCU:\Software\Tencent\WeChat')) {
+  $props = Get-ItemProperty $key -ErrorAction SilentlyContinue
+  if (-not $props) { continue }
+  foreach ($name in @('OldFileSavePath', 'FileSavePath')) {
+    $value = "$($props.$name)"
+    if ($value -match '^[A-Za-z]:\\' -and (Test-Path -LiteralPath $value)) {
+      $wechat += $value
+      foreach ($sub in @('xwechat_files', 'WeChat Files')) { $wechat += (Join-Path $value $sub) }
+    }
+  }
+}
+$wechat = @($wechat) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
 if (-not $wechat) {
-  Warn '没有找到微信的数据目录。请先安装并登录微信（个人版），再运行本安装程序。'
-  if (-not (Confirm '仍然继续安装？（装好后需要先登录微信才能读消息）' $false)) { Die '未安装微信。' }
+  # 只提醒、**不拦**：安装本身不依赖微信数据（数据是"解锁"那一步产出的）。
+  # 以前这里是 Confirm … $false（默认 No），客户随手一回车就把安装取消了 —— 实测踩到。
+  Warn '暂时没看到微信的数据目录。装完后登录微信，再双击一次 开始使用.cmd 来读消息即可。'
 } else {
   Ok "微信数据：$wechat"
 }
