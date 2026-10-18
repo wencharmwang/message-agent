@@ -37,3 +37,6 @@ plugin/backups-*.js
 outputs/
 **/.credentials.yaml
 *.credentials.yaml
+
+# 构建缓存（引擎归档 1.7GB，不进 git）
+packaging/.cache/
