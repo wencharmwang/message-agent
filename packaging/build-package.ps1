@@ -61,14 +61,23 @@ function Say($t, $c = 'Gray') { Write-Host $t -ForegroundColor $c }
 function Step($t) { Say ''; Say "== $t" 'Cyan' }
 
 $package = Join-Path $OutDir 'package'
-# 引擎归档 1.5GB、重打要 8 分钟，清理旧包前先把它挪到旁边，清理完再放回。
-# （不加 -ForceEngine 时复用；这也是"改个脚本重打包"能几分钟搞定的原因。）
-$tarCache = Join-Path $OutDir 'harness.tar.cache'
+# 引擎归档 1.5GB、重打要 10 分钟。缓存放**固定位置**：
+# 以前放在 -OutDir 里 —— 一换输出目录缓存就失效，于是每次重打（实测踩到，
+# 为了避开"清理旧包"的问题每次都用新 -OutDir，结果每次都白等 10 分钟）。
+# 现在换目录也能复用；只有引擎代码变了才需要 -ForceEngine。
+$cacheDir = Join-Path $RepoRoot 'packaging\.cache'
+$tarCache = Join-Path $cacheDir 'harness.tar'
 $existingTar = Join-Path $package 'engine\harness.tar'
-if ((Test-Path -LiteralPath $existingTar) -and -not $ForceEngine -and -not $SkipEngine) {
-  New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-  Move-Item -LiteralPath $existingTar -Destination $tarCache -Force
-  Say ''; Say "复用上次打好的引擎归档（改包不重打；要重打加 -ForceEngine）" 'DarkGray'
+if (-not $ForceEngine -and -not $SkipEngine) {
+  # ① 优先用固定缓存
+  if (Test-Path -LiteralPath $tarCache) {
+    Say ''; Say '复用缓存里的引擎归档（要重打加 -ForceEngine）' 'DarkGray'
+  } elseif ((Test-Path -LiteralPath $existingTar) -and ((Get-Item -LiteralPath $existingTar).Length -gt 100MB)) {
+    # ② 退一步：旧包里的那份（同一 -OutDir 重跑时）
+    New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+    Copy-Item -LiteralPath $existingTar -Destination $tarCache -Force
+    Say ''; Say '把旧包里的引擎归档收进缓存（下次换目录也能复用）' 'DarkGray'
+  }
 }
 if (Test-Path -LiteralPath $package) {
   # 清理旧包**不能用 Remove-Item**：它和 Copy-Item 一样受 260 字符路径限制，
@@ -84,7 +93,8 @@ if (Test-Path -LiteralPath $package) {
 New-Item -ItemType Directory -Force -Path $package | Out-Null
 if (Test-Path -LiteralPath $tarCache) {
   New-Item -ItemType Directory -Force -Path (Join-Path $package 'engine') | Out-Null
-  Move-Item -LiteralPath $tarCache -Destination (Join-Path $package 'engine\harness.tar') -Force
+  # 用**复制**而不是移动：缓存要留着，下次换输出目录还能复用。
+  Copy-Item -LiteralPath $tarCache -Destination (Join-Path $package 'engine\harness.tar') -Force
 }
 
 # -- 1. 产品本体 ------------------------------------------------------------
@@ -269,6 +279,10 @@ if ($SkipEngine) {
     & tar -cf $tarPath @excludes -C $EngineRoot .
     if ($LASTEXITCODE -ne 0) { throw "打包引擎失败（tar 退出码 $LASTEXITCODE）" }
     if (-not (Test-Path -LiteralPath $tarPath)) { throw '引擎归档没有生成。' }
+    # 打好的归档顺手存进固定缓存：下次换 -OutDir 也不用再等 10 分钟。
+    New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+    Copy-Item -LiteralPath $tarPath -Destination $tarCache -Force
+    Say ("    归档已存入缓存：{0}" -f $tarCache) 'DarkGray'
   }
   $tarMB = (Get-Item -LiteralPath $tarPath).Length / 1MB
 
