@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿$ErrorActionPreference='Stop'
 $taskTarget='C:\Users\Wencharm\Documents\projects\message-agent'
 $taskRuntime='C:\Users\Wencharm\Documents\projects\messaging-runtime'
 if(Test-Path -LiteralPath (Join-Path $taskTarget 'launch.py')) {

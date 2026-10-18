@@ -1,4 +1,4 @@
-Add-Type -AssemblyName System.Drawing
+﻿Add-Type -AssemblyName System.Drawing
 
 $green = [System.Drawing.ColorTranslator]::FromHtml('#07C160')
 $white = [System.Drawing.Color]::White
