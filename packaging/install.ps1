@@ -318,8 +318,15 @@ if ($EngineRoot -and (Test-Path -LiteralPath (Join-Path $EngineRoot 'apps\cli\sr
     }
     New-Item -ItemType Directory -Force -Path $engineTarget | Out-Null
     Say '    正在解开消息引擎（体积大，请耐心等）…' 'DarkGray'
-    & tar -xf (Join-Path $Source 'engine\harness.tar') -C $engineTarget
-    if ($LASTEXITCODE -ne 0) { Die "解包引擎失败（tar 退出码 $LASTEXITCODE）。" }
+    # 引擎里 pnpm 的 node_modules 嵌套很深（实测最长条目 233 字符），加上安装目录前缀
+    # 就超过 Windows 的 260 字符上限。系统自带的 tar.exe 在 \\?\ 长路径上会直接报
+    # "Invalid argument"（客户机 Win10 实测卡在这一步）。
+    # 改用包里的 Python：tarfile 内部走长路径 API —— 实测 340 字符的路径也能建出来。
+    $enginePython = Join-Path $Source 'runtimes\python\python.exe'
+    if (-not (Test-Path -LiteralPath $enginePython)) { Die "包里缺少 Python 运行时，无法解开引擎：$enginePython" }
+    & $enginePython -c 'import sys,tarfile; tarfile.open(sys.argv[1]).extractall(path=sys.argv[2])' `
+        (Join-Path $Source 'engine\harness.tar') $engineTarget
+    if ($LASTEXITCODE -ne 0) { Die "解包引擎失败（Python tarfile 退出码 $LASTEXITCODE）。" }
     foreach ($must in 'apps\cli\src\bin.ts', 'node_modules\tsx') {
       if (-not (Test-Path -LiteralPath (Join-Path $engineTarget $must))) { Die "引擎解包后缺少 $must，安装中止。" }
     }
