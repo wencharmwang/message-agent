@@ -44,6 +44,22 @@ def _make_junction(link_path: str, target: str) -> None:
         raise OSError(_decode(result.stdout) or _decode(result.stderr) or f'mklink 退出码 {result.returncode}')
 
 
+def _link_or_copy(link_path: str, target: str) -> str:
+    """目录链接：优先 junction，失败就退回复制。
+
+    为什么不能只靠 junction：mklink 是 **cmd 的内建命令**，而 cmd 按 ANSI 代码页
+    解释命令行参数。客户路径里有中文（C:\\Users\\璐璐\\Downloads\\...）时，路径会被
+    打乱，mklink 报 `Invalid switch - "vendor"`（实测：2,786 个全失败）。
+    复制走的是 Python 自己的文件 API，中文、长路径都没问题 —— 代价只是多占点空间。
+    """
+    try:
+        _make_junction(link_path, target)
+        return 'junction'
+    except OSError:
+        shutil.copytree(target, link_path, symlinks=False, dirs_exist_ok=False)
+        return '复制'
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
         print('用法: extract_engine.py <归档> <目标目录>')
@@ -70,7 +86,8 @@ def main(argv: list[str]) -> int:
         # ② 再补链接
         print('    正在重建链接…', flush=True)
         failed: list[tuple[str, str]] = []
-        stats = {'目录链接→junction': 0, '文件硬链接': 0, '符号链接(junction)': 0, '符号链接(复制)': 0, '已存在': 0}
+        stats = {'目录链接→junction': 0, '目录链接→复制': 0, '文件硬链接': 0,
+                 '符号链接(junction)': 0, '符号链接(复制)': 0, '已存在': 0}
 
         def _fix_path(name: str, base_dir: str) -> str:
             return name if os.path.isabs(name) else os.path.normpath(os.path.join(base_dir, name))
@@ -89,8 +106,7 @@ def main(argv: list[str]) -> int:
                     # 引擎直接跑不起来（实测：退出码 1，tsx 缺）。
                     target = os.path.join(dest, member.linkname)
                     if os.path.isdir(target):
-                        _make_junction(link_path, target)
-                        stats['目录链接→junction'] += 1
+                        stats['目录链接→' + _link_or_copy(link_path, target)] += 1
                     elif os.path.isfile(target):
                         os.link(target, link_path)                # 文件硬链接：不占空间、不需要权限
                         stats['文件硬链接'] += 1
@@ -99,8 +115,7 @@ def main(argv: list[str]) -> int:
                 else:
                     target = _fix_path(member.linkname, os.path.dirname(link_path))
                     if os.path.isdir(target):
-                        _make_junction(link_path, target)
-                        stats['符号链接(junction)'] += 1
+                        stats['符号链接(' + _link_or_copy(link_path, target) + ')'] += 1
                     elif os.path.isfile(target):
                         shutil.copy2(target, link_path)
                         stats['符号链接(复制)'] += 1
