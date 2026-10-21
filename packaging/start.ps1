@@ -70,8 +70,39 @@ function Service-Ready {
   }
 }
 
+# ---- 2.5 端口上到底是"谁的"实例 ----
+# 开发机上 dev 环境的 harness / messaging-runtime 会抢同样的端口（3080 / 8766）。
+# 只按"端口通了"判断"已经在运行"，桌面双击就会连到 **dev 实例**：
+# 打开的是开发环境页面，自动回复也对着别人家的服务发（全 401）。所以要看命令行。
+function Get-PortOwner([int]$Port) {
+  $conn = $null
+  try { $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop | Select-Object -First 1 } catch { }
+  if (-not $conn) { return $null }
+  $cmdline = $null
+  try {
+    $proc = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $conn.OwningProcess) -ErrorAction Stop
+    if ($proc) { $cmdline = $proc.CommandLine }
+  } catch { }
+  return [pscustomobject]@{ Id = $conn.OwningProcess; CommandLine = $cmdline }
+}
+
+function Test-ThisInstall($owner, [string]$Root) {
+  # 拿不到端口/命令行信息就**不判**（保持老行为），能拿到就必须指向本安装目录。
+  if (-not $owner) { return $true }
+  if (-not $owner.CommandLine) { return $true }
+  return ($owner.CommandLine -match [regex]::Escape($Root))
+}
+
 # ---- 3. 起 ----
 if (Service-Ready $token $port) {
+  $owner = Get-PortOwner $port
+  if (-not (Test-ThisInstall $owner $root)) {
+    Say ("端口 {0} 上跑的不是这个安装目录的实例 —— PID {1}" -f $port, $owner.Id) 'Yellow'
+    Say ("   {0}" -f $owner.CommandLine) 'DarkGray'
+    Say '   多半是开发环境的 dev 实例还占着端口。现在打开页面会连到它（看起来像"从桌面启动就跑到开发环境"），' 'Yellow'
+    Say '   自动回复也会全部失败。先把它停掉，再运行 restart.ps1。' 'Yellow'
+    exit 1
+  }
   Say '消息助手已经在运行。' 'Green'
   # 引擎（3080）通了不代表 worker（8767）好了：刚启动/升级的窗口期 worker 还在
   # 建库绑定，此时打开页面会看到"无法连上服务"（实测踩到）。等它绑好再开页面。
@@ -130,17 +161,26 @@ if (Service-Ready $token $port) {
     if (Test-Port $controlPort) { Say '已启动。' 'Green' }
     else { Say ("引擎起来了，但 worker 还没就绪（端口 {0}）。等一下再刷新页面；一直不行就双击 restart.ps1。" -f $controlPort) 'Yellow' }
   }
-  else { Say '启动超时。日志在数据目录的 logs\harness.log：可以双击 restart.ps1 再试一次。' 'Yellow' }
+  else { Say '启动超时。先看数据目录的 logs\launcher.log（启动器自己的报错）与 logs\harness.log：' 'Yellow'
+         Say '  多半不是"慢"，是启动器直接退出了。改了设置仍不生效就双击 restart.ps1 再来一次。' 'Yellow' }
 }
 
 if ($Open) {
+  $logPath = if ($config.log_file) { "$($config.log_file)" } else { Join-Path $root 'harness.log' }
+  # 没起来就别开页面：harness.log 是**追加**写的，里面的「dsh web:」很可能是上一次
+  # 进程留下的链接。照着它打开，用户看到的是死页面或别人的实例 —— 比"什么都没发生"
+  # 更难判断。所以先确认这次真的起来了。
+  if (-not (Service-Ready $token $port)) {
+    Say '这次没启动成功，不打开页面（免得连到上一次或别的实例）。' 'Yellow'
+    Say ("   看这两个文件：{0}  与  {1}" -f (Join-Path (Split-Path $logPath -Parent) 'launcher.log'), $logPath) 'DarkGray'
+    exit 1
+  }
   # 打开页面必须用引擎自己打印的登录 URL —— dsh web 的登录令牌是每次进程启动
   # 随机生成的（引擎 client-connection/browser-auth.ts），跟 worker 的 control.token
   # 是两回事。launch.py 把引擎 stdout 重定向进 harness.log，「dsh web:」那行就在里面；
   # 引擎每次启动都会打一行新的，所以取**最后一次**匹配即当前进程的 URL。
   # （以前这里错用 control.token 拼链接：老机器浏览器里有旧会话 cookie 侥幸能用，
   # 全新安装必报 "dsh web authentication required" —— 实测踩到。）
-  $logPath = if ($config.log_file) { "$($config.log_file)" } else { Join-Path $root 'harness.log' }
   $webUrl = $null
   if (Test-Path -LiteralPath $logPath) {
     foreach ($line in (Get-Content -LiteralPath $logPath -Encoding UTF8)) {

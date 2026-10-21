@@ -33,6 +33,10 @@ param(
   [string]$PythonRuntime = '',
   [string]$NodeVersion = 'v22.23.0',
   [string]$PythonVersion = '3.13.12',
+  # 交付版本号。修了产品代码就升一个 patch 号 —— 客户支持时不至于
+  # "两个包都叫 0.1.0，分不清哪个带修复"。引擎/运行时没变时老客户只下 -AppOnly 小包。
+  # （下面代码里的 $version 就是这个变量，PowerShell 变量名不区分大小写。）
+  [string]$Version = '0.1.1',
   [switch]$SkipEngine,
   [switch]$SkipRuntime,
   [switch]$SkipHashes,
@@ -392,7 +396,7 @@ Say ("    脚本与说明 {0} 个（已统一 UTF-8 BOM）" -f $copied) 'Green'
 
 # -- 6. 清单 ----------------------------------------------------------------
 Step '生成 manifest.json'
-$version = '0.1.0'
+# 版本号来自 -Version 参数（见 param 区）。
 # git 的 stderr 在 PowerShell 里会被当成错误记录，$ErrorActionPreference='Stop' 下会直接
 # 中断脚本（实测：仓库报 dubious ownership，打包就停在最后一步）。
 # 版本号是"尽力而为"的信息，取不到就写 unknown，不该让打包失败。

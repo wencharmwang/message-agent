@@ -83,7 +83,16 @@ foreach ($port in $ports) {
       if ($targets.ContainsKey($other)) { return }
       $proc = Get-Process -Id $other -ErrorAction SilentlyContinue
       if ($proc -and @('python', 'pythonw', 'node') -contains $proc.ProcessName) {
-        $targets[$other] = "占用端口 $port：$($proc.ProcessName)"
+        $tag = "占用端口 $port：$($proc.ProcessName)"
+        # 端口上未必是本安装的进程（开发环境的 dev 实例会抢 3080 / 8766）。
+        # 照样要停（否则端口不释放、起不来），但必须写清停的是谁 —— 不能让人
+        # 莫名其妙丢掉正在跑的 dev 环境。
+        $foreignCmd = $null
+        try { $foreignCmd = (Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $other) -ErrorAction Stop).CommandLine } catch { }
+        if ($foreignCmd -and ($foreignCmd -notmatch [regex]::Escape($root))) {
+          $tag += "；命令行不含本安装目录，多半是 dev 实例：$foreignCmd"
+        }
+        $targets[$other] = $tag
       }
     }
   } catch { }

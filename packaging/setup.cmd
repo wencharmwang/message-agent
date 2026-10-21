@@ -3,11 +3,17 @@ rem Message Agent one-click installer.
 rem Put this file NEXT TO MessageAgent-*.zip (same folder), then double-click it.
 rem It extracts the zip with the built-in tar (fast, long-path safe) and starts the installer.
 setlocal enabledelayedexpansion
+rem 同一目录里可能同时躺着全量包和升级小包（MessageAgent-app-*.zip）。
+rem 通配取"最后一个"会随手抓到升级包 —— 那个包装在新机器上会直接失败
+rem（没有可沿用的引擎/运行时）。所以显式跳过名字里带 -app- 的。
 set "ZIP="
-for %%f in ("%~dp0MessageAgent-*.zip") do set "ZIP=%%~ff"
+for %%f in ("%~dp0MessageAgent-*.zip") do (
+  set "NAME=%%~nf"
+  if /i "!NAME:-app-=!"=="!NAME!" set "ZIP=%%~ff"
+)
 if not defined ZIP (
   echo [!] MessageAgent-*.zip not found in this folder.
-  echo     Put this file in the SAME folder as the zip, then run it again.
+  echo     Put the FULL package zip in the SAME folder as this file, then run it again.
   pause
   exit /b 1
 )

@@ -24,7 +24,9 @@ dist/
 plugin/dist/
 artifacts/
 # 打包产物（体积大，可重新生成）
-packaging/out/
+# 用 out*/ 而不是 out/：打包时经常换 -OutDir（避开"清旧包"那步卡死），
+# 那些 out-011 / out-app011 同样是构建产物，不该进仓库。
+packaging/out*/
 
 # Local client backups
 plugin/backups-*.js
