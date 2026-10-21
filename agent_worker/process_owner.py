@@ -72,8 +72,11 @@ def supervise_child(process):
     handle=kernel.OpenProcess(0x0101,False,process.pid)
     try:
         if not handle or not kernel.AssignProcessToJobObject(SUPERVISOR_JOB,handle):
-            process.terminate()
-            process.wait(timeout=10)
+            # 原来这里写 `process.terminate()`：但传进来的只是带 pid 的壳对象
+            # （launch.py 的 OwnProcess），没有 terminate 方法 —— 失败路径上
+            # 抛的是 AttributeError，把真正的原因（ERROR_ACCESS_DENIED 之类）盖掉了。
+            # 直接抛 WinError：上层本来也活不成（管不住子进程就别起），
+            # 至少现在 launcher.log 里能看到真因。
             raise ctypes.WinError(ctypes.get_last_error())
     finally:
         if handle: kernel.CloseHandle(handle)

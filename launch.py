@@ -19,14 +19,82 @@ CONFIG_ROOT = ROOT if (ROOT / 'config.json').is_file() else ROOT.parent
 # AttributeError，而这是启动路径上第一行 Popen —— 等于一开就死。
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
+
+def _launcher_log_path():
+    """启动器自己的日志（和 harness.log 同目录）。"""
+    try:
+        config = json.loads((CONFIG_ROOT / 'config.json').read_text(encoding='utf-8-sig'))
+        base = Path(config.get('log_file') or (CONFIG_ROOT / 'harness.log'))
+    except Exception:
+        base = CONFIG_ROOT / 'harness.log'
+    return base.with_name('launcher.log')
+
+
+def _attach_stderr():
+    """把 sys.stdout / sys.stderr 接到 launcher.log 上。
+
+    start.ps1 用 **pythonw** 起这个文件，而 pythonw 没有控制台 —— 于是
+    `sys.stdout` / `sys.stderr` 都是 None。后果有两个，都踩过：
+      * 本文件里任何 `print(..., file=sys.stderr)` 直接抛 AttributeError，
+        启动当场死掉；
+      * 未捕获异常的 traceback 无处可写，**harness.log 一个字都不留**。
+    症状就是"双击/重启后什么都不发生，只有一句启动超时"，查一整天。
+    （2026-10-21 实例：`_start_runtime_and_wait` 漏了 import socket，一进等待
+    循环就 NameError；安装版 pythonw 静默退出，日志 mtime 还停在前一次。）
+    所以：一进来就把两个流指到文件，并且写一行启动横幅当路标。
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return None
+    try:
+        path = _launcher_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # 新建时带 BOM：Windows 上 PowerShell 5.1 默认按 ANSI(GBK) 读文件，
+        # 无 BOM 的 UTF-8 中文会显示成乱码 —— 而这份日志就是给人和维护者看的。
+        encoding = 'utf-8' if path.exists() and path.stat().st_size else 'utf-8-sig'
+        sink = open(path, 'a', encoding=encoding, buffering=1)
+    except OSError:
+        return None
+    sink.write('\n=== {0} launch pid={1} python={2} root={3}\n'.format(
+        time.strftime('%Y-%m-%d %H:%M:%S'), os.getpid(), sys.executable, CONFIG_ROOT))
+    if sys.stdout is None:
+        sys.stdout = sink
+    if sys.stderr is None:
+        sys.stderr = sink
+    return sink
+
 # 注：这里**不再有任何微信密钥的处理**。本项目不接触密钥与解密 —— 解锁由外部完成，
 # 产物是一个"已解锁目录"（协议见 docs/unlocked-db-protocol.md），本项目只读它。
 # 因此原来那套"把密钥解到运行目录喂给 watcher / 用标记文件控制是否允许扫内存"的机制
 # 整体删除：既然不再解锁，也就没有"要不要允许扫内存"这个问题。
 
 
+def _token_rejected(port, token):
+    """用登记 token 探一次 MCP：401 说明端口上不是我们的服务（陌生实例）。"""
+    import urllib.error
+    import urllib.request
+    try:
+        body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                           'params': {'name': 'get_send_status',
+                                      'arguments': {'request_id': 'launch-probe'}}}).encode('utf-8')
+        request = urllib.request.Request(f'http://127.0.0.1:{port}/mcp', body,
+                                         headers={'Authorization': 'Bearer ' + token,
+                                                  'Content-Type': 'application/json',
+                                                  'Accept': 'application/json'})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=5):
+            return False
+    except urllib.error.HTTPError as error:
+        # 401 = 明确拒收我们的 token（别人家的实例）；5xx = 服务自身没起来好，
+        # 不算陌生实例，别吓用户。
+        return error.code == 401
+    except OSError:
+        return False
+
+
 def _start_runtime_and_wait(exe, runtime_root, port, runtime_cfg, runtime_token):
     """拉起消息服务进程并等它在端口就绪。返回是否就绪（输出细节落 runtime-*.log）。"""
+    import socket
+
     args = [str(exe), '--http', '--port', str(port), '--config', str(runtime_cfg)]
     # HTTP 模式要求 MESSAGING_RUNTIME_TOKEN（32+ 字符）环境变量，运行时用它鉴权。
     child_env = dict(os.environ)
@@ -90,6 +158,14 @@ def ensure_message_runtime(config):
             registered = None
     if registered and registered.get('token'):
         if port_listening():
+            # 端口活着 ≠ 是**我们的**服务：开发机上 dev 环境的 messaging-runtime
+            # 有自己的守护任务，抢着常驻 8766 —— 本产品 worker 拿本安装的 token
+            # 去调它，每次都 401，自动回复全部 "Runtime: uncertain"（实测踩到）。
+            # 用登记 token 探一下：401 就说明端口上是陌生实例，如实报警。
+            if _token_rejected(port, registered['token']):
+                print(f'[launch] 端口 {port} 被一个不认识的服务占着（多半是开发环境的 '
+                      'messaging-runtime 在跑）。自动回复会发不出去；测试安装版请先停掉它。'
+                      '（本安装自己的服务等端口空出来、下次重启时自动接上。）', file=sys.stderr)
             return registered['token']
         runtime_cfg = registered.get('config')
         if exe.is_file() and runtime_cfg and Path(runtime_cfg).is_file():
@@ -251,5 +327,22 @@ def main():
         worker.terminate()
 
 if __name__ == '__main__':
-    main()
+    _attach_stderr()
+    try:
+        main()
+    except BaseException:
+        # main() 正常路径本来就是"跑到子进程退出再抛"，所以这里不改退出码，
+        # 只保证 traceback 一定落到文件里（pythonw 下 sys.stderr 可能仍是 None）。
+        import traceback
+        _text = traceback.format_exc()
+        if sys.stderr is not None:
+            sys.stderr.write(_text)
+            sys.stderr.flush()
+        else:
+            try:
+                with open(_launcher_log_path(), 'a', encoding='utf-8') as _fallback:
+                    _fallback.write(_text)
+            except OSError:
+                pass
+        raise
 
