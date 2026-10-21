@@ -37,6 +37,11 @@ param(
   [switch]$SkipRuntime,
   [switch]$SkipHashes,
   [switch]$ForceEngine,
+  # 升级小包：只装产品本体（app\ + 脚本 + 语音解码组件，约几 MB），不带引擎、
+  # 运行时和消息运行时 —— install.ps1 会校验已装版本并沿用。客户日常发版下载它
+  # 就够，不用再拉 483MB 完整包。要求先跑过一次完整打包（.cache\last-full-build.json
+  # 记着引擎哈希与运行时版本）。
+  [switch]$AppOnly,
   # 注意：**不能**把这个开关叫 -Zip —— PowerShell 的变量名不区分大小写，
   # 它会和下面下载 node/python 用的 $zip（压缩包路径）变成同一个变量，
   # 于是"把字符串赋给 switch 参数"直接抛类型转换错（实测踩到）。
@@ -52,7 +57,14 @@ if ($LogTo) {
 
 if (-not $OutDir)     { $OutDir = Join-Path $PSScriptRoot 'out' }
 if (-not $RepoRoot)   { $RepoRoot = Split-Path $PSScriptRoot -Parent }
-if (-not $EngineRoot) { $EngineRoot = Join-Path (Split-Path $RepoRoot -Parent) 'deepseek-harness' }
+if (-not $EngineRoot) {
+  # 优先用构建产物（build-engine-deploy.ps1 的输出）：小、快、无符号链接；
+  # 没有就退回源码仓（打 tar 的旧流程）。
+  $harnessGuess = Join-Path (Split-Path $RepoRoot -Parent) 'deepseek-harness'
+  $deployGuess = Join-Path $harnessGuess 'artifacts\web-deploy'
+  if (Test-Path -LiteralPath (Join-Path $deployGuess 'lib\bin.js')) { $EngineRoot = $deployGuess }
+  else { $EngineRoot = $harnessGuess }
+}
 
 $ErrorActionPreference = 'Stop'
 # 下载/解压的进度条会把输出刷成几万行，日志完全没法看（实测）。关掉。
@@ -68,7 +80,7 @@ $package = Join-Path $OutDir 'package'
 $cacheDir = Join-Path $RepoRoot 'packaging\.cache'
 $tarCache = Join-Path $cacheDir 'harness.tar'
 $existingTar = Join-Path $package 'engine\harness.tar'
-if (-not $ForceEngine -and -not $SkipEngine) {
+if (-not $ForceEngine -and -not $SkipEngine -and -not $AppOnly) {
   # ① 优先用固定缓存
   if (Test-Path -LiteralPath $tarCache) {
     Say ''; Say '复用缓存里的引擎归档（要重打加 -ForceEngine）' 'DarkGray'
@@ -91,7 +103,7 @@ if (Test-Path -LiteralPath $package) {
   if (Test-Path -LiteralPath $package) { throw "清理旧包失败（$package 还在）。手动删掉它再重试。" }
 }
 New-Item -ItemType Directory -Force -Path $package | Out-Null
-if (Test-Path -LiteralPath $tarCache) {
+if (-not $AppOnly -and (Test-Path -LiteralPath $tarCache)) {
   New-Item -ItemType Directory -Force -Path (Join-Path $package 'engine') | Out-Null
   # 用**复制**而不是移动：缓存要留着，下次换输出目录还能复用。
   Copy-Item -LiteralPath $tarCache -Destination (Join-Path $package 'engine\harness.tar') -Force
@@ -128,6 +140,9 @@ Say ("    app\ -> {0:N0} KB，{1} 个文件" -f ((Get-ChildItem $appOut -Recurse
 
 # -- 2. 运行时（自带，用户不用装） -------------------------------------------
 Step '准备自带运行时'
+if ($AppOnly) {
+  Say '    升级小包不带运行时（install.ps1 会校验并沿用客户机已装版本）' 'DarkGray'
+} else {
 $nodeOut = Join-Path $package 'runtimes\node'
 $pythonOut = Join-Path $package 'runtimes\python'
 New-Item -ItemType Directory -Force -Path $nodeOut, $pythonOut | Out-Null
@@ -168,6 +183,12 @@ if ($pth) {
   $lines = Get-Content -LiteralPath $pth.FullName
   $lines = $lines | Where-Object { $_ -notmatch '^#' -or $_ -match 'import site' }
   if ($lines -notcontains 'import site') { $lines += 'import site' }
+  # 把产品代码目录（app\）写进 sys.path：embeddable Python **不会**自动把脚本所在
+  # 目录加进 sys.path（正常 Python 会），不写这行，launch.py 里
+  # `from agent_worker import ...` 直接 ModuleNotFoundError——服务永远起不来、
+  # 连 harness.log 都不写（本机复现实测）。路径相对 python.exe 所在目录：
+  # 安装后是 <安装目录>\runtimes\python\ → ..\..\app 即 <安装目录>\app。
+  if ($lines -notcontains '..\..\app') { $lines += '..\..\app' }
   $lines | Set-Content -LiteralPath $pth.FullName -Encoding ASCII
   Say '    已调整 embeddable 的 sys.path 配置' 'Green'
 }
@@ -175,6 +196,7 @@ Say ("    python: " + (& (Join-Path $pythonOut 'python.exe') -c "import sys;prin
 $hasSqlite = & (Join-Path $pythonOut 'python.exe') -c "import sqlite3;print('yes')" 2>$null
 if ($hasSqlite -notmatch 'yes') { throw 'python 运行时缺少 sqlite3，不能用。' }
 Say '    sqlite3 可用' 'Green'
+}
 
 # -- 3. 取密钥/解密组件 ------------------------------------------------------
 # 注：**不再打包取密钥/解密组件**。本项目不接触密钥与解密 —— 解锁由外部完成，
@@ -190,14 +212,16 @@ if (-not (Test-Path -LiteralPath (Join-Path $silkSource 'silk-decoder-x64.exe'))
 }
 $silkOut = Join-Path $package 'components\silk'
 New-Item -ItemType Directory -Force -Path $silkOut | Out-Null
-Copy-Item -LiteralPath (Join-Path $silkSource '*') -Destination $silkOut -Force
+# 注意必须用 -Path 而不是 -LiteralPath：-LiteralPath 不做通配展开，`*\` 会被当成
+# 一个字面文件名叫 '*' 的东西（复制 0 个文件，install.ps1 会直接拒绝安装——实测踩到）。
+Copy-Item -Path (Join-Path $silkSource '*') -Destination $silkOut -Force
 Say ("    components\silk  {0} 个文件" -f @(Get-ChildItem -LiteralPath $silkOut -File).Count) 'Green'
 
 # -- 3.5 消息运行时（客户拿一个包就够） ---------------------------------------
 # 运行时是**启动硬前提**：launch.py 要读它的 .runtime-data\shared-service.json 拿 token，
 # 发送也全靠它。以前它要单独装，客户拿到本包也起不来 —— 这里直接打进去。
 Step '消息运行时'
-if ($SkipRuntime) {
+if ($SkipRuntime -or $AppOnly) {
   Say '    按要求跳过（客户拿到的包将不含消息运行时，发不出消息）' 'Yellow'
 } elseif (-not $RuntimePackage) {
   $guess = Join-Path (Split-Path $RepoRoot -Parent) 'messaging-runtime\artifacts\packages'
@@ -207,7 +231,7 @@ if ($SkipRuntime) {
   }
 }
 $runtimeOut = Join-Path $package 'components\messaging-runtime'
-if (-not $SkipRuntime) {
+if (-not $SkipRuntime -and -not $AppOnly) {
 if (-not $RuntimePackage -or -not (Test-Path -LiteralPath (Join-Path $RuntimePackage 'artifacts\app\messaging-runtime.dll'))) {
   throw @'
 没有可打包的消息运行时。先就地构建它（自包含，客户机不用装 .NET）：
@@ -243,7 +267,7 @@ Say ("    components\messaging-runtime  {0} MB（{1}）" -f $rtMB,
 
 # -- 4. 引擎 ----------------------------------------------------------------
 Step '引擎'
-if ($SkipEngine) {
+if ($SkipEngine -or $AppOnly) {
   New-Item -ItemType Directory -Force -Path (Join-Path $package 'engine') | Out-Null
   Set-Content -LiteralPath (Join-Path $package 'engine\README-引擎未打包.txt') -Encoding UTF8 -Value @'
 这个包里没有消息引擎（构建时加了 -SkipEngine）。
@@ -251,9 +275,53 @@ if ($SkipEngine) {
 '@
   Say '    按要求跳过引擎' 'Yellow'
 } else {
-  if (-not (Test-Path -LiteralPath (Join-Path $EngineRoot 'apps\cli\src\bin.ts'))) { throw "引擎目录不对：$EngineRoot" }
   $engineOut = Join-Path $package 'engine'
   New-Item -ItemType Directory -Force -Path $engineOut | Out-Null
+  $engineFingerprint = ''
+  # 引擎两种形态：
+  #  ① 构建产物（build-engine-deploy.ps1 的部署目录，lib\bin.js 在根部）：自包含、
+  #     无符号链接 → 直接 robocopy，秒级；安装时也只是一次 robocopy。
+  #  ② TS 源码仓（apps\cli\src\bin.ts）：带 pnpm 符号链接树，只能打 tar 走归档
+  #     （约 10 分钟，安装时还要重建 1.8 万链接）。仅当没有构建产物时才走。
+  if (Test-Path -LiteralPath (Join-Path $EngineRoot 'lib\bin.js')) {
+    $engineTarget = Join-Path $engineOut 'harness'
+    # 先裁掉 pnpm deploy 混进来的 dev 工具链（vitest/eslint/mermaid/typescript/@aws-sdk…
+    # 实测占引擎体积一半、文件数三分之一 —— 打包、解压、安装全都在为它们买单）。
+    # 幂等：已裁过的目录再跑一次秒级过。详见 flatten_engine_modules.py 的注释。
+    $pruneScript = Join-Path $PSScriptRoot 'flatten_engine_modules.py'
+    $engineRepo = Join-Path (Split-Path $RepoRoot -Parent) 'deepseek-harness'
+    if (Test-Path -LiteralPath (Join-Path $engineRepo 'packages\bundle')) {
+      $py = Get-Command python -ErrorAction SilentlyContinue
+      if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+      if ($py) {
+        Say '    裁剪引擎运行时闭包（dev 工具链）…' 'DarkGray'
+        & $py.Source $pruneScript --prune $EngineRoot $engineRepo
+        if ($LASTEXITCODE -ne 0) { throw "引擎裁剪失败（flatten_engine_modules.py 退出码 $LASTEXITCODE）" }
+      } else {
+        Say '    [!] 找不到 python，跳过引擎裁剪（包会比需要的大很多）' 'Yellow'
+      }
+    } else {
+      Say "    [!] 找不到引擎源码仓（$engineRepo），跳过引擎裁剪" 'Yellow'
+    }
+    Say '    引擎是构建产物（部署目录），直接复制…' 'DarkGray'
+    New-Item -ItemType Directory -Force -Path $engineTarget | Out-Null
+    & robocopy $EngineRoot $engineTarget /E /MT:16 /NFL /NDL /NJH /NJS /R:1 /W:1 | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "复制引擎失败（robocopy 退出码 $LASTEXITCODE）" }
+    foreach ($must in 'lib\bin.js', 'node_modules') {
+      if (-not (Test-Path -LiteralPath (Join-Path $engineTarget $must))) { throw "引擎复制后缺少 $must，中止打包。" }
+    }
+    # 引擎变更指纹：lib 入口块 + package.json（引擎重建/重新 deploy 必变）。
+    # 给 install.ps1 判断"引擎变没变"用，作用等价于 tar 流程里归档的 sha256。
+    $combined = (@(Get-ChildItem -LiteralPath (Join-Path $engineTarget 'lib') -File | Sort-Object Name |
+                   ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) +
+                 @((Get-FileHash -LiteralPath (Join-Path $engineTarget 'package.json') -Algorithm SHA256).Hash)) -join ''
+    $engineFingerprint = [BitConverter]::ToString(
+      [Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($combined))
+    ).Replace('-', '').ToLower()
+    $engineMB = (Get-ChildItem -LiteralPath $engineTarget -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
+    Say ("    engine\harness -> {0:N0} MB（构建产物，指纹 {1}…）" -f $engineMB, $engineFingerprint.Substring(0, 12)) 'Green'
+  } else {
+  if (-not (Test-Path -LiteralPath (Join-Path $EngineRoot 'apps\cli\src\bin.ts'))) { throw "引擎目录不对：$EngineRoot" }
   $tarPath = Join-Path $engineOut 'harness.tar'
   #
   # 为什么要打成 tar 而不是复制目录：
@@ -271,10 +339,14 @@ if ($SkipEngine) {
     Say '    正在打成单个归档（约 10 分钟，请耐心等）…' 'DarkGray'
     if (Test-Path -LiteralPath $tarPath) { Remove-Item -LiteralPath $tarPath -Force }
     # 排除开发用的东西：agent 笔记、CI、测试快照、编辑器配置。运行时不需要。
+    # **必须排除 ./\.env**：引擎根的 .env 存着开发者的真实 API key —— 曾经原样打进
+    # 客户包（874MB 归档里躺着密钥，实测发现）。也绝不要靠"清空再打"来补救，直接排除。
+    # website/ 是文档站、dist-exe/ 是 python sdk 的可执行构建产物，运行时都用不到。
     # 不加 -L（跟随链接）：pnpm 的链接**都是相对路径**（如
     # `.pnpm\tsx@4.22.4\node_modules\tsx`、`../../../../node_modules/.pnpm/...`），
     # 原样存成链接后解包仍能正确解析 —— 而且省掉几倍的重复内容。
     $excludes = @('--exclude=./.git', '--exclude=./.github', '--exclude=./.agents', '--exclude=./.claude',
+                  '--exclude=./.env', '--exclude=./.dsh-build', '--exclude=./website', '--exclude=./dist-exe',
                   '--exclude=./snapshots', '--exclude=./coverage', '--exclude=*.tsbuildinfo')
     & tar -cf $tarPath @excludes -C $EngineRoot .
     if ($LASTEXITCODE -ne 0) { throw "打包引擎失败（tar 退出码 $LASTEXITCODE）" }
@@ -294,15 +366,17 @@ if ($SkipEngine) {
   $hasTsx = ($listing | Where-Object { $_ -match '^\./node_modules/\.pnpm/tsx@[^/]+/node_modules/tsx/package\.json$' } | Select-Object -First 1)
   if (-not $hasTsx) { throw '引擎归档里没有 tsx（.pnpm 下的实体），中止打包。' }
   Say ("    engine\harness.tar -> {0:N0} MB（已排除 .git/.github/.agents/.claude/snapshots）" -f $tarMB) 'Green'
+  }
 }
 
 # -- 5. 脚本与说明 ----------------------------------------------------------
 Step '复制安装脚本与说明'
 # **按类型整体复制，不列白名单**。之前是手写清单，结果 install.ps1 里加了脚本、
 # 这里忘加 —— 装完第 7 步报"脚本不存在"。这类清单漂移只能靠"不列清单"根治。
+# setup.cmd 例外：它是放在 zip **旁边**交付的免解压一键安装器，不属于包内容。
 $copied = 0
 foreach ($file in (Get-ChildItem -LiteralPath $PSScriptRoot -File |
-    Where-Object { $_.Extension -in '.ps1', '.py', '.cmd', '.md', '.json' -and $_.Name -ne 'build-package.ps1' })) {
+    Where-Object { $_.Extension -in '.ps1', '.py', '.cmd', '.md', '.json' -and $_.Name -notin 'build-package.ps1', 'setup.cmd' })) {
   Copy-Item -LiteralPath $file.FullName -Destination $package -Force
   $copied++
 }
@@ -332,37 +406,85 @@ function Git-Rev([string]$Path) {
   return 'unknown'
 }
 $repoHead = Git-Rev $RepoRoot
+# 升级小包不带运行时也不带引擎，版本号和引擎哈希从上一次完整构建的记录里抄
+#（.cache\last-full-build.json，完整打包结束时写）。没有记录就不许出小包 ——
+# 否则装出去的 manifest 缺版本信息，install.ps1 没法校验"沿用是否安全"。
+$lastBuildPath = Join-Path $cacheDir 'last-full-build.json'
+$lastBuild = [ordered]@{}
+if (Test-Path -LiteralPath $lastBuildPath) {
+  try { $lastBuild = Get-Content -LiteralPath $lastBuildPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $lastBuild = [ordered]@{} }
+}
+if ($AppOnly -and (-not $lastBuild.node -or -not $lastBuild.python -or -not $lastBuild.engineSha)) {
+  throw '出升级小包前必须先完整打包一次（引擎哈希与运行时版本记录在 .cache\last-full-build.json）。'
+}
 $files = @()
+$engineTarSha = ''
+if (-not $engineFingerprint) { $engineFingerprint = '' }
 if (-not $SkipHashes) {
   # 引擎是单个归档，所以这里**不做例外**都要算哈希 —— 最大的那块恰恰最需要可校验。
+  # 但全量 SHA256 一次要 8 分钟，而重复打包时绝大多数文件（引擎归档、运行时、
+  # 消息运行时）和上次构建一字不差。哈希缓存按（相对路径 + 大小 + LastWriteTimeUtc）
+  # 命中 —— Copy-Item/robocopy 都保留源文件的修改时间，所以键跨构建稳定；
+  # 内容变了的文件大小或时间必然变，不会被误命中。
+  $hashCachePath = Join-Path $cacheDir 'file-hashes.json'
+  $hashCache = @{}
+  if (Test-Path -LiteralPath $hashCachePath) {
+    try {
+      $stored = Get-Content -LiteralPath $hashCachePath -Raw -Encoding UTF8 | ConvertFrom-Json
+      foreach ($prop in $stored.PSObject.Properties) { $hashCache[$prop.Name] = $prop.Value }
+    } catch { Say '    哈希缓存读不了，本次全量计算' 'DarkGray' }
+  }
   $all = Get-ChildItem -LiteralPath $package -Recurse -File
-  $i = 0
+  $i = 0; $reused = 0
   foreach ($f in $all) {
     $i++
     if ($i % 200 -eq 0) { Write-Host ("    已算 $i / $($all.Count)") -ForegroundColor DarkGray }
-    $files += [ordered]@{
-      path = $f.FullName.Substring($package.Length + 1).Replace('\', '/')
-      bytes = $f.Length
-      sha256 = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash.ToLower()
+    $rel = $f.FullName.Substring($package.Length + 1).Replace('\', '/')
+    $mt = $f.LastWriteTimeUtc.ToString('o')
+    $sha = $null
+    $hit = $hashCache[$rel]
+    if ($hit -and ("$($hit.bytes)" -eq "$($f.Length)") -and ("$($hit.mtime)" -eq $mt)) { $sha = "$($hit.sha256)"; $reused++ }
+    if (-not $sha) {
+      $sha = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash.ToLower()
+      $hashCache[$rel] = [ordered]@{ bytes = $f.Length; mtime = $mt; sha256 = $sha }
     }
+    if ($rel -eq 'engine/harness.tar') { $engineTarSha = $sha }
+    $files += [ordered]@{ path = $rel; bytes = $f.Length; sha256 = $sha }
   }
+  New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+  [IO.File]::WriteAllText($hashCachePath, ($hashCache | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
+  Say ("    哈希：{0} 个文件，复用缓存 {1} 个" -f $files.Count, $reused) 'DarkGray'
 }
+$nodeVersion = if ($AppOnly) { "$($lastBuild.node)" } else { (& (Join-Path $nodeOut 'node.exe') '-v') }
+$pythonVersion = if ($AppOnly) { "$($lastBuild.python)" } else { (& (Join-Path $pythonOut 'python.exe') -c "import sys;print(sys.version.split()[0])") }
+$engineShaForManifest = if ($AppOnly) { "$($lastBuild.engineSha)" }
+                        elseif ($engineFingerprint) { $engineFingerprint }
+                        else { $engineTarSha }
 $manifest = [ordered]@{
   product = 'MessageAgent'
   version = $version
+  packageKind = $(if ($AppOnly) { 'app-only' } else { 'full' })
   built_at = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
   platform = 'windows-x64'
   components = [ordered]@{
     app = [ordered]@{ repo = 'message-agent'; revision = "$repoHead" }
-    engine = [ordered]@{ mode = $(if ($SkipEngine) { 'external' } else { 'bundled' }); path = $EngineRoot }
-    node = [ordered]@{ version = (& (Join-Path $nodeOut 'node.exe') '-v') }
-    python = [ordered]@{ version = (& (Join-Path $pythonOut 'python.exe') -c "import sys;print(sys.version.split()[0])") }
+    engine = [ordered]@{ mode = $(if ($SkipEngine -or $AppOnly) { 'external' } else { 'bundled' }); path = $EngineRoot; sha = $engineShaForManifest }
+    node = [ordered]@{ version = "$nodeVersion" }
+    python = [ordered]@{ version = "$pythonVersion" }
   }
   files = $files
 }
 [IO.File]::WriteAllText((Join-Path $package 'manifest.json'),
   ($manifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
-Say ("    manifest.json：{0} 个文件（含引擎归档的哈希）" -f $files.Count) 'Green'
+Say ("    manifest.json：{0} 个文件（引擎哈希：{1}）" -f $files.Count, $engineShaForManifest) 'Green'
+# 完整打包的指纹（引擎哈希 + 运行时版本）记下来：升级小包从这里抄进自己的 manifest，
+# install.ps1 才能对客户机说"引擎/运行时没变，沿用"。
+if (-not $AppOnly) {
+  [IO.File]::WriteAllText($lastBuildPath,
+    ([ordered]@{ built_at = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                 engineSha = $engineShaForManifest; node = "$nodeVersion"; python = "$pythonVersion" } | ConvertTo-Json),
+    [Text.UTF8Encoding]::new($false))
+}
 
 $size = (Get-ChildItem -LiteralPath $package -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
 Say ''
@@ -380,7 +502,7 @@ if ($MakeZip) {
   # 用 bsdtar 的 zip 写出（Windows 自带），实测 1.6 GB -> 483 MB、不到 1 分钟。
   # 先把目录改成产品名再压（zip 里就是 MessageAgent-0.1.0-win64/… 而不是 package/…），
   # 压完改回来，这样下次构建还能复用引擎归档。
-  $zipName = "MessageAgent-$version-win64"
+  $zipName = if ($AppOnly) { "MessageAgent-app-$version-win64" } else { "MessageAgent-$version-win64" }
   $named = Join-Path $OutDir $zipName
   if (Test-Path -LiteralPath $named) { Remove-Item -LiteralPath $named -Recurse -Force -ErrorAction SilentlyContinue }
   Move-Item -LiteralPath $package -Destination $named -Force

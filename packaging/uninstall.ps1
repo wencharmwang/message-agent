@@ -42,6 +42,13 @@ if ($task) {
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
   Write-Host '  已取消开机自启。' -ForegroundColor Green
 }
+# 数据自动刷新任务是「开始使用」装的（解锁工具侧的 WechatDbSnapshotRefresh，
+# 每 5 分钟静默刷新快照）：助手都卸了，刷新它就没意义了，一起清掉。
+$refresh = Get-ScheduledTask -TaskName 'WechatDbSnapshotRefresh' -ErrorAction SilentlyContinue
+if ($refresh) {
+  Unregister-ScheduledTask -TaskName 'WechatDbSnapshotRefresh' -Confirm:$false
+  Write-Host '  已取消数据自动刷新。' -ForegroundColor Green
+}
 $shortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) '消息助手.lnk'
 if (Test-Path -LiteralPath $shortcut) { Remove-Item -LiteralPath $shortcut -Force; Write-Host '  已删除桌面快捷方式。' -ForegroundColor Green }
 

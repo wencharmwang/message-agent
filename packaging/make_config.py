@@ -18,7 +18,7 @@ import json
 import sys
 
 PLACEHOLDER_KEYS = ('ENGINE_ROOT', 'RUNTIME_DATA', 'DATA_DIR', 'CREDENTIALS_DIR', 'LOGS_DIR',
-                    'HARNESS_HOME', 'WORKSPACE', 'NODE_EXE', 'PYTHON_EXE')
+                    'HARNESS_HOME', 'WORKSPACE', 'NODE_EXE')
 
 
 def substitute(node, values, used):

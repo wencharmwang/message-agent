@@ -1,4 +1,4 @@
-"""解开引擎归档，并把符号链接补回来（Windows 专用）。
+r"""解开引擎归档，并把符号链接补回来（Windows 专用）。
 
 ## 为什么需要这个
 
@@ -13,9 +13,8 @@
 
 1. **先解普通成员**（目录 + 文件，不带链接）—— 这样不会因为链接卡住
 2. **再建链接**：
-   * 目标是**目录** → 建 **junction**（`mklink /J`）
-     —— 关键：junction **不需要管理员权限**，实测 331 字符的路径也能建；
-       而且它只是"指过去"，不复制内容，空间和原归档一样
+   * 目标是**目录** → 建 **junction**（DeviceIoControl，不需要管理员权限，
+     实测 331 字符的路径也能建；而且只是"指过去"，不复制内容）
    * 目标是**文件** → 直接复制（文件链接很少，复制最稳）
    * 目标不存在（悬空链接）→ 记下来跳过，不算失败
 3. 有问题就打印清单并以非 0 退出，让安装脚本能中止
@@ -25,33 +24,84 @@
 """
 from __future__ import annotations
 
+import ctypes
 import os
 import shutil
-import subprocess
+import struct
 import sys
 import tarfile
+from ctypes import wintypes
 
+# ---- Win32：直接建 junction（reparse point） -------------------------------
+# 以前的实现是每个链接 spawn 一次 `cmd /c mklink /J`：18,697 个链接就是 1.8 万次
+# 子进程，安装要多花好几分钟；而且 cmd 按 ANSI 代码页解释参数，客户路径带中文
+# （C:\Users\璐璐\...）时 mklink 直接报 Invalid switch（实测 2,786 个全灭，每个
+# 还要退回整目录复制）。改成 DeviceIoControl 纯调用后：没有子进程、没有代码页
+# 问题；长路径用 \\?\ 前缀，300+ 字符也没事。
+_FSCTL_SET_REPARSE_POINT = 0x000900A4
+_IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+_GENERIC_WRITE = 0x40000000
+_FILE_SHARE_READ = 0x00000001
+_FILE_SHARE_WRITE = 0x00000002
+_OPEN_EXISTING = 3
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
-def _decode(raw: bytes) -> str:
-    return (raw or b'').decode('gbk', errors='replace').strip()
+_kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+_CreateFileW = _kernel32.CreateFileW
+_CreateFileW.restype = wintypes.HANDLE
+_CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                         ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+_DeviceIoControl = _kernel32.DeviceIoControl
+_DeviceIoControl.restype = wintypes.BOOL
+_DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                             ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+_CloseHandle = _kernel32.CloseHandle
+_CloseHandle.argtypes = [wintypes.HANDLE]
 
 
 def _make_junction(link_path: str, target: str) -> None:
-    # os.path.abspath：mklink 的目标最好给绝对路径，相对路径的基准是当前目录，容易错。
-    result = subprocess.run(['cmd', '/c', 'mklink', '/J', link_path, os.path.abspath(target)],
-                            capture_output=True)
-    if result.returncode != 0:
-        raise OSError(_decode(result.stdout) or _decode(result.stderr) or f'mklink 退出码 {result.returncode}')
+    """把 link_path 建成指向 target 的 junction。失败抛 OSError（调用方退回复制）。"""
+    target = os.path.abspath(target)
+    os.mkdir(link_path)                      # junction 的载体必须先是一个空目录
+    # 布局对照过 mklink 建的真实 junction（fsutil reparsepoint query）：
+    #   SubstituteNameLength/PrintNameLength 都是**不含**结尾 \0 的字节数，
+    #   \0 只作为分隔落在 PathBuffer 里，PrintNameOffset = SubstituteNameLength + 2。
+    subst = ('\\??\\' + target).encode('utf-16-le')    # NT 命名空间目标（\??\ 前缀）
+    printable = target.encode('utf-16-le')            # 资源管理器显示名
+    path_buffer = subst + b'\x00\x00' + printable + b'\x00\x00'
+    blob = struct.pack('<IHHHHHH',
+                       _IO_REPARSE_TAG_MOUNT_POINT,
+                       8 + len(path_buffer),     # ReparseDataLength：4 个 WORD + 名字区
+                       0,                        # Reserved
+                       0,                        # SubstituteNameOffset
+                       len(subst),               # SubstituteNameLength（不含 \0）
+                       len(subst) + 2,           # PrintNameOffset（跳过 \0）
+                       len(printable)) + path_buffer
+    handle = _CreateFileW('\\\\?\\' + os.path.abspath(link_path), _GENERIC_WRITE,
+                          _FILE_SHARE_READ | _FILE_SHARE_WRITE, None, _OPEN_EXISTING,
+                          _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT, None)
+    if not handle or handle == -1:
+        raise OSError(ctypes.get_last_error(), f'CreateFileW({link_path}) 失败')
+    try:
+        returned = wintypes.DWORD(0)
+        ok = _DeviceIoControl(handle, _FSCTL_SET_REPARSE_POINT, blob, len(blob),
+                              None, 0, ctypes.byref(returned), None)
+        if not ok:
+            raise OSError(ctypes.get_last_error(),
+                           f'DeviceIoControl(FSCTL_SET_REPARSE_POINT) 失败：{link_path}')
+    except OSError:
+        try:
+            os.rmdir(link_path)                # 别留下空目录，调用方会退回复制
+        except OSError:
+            pass
+        raise
+    finally:
+        _CloseHandle(handle)
 
 
 def _link_or_copy(link_path: str, target: str) -> str:
-    """目录链接：优先 junction，失败就退回复制。
-
-    为什么不能只靠 junction：mklink 是 **cmd 的内建命令**，而 cmd 按 ANSI 代码页
-    解释命令行参数。客户路径里有中文（C:\\Users\\璐璐\\Downloads\\...）时，路径会被
-    打乱，mklink 报 `Invalid switch - "vendor"`（实测：2,786 个全失败）。
-    复制走的是 Python 自己的文件 API，中文、长路径都没问题 —— 代价只是多占点空间。
-    """
+    """目录链接：优先 junction，失败就退回复制（Python 自己的文件 API 中文、长路径都没问题）。"""
     try:
         _make_junction(link_path, target)
         return 'junction'

@@ -73,6 +73,13 @@ function Service-Ready {
 # ---- 3. 起 ----
 if (Service-Ready $token $port) {
   Say '消息助手已经在运行。' 'Green'
+  # 引擎（3080）通了不代表 worker（8767）好了：刚启动/升级的窗口期 worker 还在
+  # 建库绑定，此时打开页面会看到"无法连上服务"（实测踩到）。等它绑好再开页面。
+  $controlPortWait = if ($config.control_port) { [int]$config.control_port } else { 8767 }
+  $deadline = (Get-Date).AddSeconds(30)
+  while (-not (Test-Port $controlPortWait) -and ((Get-Date) -lt $deadline)) {
+    Start-Sleep -Milliseconds 500
+  }
 } else {
   Say '正在启动消息助手…' 'Cyan'
 
@@ -127,5 +134,22 @@ if (Service-Ready $token $port) {
 }
 
 if ($Open) {
-  Start-Process ("http://127.0.0.1:{0}/?token={1}" -f $port, $token)
+  # 打开页面必须用引擎自己打印的登录 URL —— dsh web 的登录令牌是每次进程启动
+  # 随机生成的（引擎 client-connection/browser-auth.ts），跟 worker 的 control.token
+  # 是两回事。launch.py 把引擎 stdout 重定向进 harness.log，「dsh web:」那行就在里面；
+  # 引擎每次启动都会打一行新的，所以取**最后一次**匹配即当前进程的 URL。
+  # （以前这里错用 control.token 拼链接：老机器浏览器里有旧会话 cookie 侥幸能用，
+  # 全新安装必报 "dsh web authentication required" —— 实测踩到。）
+  $logPath = if ($config.log_file) { "$($config.log_file)" } else { Join-Path $root 'harness.log' }
+  $webUrl = $null
+  if (Test-Path -LiteralPath $logPath) {
+    foreach ($line in (Get-Content -LiteralPath $logPath -Encoding UTF8)) {
+      if ($line -match 'dsh web: (http://\S+)') { $webUrl = $Matches[1] }
+    }
+  }
+  if ($webUrl) {
+    Start-Process $webUrl
+  } else {
+    Say "没在 $logPath 里找到登录链接（「dsh web:」那一行）。手动打开该文件，把那行 URL 复制进浏览器。" 'Yellow'
+  }
 }

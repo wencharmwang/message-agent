@@ -37,9 +37,30 @@ export const inject = ['webServer', 'agents', 'sessions', 'sessionQuery', 'sessi
 const config = JSON.parse(readFileSync(process.env.MESSAGE_AGENT_CONFIG, 'utf8').replace(/^\uFEFF/, ''));
 const token = readFileSync(config.control_token_file, 'utf8').trim();
 const brandSymbol = readFileSync(new URL('./assets/brand/message-agent-symbol.svg', import.meta.url));
-const { SessionId } = await import(pathToFileURL(join(config.harness_root, 'packages/core/session/src/index.ts')));
-const { createUserMessage, BlockAssembler } = await import(pathToFileURL(join(config.harness_root, 'packages/llm/llm/src/index.ts')));
-const { defineTool } = await import(pathToFileURL(join(config.harness_root, 'packages/core/tools/src/index.ts')));
+// 引擎包导入：构建版引擎（部署目录、扁平 node_modules）和开发态（pnpm 源码仓 + tsx）
+// 的解析位置不同，逐个候选尝试：
+//   ① 引擎根 node_modules/<name>/lib/index.js                       —— 部署目录布局
+//   ② 引擎根 node_modules/.pnpm/node_modules/<name>/lib/index.js    —— pnpm 隐藏 hoist（开发态）
+//   ③ 引擎根 <src 路径>                                            —— 开发态 TS 源码（tsx 转译）
+// 以前只走 ③（绝对路径 import 源码）：开发态靠 tsx 能跑，构建版引擎没有 src/
+// 且 Node strip 模式不支持参数属性语法，启动直接崩（实测踩到）。
+async function importEngine(pkgName, srcRel) {
+  const root = config.harness_root;
+  const parts = pkgName.split('/');
+  const candidates = [
+    pathToFileURL(join(root, 'node_modules', ...parts, 'lib', 'index.js')).href,
+    pathToFileURL(join(root, 'node_modules', '.pnpm', 'node_modules', ...parts, 'lib', 'index.js')).href,
+    pathToFileURL(join(root, srcRel)).href,
+  ];
+  let last;
+  for (const url of candidates) {
+    try { return await import(url); } catch (error) { last = error; }
+  }
+  throw last;
+}
+const { SessionId } = await importEngine('@deepseek-ai/dsh-session', 'packages/core/session/src/index.ts');
+const { createUserMessage, BlockAssembler } = await importEngine('@deepseek-ai/dsh-llm', 'packages/llm/llm/src/index.ts');
+const { defineTool } = await importEngine('@deepseek-ai/dsh-tools', 'packages/core/tools/src/index.ts');
 
 function respond(res, code, body) {
   res.writeHead(code, {'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store'});

@@ -62,6 +62,7 @@ Windows 登录任务 `Messaging Agent` 托管 `launch.py`，共同管理 Harness
 | [unlocked-db-protocol.md](docs/unlocked-db-protocol.md) | **本项目唯一需要的外部输入**：已解锁目录长什么样（manifest v1 + `plain/`） |
 | [self-unlock-prompt.md](docs/self-unlock-prompt.md) | 自己准备数据：**发给你的 Agent 的提示词**（准备 / 排障两段）+ 自检命令 |
 | [delivery.md](docs/delivery.md) | 两种交付方式（你提供解锁 / 客户自己用 Agent 解锁）、验收标准、平台限制 |
+| [packaging.md](docs/packaging.md) | **打包与发版**：build-package.ps1 / 引擎构建与裁剪 / Setup.cmd 一键交付 / 升级小包 / 发版前验收 |
 | [architecture.md](docs/architecture.md) | 分层、数据流、模块边界 |
 | [message-home-design.md](docs/message-home-design.md) | 「消息」首页的产品约定与实现取舍（含逐条钉住的用户要求） |
 | [manual-message-organizer.md](docs/manual-message-organizer.md) | 手动触发的消息整理链路 |
